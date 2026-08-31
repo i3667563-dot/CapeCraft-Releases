@@ -1,0 +1,13 @@
+{
+	"required": true,
+	"minVersion": "0.8",
+	"package": "dev.ggtv.capecraft.mixin",
+	"compatibilityLevel": "JAVA_21",
+	"client": [
+		"CapeFeatureRendererMixin",
+		"CapeFeatureRendererAccessor"
+	],
+	"injectors": {
+		"defaultRequire": 1
+	}
+}
