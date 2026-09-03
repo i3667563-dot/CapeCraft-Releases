@@ -117,7 +117,10 @@ object WebpDecoder {
     ): AnimatedImage {
         val canvas = IntArray(w * h) { bgColor }
         val outFrames = ArrayList<Frame>(list.size)
-        val savedBefore = ArrayList<IntArray>()
+        // Состояния «до наложения» каждого кадра по индексу, но только для тех,
+        // что объявили PREVIOUS-storage (dispose=2) — остальные null, копия
+        // холста не создаётся (типичный случай экономит память/CPU).
+        val savedBefore = arrayOfNulls<IntArray>(list.size)
 
         for ((i, f) in list.withIndex()) {
             // Применяем dispose предыдущего кадра (состояние вывода после кадра i-1 ->
@@ -126,11 +129,13 @@ object WebpDecoder {
                 val prev = list[i - 1]
                 when (prev.dispose) {
                     1 -> fillRect(canvas, w, prev.x, prev.y, prev.w, prev.h, bgColor)
-                    2 -> if (savedBefore.size > i - 1) { savedBefore[i - 1].copyInto(canvas) }
+                    2 -> savedBefore[i - 1]?.copyInto(canvas)
                 }
             }
-            // Запоминаем состояние до наложения текущего кадра (нужно для PREVIOUS).
-            savedBefore.add(canvas.copyOf())
+            // Запоминаем состояние до наложения текущего кадра — только если
+            // этот кадр объявил PREVIOUS-storage (dispose=2), по его индексу.
+            // Для типичных анимаций (dispose=0) копия холста не создаётся.
+            if (f.dispose == 2) savedBefore[i] = canvas.copyOf()
 
             // Тело кадра.
             val body = f.payload

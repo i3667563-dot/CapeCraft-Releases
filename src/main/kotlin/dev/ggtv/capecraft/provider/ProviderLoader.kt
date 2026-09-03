@@ -10,12 +10,14 @@ import dev.ggtv.capecraft.cren.Value
  * ```
  * capeCraft {
  *     providers [
- *         { name = "trusted"  type = "url"  url = ".../{username}.png" }
- *         { name = "local"    type = "file" path = "{root}/capes/{uuid}.png" }
- *         { name = "api"      type = "json" url = "..." extract = "$.data.cape_url" }
+ *         { name = "trusted", type = "url",  url = ".../{username}.png" }
+ *         { name = "local",   type = "file", path = "{root}/capes/{uuid}.png" }
+ *         { name = "api",     type = "json", url = "...", extract = "$.data.cape_url" }
  *     ]
  * }
  * ```
+ *
+ * Пары словаря разделяются запятыми (как и элементы массива).
  *
  * Порядок в списке = порядок fallback: первый провайдер пробуется первым,
  * при ошибке — следующий. Ключевые имена вынесены в константы, чтобы

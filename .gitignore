@@ -1,23 +1,69 @@
-# Gradle
+# ==========================================
+# CapeCraft — .gitignore
+# Fabric 1.21.10 + Kotlin + JDK 21 + Loom
+# ==========================================
+
+# --- Gradle ---
 .gradle/
 build/
+!gradle/wrapper/gradle-wrapper.jar
+!gradle/wrapper/gradle-wrapper.properties
+!gradlew
+!gradlew.bat
 .kotlin/
 
-# Loom / run
+# --- Loom /运行时 run-данные ---
 run/
+run_server/
 
-# IntelliJ IDEA
+# --- Кэш лут-таблиц и процессов ---
+.fabric/
+logs/
+
+# --- IntelliJ IDEA ---
 .idea/
 *.iml
 *.ipr
 *.iws
+out/
 
-# VS Code
+# --- Eclipse ---
+.project
+.classpath
+.settings/
+bin/
+
+# --- VS Code ---
 .vscode/
 
-# OS
+# --- macOS ---
 .DS_Store
-Thumbs.db
+.AppleDouble
+.LSOverride
+._*
 
-# backups
+# --- Windows ---
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# --- Linux ---
+*~
+.directory
+
+# --- Наш кэш и временные файлы ---
+nohup.out
+*.log
+
+# --- Бэкапы ---
 ~/.backups/
+
+# --- Секреты / локальные настройки ---
+*.jks
+*.keystore
+env.properties
+local.properties
+
+# --- Тестовые ресурсы (генерируются) ---
+src/test/resources/generated/

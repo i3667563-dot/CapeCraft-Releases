@@ -203,7 +203,11 @@ object PngDecoder {
                 1 -> fill(canvas, width, pendingRect, 0) // BACKGROUND
                 2 -> restoreState.copyInto(canvas) // PREVIOUS
             }
-            restoreState = canvas.copyOf()
+            // restoreState нужен только если ТЕКУЩИЙ кадр объявил PREVIOUS-storage
+            // (dispose=2): тогда следующий кадр восстановит состояние ДО наложения
+            // этого. Для типичных анимаций (dispose=0/NONE) копия холста не нужна —
+            // экономим большой copyOf на каждый кадр.
+            if (fc.disposeOp == 2) restoreState = canvas.copyOf()
 
             // Данные кадра в продолжении потока.
             val region = Raster(raw, palette, bitDepth, colorType, bpp, fc.w, fc.h, source)

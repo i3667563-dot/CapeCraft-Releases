@@ -15,8 +15,8 @@ import java.nio.file.Path
  * ```
  * capeCraft {
  *     providers [
- *         { name = "trusted" type = "url"  url = "https://.../{username}.png" }
- *         { name = "local"   type = "file" path = "{root}/capes/{uuid}.png" }
+ *         { name = "trusted", type = "url",  url = "https://.../{username}.png" }
+ *         { name = "local",   type = "file", path = "{root}/capes/{uuid}.png" }
  *     ]
  *     limits {
  *         maxPixelsPerFrame = 4000000
@@ -26,6 +26,10 @@ import java.nio.file.Path
  *     }
  * }
  * ```
+ *
+ * Внимание: в словарях (фигурные скобки) пары разделяются запятыми — CREN
+ * не принимает записи через пробел, как обычный `key = value`. То же самое
+ * для элементов массива (квадратные скобки): между ними нужны запятые.
  *
  * Если файла нет — создаёт дефолтный и использует его. Ошибки парсинга
  * не роняют мод: [providers]/[limits] остаются дефолтными, а описание
@@ -94,11 +98,11 @@ class CapeConfig {
                 providers [
                     # URL-провайдер: прямая ссылка на картинку.
                     # {username} — имя игрока, {uuid} — UUID без дефисов.
-                    { name = "example"  type = "url"   url = "https://example.com/capes/{username}.png" }
+                    { name = "example", type = "url", url = "https://example.com/capes/{username}.png" }
                     # JSON-провайдер: тянем URL плаща из JSON по инструкции.
-                    # { name = "api" type = "json" url = "https://api.example.com/cape?u={username}" extract = "$.data.cape_url" }
+                    # { name = "api", type = "json", url = "https://api.example.com/cape?u={username}", extract = "$.data.cape_url" }
                     # Локальный файл в папке игры: {root} = папка игры.
-                    # { name = "local" type = "file" path = "{root}/capes/{uuid}.png" }
+                    # { name = "local", type = "file", path = "{root}/capes/{uuid}.png" }
                 ]
                 limits {
                     # Пикселей в одном кадре (ширина*высота), дальше — сжатие.

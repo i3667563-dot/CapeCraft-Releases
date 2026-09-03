@@ -33,12 +33,13 @@ object CapeCommands {
     }
 
     private fun reload(ctx: CommandContext<FabricClientCommandSource>, registry: CapeRegistry): Int {
-        // Перечитать конфиг и пересоздать реестр с новыми провайдерами/лимитами.
+        // Перечитать конфиг и перезагрузить провайдеры/лимиты/плащи в том же
+        // реестре (бесшовно: старые текстуры висят, пока новые грузятся в фоне).
         val cfg = CapeCraftClient.config
         cfg.reload()
-        CapeCraftClient.replaceRegistry(CapeRegistry(providers = cfg.providers, root = cfg.rootFor()))
+        registry.reload(cfg.providers, cfg.limits, cfg.rootFor())
         val msg = if (cfg.lastError != null) " с ошибкой: ${cfg.lastError}" else ""
-        ctx.source.sendFeedback(Text.literal("Конфиг перезагружен ($cfg.path). Провайдеров: ${cfg.providers.size}$msg"))
+        ctx.source.sendFeedback(Text.literal("Конфиг перезагружен ($cfg.path). Провайдеров: ${cfg.providers.size}, перезагрузка плащей в фоне$msg"))
         return 1
     }
 

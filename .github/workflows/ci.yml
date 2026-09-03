@@ -1,0 +1,81 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build
+        run: ./gradlew build
+
+      - name: Upload artifact
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: capecraft
+          path: build/libs/*.jar
+          retention-days: 14
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build for release
+        run: ./gradlew build
+
+      - name: Get version from tag
+        id: meta
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "CapeCraft ${{ steps.meta.outputs.version }}"
+          tag_name: ${{ github.ref_name }}
+          body: |
+            ## CapeCraft ${{ steps.meta.outputs.version }}
+
+            Кастомные анимированные плащи для Minecraft 1.21.10 (Fabric).
+
+            ### Установка
+            1. Установи [Fabric Loader](https://fabricmc.net/) для Minecraft 1.21.10
+            2. Скопируй `capecraft-${{ steps.meta.outputs.version }}.jar` в папку `mods/`
+            3. Запусти игру
+
+            ### Поддерживаемые форматы
+            PNG • APNG • GIF • WebP (lossless)
+
+            ### Конфигурация
+            `config/capecraft.crn` — создаётся автоматически при первом запуске.
+            См. [README](https://github.com/${{ github.repository }}/blob/main/README.md) для подробностей.
+          files: build/libs/*.jar
+          draft: false
+          prerelease: true
