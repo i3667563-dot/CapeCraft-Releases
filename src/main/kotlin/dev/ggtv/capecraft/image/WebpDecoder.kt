@@ -16,6 +16,18 @@ package dev.ggtv.capecraft.image
  */
 object WebpDecoder {
 
+    /**
+     * Ленивый debug-файл: создаётся только при включённой системной свойстве
+     * `webp.debug` и только если каталог /tmp/opencode существует.
+     * Не падает на CI или чужих машинах.
+     */
+    private val debugFile: java.io.File? by lazy {
+        if (System.getProperty("webp.debug") == null) return@lazy null
+        val f = java.io.File("/tmp/opencode/webp_debug.txt")
+        f.parentFile?.mkdirs()
+        f
+    }
+
     fun decode(data: ByteArray, source: String? = null): AnimatedImage {
         if (data.size < 12) throw ImageDecodeException("файл слишком короткий", source)
         if (isAscii(data, 0, "RIFF")) {
@@ -270,18 +282,14 @@ object WebpDecoder {
             }
         }
 
-        if (System.getProperty("webp.debug") != null) {
-            java.io.File("/tmp/opencode/webp_debug.txt").appendText(
-                "[webp] ${source} ${w}x${h} alpha=$alphaUsed transforms=${transforms.map { it.javaClass.simpleName }} imgW=$imgW imgH=$imgH\n"
-            )
-        }
+        debugFile?.appendText(
+            "[webp] ${source} ${w}x${h} alpha=$alphaUsed transforms=${transforms.map { it.javaClass.simpleName }} imgW=$imgW imgH=$imgH\n"
+        )
 
         // Основное изображение: color-cache-info + meta-prefix + данные.
         // main.pixels имеют subsampled-размер (после всех трансформ).
         val main = decodeMainImage(imgW, imgH, br, source)
-        if (System.getProperty("webp.debug") != null) {
-            java.io.File("/tmp/opencode/webp_debug.txt").appendText("[webp] main ${imgW}x${imgH} pixels=${main.pixels.size} first=${main.pixels.take(8).joinToString(",") { Integer.toHexString(it) }}\n")
-        }
+        debugFile?.appendText("[webp] main ${imgW}x${imgH} pixels=${main.pixels.size} first=${main.pixels.take(8).joinToString(",") { Integer.toHexString(it) }}\n")
         var result = main.pixels
 
         // Применяем обратные трансформы в обратном порядке появления.
@@ -341,10 +349,8 @@ object WebpDecoder {
         }
         // Палитра: изображение width=size, height=1, без RIFF/размеров/трансформ.
         val raw = decodeEntropyImage(size, 1, br, source)
-        if (System.getProperty("webp.debug") != null) {
-            java.io.File("/tmp/opencode/webp_debug.txt").appendText(
-                "[palette] pos=${br.pos} size=$size widthBits=$widthBits raw=${raw.take(12).joinToString(",") { Integer.toHexString(it) }}\n")
-        }
+        debugFile?.appendText(
+            "[palette] pos=${br.pos} size=$size widthBits=$widthBits raw=${raw.take(12).joinToString(",") { Integer.toHexString(it) }}\n")
         val finalColors = 1 shl (8 shr widthBits)
         val palette = IntArray(finalColors)
         if (size > 0) palette[0] = raw[0]
@@ -359,10 +365,8 @@ object WebpDecoder {
                 ((g and 0xFF) shl 8) or (b and 0xFF)
         }
         // Хвост (индексы от size до finalColors) уже 0 (чёрный/прозрачный).
-        if (System.getProperty("webp.debug") != null) {
-            java.io.File("/tmp/opencode/webp_debug.txt").appendText(
-                "[palette-out] pos=${br.pos} pal0..15=${palette.take(16).joinToString(",") { Integer.toHexString(it) }}\n")
-        }
+        debugFile?.appendText(
+            "[palette-out] pos=${br.pos} pal0..15=${palette.take(16).joinToString(",") { Integer.toHexString(it) }}\n")
         return widthBits to palette
     }
 
@@ -376,9 +380,9 @@ object WebpDecoder {
                 val block = (y shr sizeBits) * tw + (x shr sizeBits)
                 val mode = (map[block] ushr 8) and 0xFF
                 val pred = predict(pixels, w, x, y, mode)
-                if (System.getProperty("webp.debug") != null) {
+                if (debugFile != null) {
                     val pp = pixels[p]
-                    java.io.File("/tmp/opencode/webp_debug.txt").appendText(
+                    debugFile!!.appendText(
                         "[pred] y=$y x=$x mode=$mode residual(${(pp ushr 16) and 255},${(pp ushr 8) and 255},${pp and 255}) pred(${(pred ushr 16) and 255},${(pred ushr 8) and 255},${pred and 255}) -> ${addChannels(pp, pred)}\n")
                 }
                 pixels[p] = addChannels(pixels[p], pred)
@@ -544,13 +548,9 @@ object WebpDecoder {
 
     private fun decodeMainImage(w: Int, h: Int, br: BitReader, source: String?): DecodeResult {
         val cache = readColorCacheInfo(br, source)
-        if (System.getProperty("webp.debug") != null) {
-            java.io.File("/tmp/opencode/webp_debug.txt").appendText("[webp] mainImage ${w}x$h cacheUsed=${cache.used} bits=${cache.bits}\n")
-        }
+        debugFile?.appendText("[webp] mainImage ${w}x$h cacheUsed=${cache.used} bits=${cache.bits}\n")
         val useMeta = br.read(1) == 1
-        if (System.getProperty("webp.debug") != null) {
-            java.io.File("/tmp/opencode/webp_debug.txt").appendText("[webp] mainImage useMeta=$useMeta\n")
-        }
+        debugFile?.appendText("[webp] mainImage useMeta=$useMeta\n")
         if (useMeta) {
             val prefixBits = br.read(3) + 2
             val pw = divRoundUp(w, 1 shl prefixBits)
@@ -617,7 +617,6 @@ object WebpDecoder {
     ): IntArray {
         val out = IntArray(w * h)
         val hasMeta = groups.size > 1
-        val debugFile = if (System.getProperty("webp.debug") != null) java.io.File("/tmp/opencode/webp_debug.txt") else null
         debugFile?.appendText("[webp] decodeData ${w}x$h hasMeta=$hasMeta prefixBits=$prefixBits\n")
         val pw = if (hasMeta) divRoundUp(w, 1 shl prefixBits) else 0
         var pos = 0
@@ -633,7 +632,7 @@ object WebpDecoder {
             val s = g.green.decode(br)
             val isPal = w * h <= 2000 && !hasMeta && pw == 0
             if (debugFile != null && (pos < 8 || (isPal && pos < 24))) {
-                debugFile.appendText("[webp] decode pos=$pos symPos=${br.pos} s=$s\n")
+                debugFile!!.appendText("[webp] decode pos=$pos symPos=${br.pos} s=$s\n")
             }
             if (s < 256) {
                 val green = s
@@ -642,7 +641,7 @@ object WebpDecoder {
                 val alpha = g.alpha.decode(br)
                 val px = (alpha shl 24) or (red shl 16) or (green shl 8) or blue
                 if (debugFile != null && (pos < 45 || (isPal && pos < 24))) {
-                    debugFile.appendText("[chan] pos=$pos g=$green r=$red b=$blue a=$alpha brpos=${br.pos}\n")
+                    debugFile!!.appendText("[chan] pos=$pos g=$green r=$red b=$blue a=$alpha brpos=${br.pos}\n")
                 }
                 cache.insert(px)
                 out[pos++] = px
@@ -652,7 +651,7 @@ object WebpDecoder {
                 val distCode = g.distance.decode(br)
                 val dist = distanceValue(distCode, br, w)
                 if (debugFile != null && (pos < 90 || (isPal && pos < 24))) {
-                    debugFile.appendText("[lz77] pos=$pos lenCode=$lengthCode len=$length distCode=$distCode dist=$dist brpos=${br.pos}\n")
+                    debugFile!!.appendText("[lz77] pos=$pos lenCode=$lengthCode len=$length distCode=$distCode dist=$dist brpos=${br.pos}\n")
                 }
                 for (i in 0 until length) {
                     val from = pos - dist
@@ -711,11 +710,6 @@ object WebpDecoder {
                         return symbols[len][code - first]
                     }
                 }
-            }
-            if (System.getProperty("webp.debug") != null) {
-                java.io.File("/tmp/opencode/webp_debug.txt").appendText(
-                    "[webp] huffman miss maxLen=$maxLen lastCode=$code counts=${counts.take(12).joinToString(",")} first=${firstCodes.take(12).joinToString(",")}\n"
-                )
             }
             throw IllegalStateException("не найден код Хаффмана")
         }
@@ -779,7 +773,6 @@ object WebpDecoder {
             ccl[CODE_LENGTH_ORDER[i]] = br.read(3)
         }
         val codeLengthLen = Huffman.fromLengths(ccl)
-        val debugFile = if (System.getProperty("webp.debug") != null) java.io.File("/tmp/opencode/webp_debug.txt") else null
         debugFile?.appendText("[webp] huffStep pos=${br.pos} alpha=$alphabetSize numCL=$numCodeLengths ccl=${ccl.joinToString(",")}\n")
 
         val maxSymbol = if (br.read(1) == 0) {
@@ -834,11 +827,11 @@ object WebpDecoder {
                 debugFile?.appendText("step i=${symbol - 1} code=$code\n")
             }
         }
-        if (System.getProperty("webp.debug") != null) {
+        if (debugFile != null) {
             val nz = lengths.count { it > 0 }
             val mx = lengths.maxOrNull() ?: 0
             val all = if (maxSymbol == 209 || mx == 8 || mx == 6) lengths.take(maxSymbol).joinToString(",") else ""
-            java.io.File("/tmp/opencode/webp_debug.txt").appendText(
+            debugFile!!.appendText(
                 "[webp] huff alpha=$alphabetSize maxSym=$maxSymbol nz=$nz maxLen=$mx posEnd=${br.pos}\n$all\n"
             )
         }
