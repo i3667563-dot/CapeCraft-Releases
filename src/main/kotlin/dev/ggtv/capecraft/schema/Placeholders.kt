@@ -46,6 +46,7 @@ object Placeholders {
         "uuid" -> ctx.uuid
         "name" -> ctx.name
         "root" -> ctx.root
-        else -> throw JsonError("неизвестный плейсхолдер «{$key}» в «$template»")
+        else -> dev.ggtv.capecraft.api.CapeApiHolder.placeholder(key, ctx)
+            ?: throw JsonError("неизвестный плейсхолдер «{$key}» в «$template»")
     }
 }

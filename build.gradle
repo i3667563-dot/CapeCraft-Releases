@@ -1,13 +1,53 @@
+buildscript {
+	repositories {
+		maven {
+			name = 'Fabric'
+			url = 'https://maven.fabricmc.net/'
+		}
+		mavenCentral()
+		gradlePluginPortal()
+	}
+	dependencies {
+		classpath "net.fabricmc:fabric-loom:${project.loom_version}"
+	}
+}
+
 plugins {
-	id 'fabric-loom' version "${loom_version}"
+	// Kotlin применяется всегда; loom — условно ниже (remap для yarn vs no-remap
+	// для необфусцированных версий MC), поэтому не в plugins block.
 	id 'org.jetbrains.kotlin.jvm' version "${kotlin_version}"
 }
 
 version = project.mod_version
 group = project.maven_group
 
+// Версия MC выбирается флагом: ./gradlew build -Pmc=1.21.10 (или 26.2).
+// Версионные зависимости и исходники живут в versions/<mc>/.
+def mc = providers.gradleProperty('mc').getOrElse('26.2')
+def verProps = new Properties()
+file("versions/${mc}/gradle.properties").withInputStream { verProps.load(it) }
+
+// yarn-версии нужен полный ремап (fabric-loom legacy); необфусцированная
+// MC (26.2) — no-remap (net.fabricmc.fabric-loom).
+if (verProps.yarn_mappings) {
+	apply plugin: 'fabric-loom'
+} else {
+	apply plugin: 'net.fabricmc.fabric-loom'
+}
+
 base {
 	archivesName = project.archives_base_name
+}
+
+// Подключить версионные исходники/ресурсы из versions/<mc>.
+sourceSets {
+	main {
+		kotlin.srcDir "versions/${mc}/src/main/kotlin"
+		resources.srcDir "versions/${mc}/src/main/resources"
+	}
+	test {
+		kotlin.srcDir "versions/${mc}/src/test/kotlin"
+	}
 }
 
 repositories {
@@ -15,11 +55,17 @@ repositories {
 }
 
 dependencies {
-	minecraft "com.mojang:minecraft:${project.minecraft_version}"
-	mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
-	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
-	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
-	modImplementation "net.fabricmc:fabric-language-kotlin:${project.flk_version}"
+	minecraft "com.mojang:minecraft:${verProps.minecraft_version}"
+
+	// 1.21.10 — yarn mappings + modImplementation (remap); 26.2 — необфусцирована,
+	// без mappings, обычный implementation.
+	if (verProps.yarn_mappings) {
+		add("mappings", "net.fabricmc:yarn:${verProps.yarn_mappings}:v2")
+	}
+	def depType = verProps.yarn_mappings ? 'modImplementation' : 'implementation'
+	add(depType, "net.fabricmc:fabric-loader:${verProps.loader_version}")
+	add(depType, "net.fabricmc.fabric-api:fabric-api:${verProps.fabric_version}")
+	add(depType, "net.fabricmc:fabric-language-kotlin:${verProps.flk_version}")
 
 	testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
 	testImplementation "org.jetbrains.kotlin:kotlin-test-junit5:${project.kotlin_version}"
@@ -58,6 +104,6 @@ tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
 java {
 	withSourcesJar()
 	toolchain {
-		languageVersion = JavaLanguageVersion.of(21)
+		languageVersion = JavaLanguageVersion.of(verProps.java_version as int)
 	}
 }

@@ -67,3 +67,6 @@ local.properties
 
 # --- Тестовые ресурсы (генерируются) ---
 src/test/resources/generated/
+
+# --- Собранные jar'ы для релиза ---
+artifacts/

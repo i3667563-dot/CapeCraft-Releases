@@ -39,6 +39,7 @@ class HttpFetcher(
             }
             getBytes(capeUrl)
         }
+        is Resolved.Addon -> r.source.fetch(r.values)
     }
 
     private fun getBytes(url: String): ByteArray {

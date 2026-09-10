@@ -1,7 +1,10 @@
 package dev.ggtv.capecraft.provider
 
+import dev.ggtv.capecraft.condition.ProviderSelector
 import dev.ggtv.capecraft.schema.Json
 import dev.ggtv.capecraft.schema.JsonPath
+import dev.ggtv.koren.EmptyWorldContext
+import dev.ggtv.koren.WorldContext
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path as JPath
@@ -32,6 +35,7 @@ class FileFetcher : CapeFetcher {
             val url = JsonPath.extractString(j, r.extract)
             readFile(url)
         }
+        is Resolved.Addon -> r.source.fetch(r.values)
     }
 
     private fun readFile(path: String): ByteArray {
@@ -47,10 +51,15 @@ class FileFetcher : CapeFetcher {
 }
 
 /**
- * Пройти провайдеров по порядку — берём первого, кто отдал байты
+ * Пройти провайдеров по порядку выбора — берём первого, кто отдал байты
  * (fallback: при ошибке пробуем следующего).
  *
- * @param providers уже отсортированные в порядке приоритета провайдеры
+ * Порядок выбора определяет [ProviderSelector.select]: сначала совпавшие
+ * условия по убыванию приоритета, затем default-провайдеры. См. также роадмап п. 2.
+ *
+ * @param providers все провайдеры из конфига (без учёта мира)
+ * @param world состояние мира для условий `when` (по умолчанию мир недоступен —
+ *          тогда провайдеры с условием не выбираются, остаются только default)
  * @param fetcher источник байтов (прод — HTTP, тесты — фейк)
  * @return байты первой успешной капки; если все упали — [FetchError]
  *          со сводкой по каждому провайдеру.
@@ -60,9 +69,11 @@ fun resolveCape(
     ctx: dev.ggtv.capecraft.schema.Placeholders.Context,
     root: String,
     fetcher: CapeFetcher,
+    world: WorldContext = EmptyWorldContext,
 ): ByteArray {
+    val ordered = ProviderSelector.select(providers, world)
     val errors = mutableListOf<String>()
-    for (p in providers) {
+    for (p in ordered) {
         val resolved = try {
             p.resolve(ctx, root)
         } catch (e: Exception) {

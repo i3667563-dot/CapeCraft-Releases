@@ -1,7 +1,7 @@
 package dev.ggtv.capecraft.provider
 
-import dev.ggtv.capecraft.cren.CrenConfig
 import dev.ggtv.capecraft.schema.Placeholders
+import dev.ggtv.koren.KorenConfig
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -115,7 +115,7 @@ class ResolveCapeTest {
 }
 
 class ProviderLoaderTest {
-    private fun crn(body: String): CrenConfig = CrenConfig.fromString(
+    private fun crn(body: String): KorenConfig = KorenConfig.fromString(
         """capeCraft {
             |    providers $body
             |}""".trimMargin(),
@@ -154,5 +154,42 @@ class ProviderLoaderTest {
     fun `json provider without extract fails`() {
         val cfg = crn("""[{ name = "x", type = "json", url = "https://a" }]""")
         assertThrows(IllegalArgumentException::class.java) { ProviderLoader.load(cfg) }
+    }
+
+    @Test
+    fun `parses when and priority`() {
+        val cfg = crn(
+            """[
+            |    {
+            |        name = "snow",
+            |        type = "url",
+            |        url = "https://a/snow.png",
+            |        when: { biome.precipitation: "snow", time.period: "night" },
+            |        priority = 20
+            |    },
+            |    { name = "def", type = "url", url = "https://a/def.png" }
+            |]""".trimMargin(),
+        )
+        val providers = ProviderLoader.load(cfg)
+        assertEquals(2, providers.size)
+
+        val snow = providers[0]
+        assertEquals("snow", snow.name)
+        assertEquals(20, snow.priority)
+        val cond = snow.condition!!
+        assertEquals(2, cond.predicates.size)
+        assertEquals("precipitation", cond.predicates[0].field)
+
+        val def = providers[1]
+        assertEquals(null, def.condition)
+        assertEquals(0, def.priority)
+    }
+
+    @Test
+    fun `provider without when stays default`() {
+        val cfg = crn("""[{ name = "d", type = "url", url = "https://a" }]""")
+        val p = ProviderLoader.load(cfg).single()
+        assertEquals(null, p.condition)
+        assertEquals(0, p.priority)
     }
 }

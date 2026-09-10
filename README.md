@@ -1,18 +1,27 @@
 # CapeCraft
 
-Кастомные анимированные плащи для Minecraft 1.21.10 (Fabric). Поддержка PNG, APNG, GIF и WebP — включая полную анимацию с прозрачностью и бесконечным циклом.
+Кастомные анимированные плащи для Minecraft **1.21.1 / 1.21.4 / 1.21.8 / 1.21.10 / 1.21.11 / 26.2** (Fabric). Поддержка PNG, APNG, GIF и WebP — включая полную анимацию с прозрачностью и бесконечным циклом. Все версии собираются из одного репозитория.
 
 ## Установка
 
-1. Установи [Fabric Loader](https://fabricmc.net/) для Minecraft **1.21.10**
-2. Скопируй `capecraft-0.1.0.jar` из [Releases](https://github.com/i3667563-dot/CapeCraft-Releases/releases) в папку `mods/`
+1. Установи [Fabric Loader](https://fabricmc.net/) для своей версии Minecraft
+2. Скопируй `capecraft-1.0.0-<версия>.jar` из [Releases](https://github.com/i3667563-dot/CapeCraft-Releases/releases) в папку `mods/`
 3. Запусти игру — мод загрузится автоматически
 
 **Требования:** Fabric API, Fabric Language Kotlin (оба входят в стандартные сборки Fabric).
 
+## Сборка из исходников
+
+Версия выбирается флагом `-Pmc` (дефолт — 26.2):
+
+```bash
+./gradlew build -Pmc=1.21.1      # и 1.21.4, 1.21.8, 1.21.10, 1.21.11 (yarn, JDK 21)
+./gradlew build -Pmc=26.2        # сборка под Minecraft 26.2 (необфусц., JDK 26)
+```
+
 ## Конфигурация
 
-При первом запуске создаётся `config/capecraft.crn`. Формат — [Cren](https://github.com/i3667563-dot/CapeCraft), минималистичный и читаемый.
+При первом запуске создаётся `config/capecraft.kn`. Формат — [KoreN](https://github.com/i3667563-dot/CapeCraft) над ядром Cren, минималистичный и читаемый.
 
 ### Провайдеры
 

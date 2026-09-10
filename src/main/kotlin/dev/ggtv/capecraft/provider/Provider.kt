@@ -1,6 +1,9 @@
 package dev.ggtv.capecraft.provider
 
+import dev.ggtv.capecraft.condition.Condition
 import dev.ggtv.capecraft.schema.Placeholders
+import dev.ggtv.capecraft.api.provider.CapeSource
+import dev.ggtv.capecraft.api.provider.CapeValues
 
 /**
  * Виды результата, который умеет отдавать провайдер.
@@ -23,11 +26,28 @@ sealed interface Source {
 /**
  * Провайдер плаща — один элемент списка `capeCraft.providers[]`.
  *
- * [source] содержит шаблоны с плейсхолдерами (`{username}`, ...);
- * [resolve] подставляет их и возвращает конкретный [Resolved], который
- * уже можно скачать/прочитать напрямую.
+ * Встроенные провайдеры (url/file/json) хранят шаблон в [source].
+ * Аддон-провайдеры (зарегистрированные через addon-API) хранят [addonSource]:
+ * резолвер и фетчер определены аддоном, а конкретные параметры — в [values].
+ *
+ * [condition] — необязательное условие выбора (`when { ... }` в `.kn`):
+ * провайдер становится активным только когда условие выполняется на живом
+ * мире. Без условия провайдер активен всегда (default). [priority] задаёт
+ * приоритет среди совпадших провайдеров: выше — ближе к началу fallback-цепи.
+ *
+ * @param condition условие, при котором провайдер активен (null = всегда).
+ * @param priority приоритет выбора — по умолчанию 0 (порядок в списке).
+ * @param addonSource non-null для аддон-провайдера (fetch определён аддоном).
+ * @param values параметры из словаря .kn для аддон-провайдера (null для встроенного).
  */
-class Provider(val name: String, val source: Source) {
+class Provider(
+    val name: String,
+    val source: Source,
+    val condition: Condition? = null,
+    val priority: Int = 0,
+    val addonSource: CapeSource? = null,
+    val values: CapeValues? = null,
+) {
 
     /**
      * Подставить плейсхолдеры и получить конкретный источник.
@@ -35,6 +55,10 @@ class Provider(val name: String, val source: Source) {
      */
     fun resolve(ctx: Placeholders.Context, root: String): Resolved {
         val c = ctx.copy(root = root)
+        if (addonSource != null) {
+            val rendered = Placeholders.render("addon://${name}", c)
+            return Resolved.Addon(addonSource, values ?: CapeValues(name, "addon", emptyMap()), rendered)
+        }
         return when (val s = source) {
             is Source.Url -> Resolved.Url(Placeholders.render(s.template, c))
             is Source.File -> Resolved.File(Placeholders.render(s.template, c))
@@ -51,4 +75,6 @@ sealed interface Resolved {
     data class Url(val url: String) : Resolved
     data class File(val path: String) : Resolved
     data class Json(val url: String, val extract: String) : Resolved
+    /** Аддон-провайдер: fetch определён аддоном через [source]. */
+    data class Addon(val source: CapeSource, val values: CapeValues, val debugUrl: String) : Resolved
 }

@@ -1,21 +1,21 @@
 package dev.ggtv.capecraft
 
-import dev.ggtv.capecraft.cren.CrenConfig
 import dev.ggtv.capecraft.memory.Limits
 import dev.ggtv.capecraft.provider.ProviderLoader
 import dev.ggtv.capecraft.provider.Provider
+import dev.ggtv.koren.KorenConfig
 import net.fabricmc.loader.api.FabricLoader
 import java.nio.file.Files
 import java.nio.file.Path
 
 /**
- * Загрузка конфига мода из `config/capecraft.crn`.
+ * Загрузка конфига мода из `config/capecraft.kn`.
  *
- * Формат (см. PLAN.md, этап 4):
+ * Формат — `.kn` (KoreN), надмножество `.crn` (см. koren/SPEC.md):
  * ```
  * capeCraft {
  *     providers [
- *         { name = "trusted", type = "url",  url = "https://.../{username}.png" }
+ *         { name = "trusted", type = "url",  url = "https://.../{username}.png" },
  *         { name = "local",   type = "file", path = "{root}/capes/{uuid}.png" }
  *     ]
  *     limits {
@@ -27,7 +27,10 @@ import java.nio.file.Path
  * }
  * ```
  *
- * Внимание: в словарях (фигурные скобки) пары разделяются запятыми — CREN
+ * Обратная совместимость: если `capecraft.kn` нет, но есть старый
+ * `capecraft.crn` — он читается тем же парсером (`.crn` ⊂ `.kn`).
+ *
+ * Внимание: в словарях (фигурные скобки) пары разделяются запятыми — форма
  * не принимает записи через пробел, как обычный `key = value`. То же самое
  * для элементов массива (квадратные скобки): между ними нужны запятые.
  *
@@ -48,7 +51,10 @@ class CapeConfig {
     var lastError: String? = null
         private set
 
-    val path: Path = FabricLoader.getInstance().configDir.resolve("capecraft.crn")
+    val path: Path = FabricLoader.getInstance().configDir.resolve("capecraft.kn")
+
+    /** Старый файл формата `.crn` — читается как fallback, если `.kn` нет. */
+    val legacyPath: Path = FabricLoader.getInstance().configDir.resolve("capecraft.crn")
 
     private val rootDir: Path
         get() = FabricLoader.getInstance().gameDir
@@ -60,10 +66,12 @@ class CapeConfig {
     /** Перечитать конфиг с диска (для `/cp reload`). */
     fun reload() {
         try {
-            if (!Files.exists(path)) writeDefault()
-            val cfg = CrenConfig.load(path)
+            val active = if (!Files.exists(path) && Files.exists(legacyPath)) legacyPath else path
+            if (!Files.exists(active)) writeDefault()
+            val cfg = KorenConfig.load(active)
             providers = ProviderLoader.load(cfg)
             limits = parseLimits(cfg)
+            dev.ggtv.capecraft.api.CapeApiHolder.api.config.loadFrom(cfg)
             lastError = null
         } catch (e: Exception) {
             lastError = e.message ?: e.javaClass.simpleName
@@ -74,7 +82,7 @@ class CapeConfig {
     /** Корень для плейсхолдера `{root}` — папка игры (для локальных файлов). */
     fun rootFor(): String = rootDir.toString()
 
-    private fun parseLimits(cfg: CrenConfig): Limits {
+    private fun parseLimits(cfg: KorenConfig): Limits {
         // Если ключа limits нет — оставляем дефолт.
         return try {
             val base = Limits()
@@ -92,17 +100,17 @@ class CapeConfig {
 
     private fun writeDefault() {
         val text = """
-            # CapeCraft — конфиг плащей.
+            # CapeCraft — конфиг плащей (.kn, надмножество .crn).
             # Провайдеры проверяются по порядку: первый успешный отдаёт плащ (fallback).
             capeCraft {
                 providers [
                     # URL-провайдер: прямая ссылка на картинку.
                     # {username} — имя игрока, {uuid} — UUID без дефисов.
-                    { name = "example", type = "url", url = "https://example.com/capes/{username}.png" }
+                    { name = "example", type = "url", url = "https://example.com/capes/{username}.png" },
                     # JSON-провайдер: тянем URL плаща из JSON по инструкции.
-                    # { name = "api", type = "json", url = "https://api.example.com/cape?u={username}", extract = "$.data.cape_url" }
+                    # { name = "api", type = "json", url = "https://api.example.com/cape?u={username}", extract = "$.data.cape_url" },
                     # Локальный файл в папке игры: {root} = папка игры.
-                    # { name = "local", type = "file", path = "{root}/capes/{uuid}.png" }
+                    { name = "local", type = "file", path = "{root}/capes/{uuid}.png" }
                 ]
                 limits {
                     # Пикселей в одном кадре (ширина*высота), дальше — сжатие.
@@ -120,7 +128,7 @@ class CapeConfig {
         Files.writeString(path, text)
     }
 
-    private fun CrenConfig.getIntOr(path: String, def: Long): Long = try {
+    private fun KorenConfig.getIntOr(path: String, def: Long): Long = try {
         getInt(path)
     } catch (e: Exception) {
         def

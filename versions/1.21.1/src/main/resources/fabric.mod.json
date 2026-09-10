@@ -1,0 +1,27 @@
+{
+	"schemaVersion": 1,
+	"id": "capecraft",
+	"version": "${version}",
+	"name": "CapeCraft",
+	"description": "Плащи нового поколения: PNG/APNG/GIF, схемы провайдеров, умная память. Без ограничений вроде «до 128p».",
+	"authors": ["GG_TV"],
+	"license": "MIT",
+	"icon": "assets/capecraft/icon.png",
+	"environment": "client",
+	"entrypoints": {
+		"client": [
+			{ "adapter": "kotlin", "value": "dev.ggtv.capecraft.CapeCraftClient" }
+		],
+		"capecraft:addons": []
+	},
+	"mixins": [
+		"capecraft.mixins.json"
+	],
+	"depends": {
+		"fabricloader": ">=0.19.3",
+		"minecraft": "~1.21.1",
+		"java": ">=21",
+		"fabric-api": "*",
+		"fabric-language-kotlin": ">=1.13.13"
+	}
+}

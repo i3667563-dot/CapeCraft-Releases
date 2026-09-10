@@ -1,11 +1,11 @@
 # CapeCraft — план работ
 
-Мод плащей нового поколения: Fabric 1.21.10, Kotlin, JDK 21.
+Мод плащей нового поколения: Fabric MC 26.2 (необфусцированный), Kotlin, JDK 26.
 Статус пункта — `[x]` только когда функция реально работает и проверена
 (сборка/тесты/игра), а не «просто запускается».
 
 ## Этап 1 — скелет проекта
-- [x] Скаффолд: Fabric 1.21.10 + Kotlin (FLK), JDK 21, loom
+- [x] Скаффолд: Fabric 26.2 + Kotlin (FLK), JDK 26, loom no-remap (ранее 1.21.10)
 - [x] `./gradlew build` проходит, jar собирается
 - [x] `fabric.mod.json` + entrypoint, мод виден в игре
 
@@ -74,8 +74,14 @@
 - Разрешены как стандартная библиотека JDK, так и внешние — при условии, что они будут вшиты в jar'ник (shade/relocate), чтобы пользователь не лез в логи игры из-за отсутствующей библиотеки.
 
 ## Решения (зафиксировано)
-- Загрузчик: Fabric, MC 1.21.10 (yarn 1.21.10+build.3, api 0.138.4, loader 0.19.3)
-- FLK 1.13.13+kotlin.2.4.10, Kotlin 2.4.10, loom 1.17.19, JDK 21
+- Загрузчик: Fabric, **MC 26.2** (необфусцированный — без маппингов; yarn умер на 1.21.11,
+  в манифесте 26.2 нет client_mappings). loader 0.19.5, fabric-api 0.160.0+26.2
+- Loom 1.17.20 no-remap: плагин `net.fabricmc.fabric-loom` (disableObfuscation),
+  без строки `mappings`, `implementation` вместо mod* (mod*-конфигураций нет)
+- FLK 1.14.1+kotlin.2.4.20, Kotlin 2.4.20, toolchain JDK 26, `release`/`jvmTarget` = 21
+- MC-имена: real Mojang (unobfuscated 26.2), см. таблицу yarn→Mojang в AGENTS.md
+- Рендер-пайплайн 26.2: `submit(PoseStack, SubmitNodeCollector, int, AvatarRenderState, float, float)`
+- Команды `/cp` через `ClientCommands` (Fabric command-api-v2 3.1.0), тексты `Component`
 - Без ImageIO/AWT для декодирования: свой декодер PNG/APNG/GIF на Kotlin
   поверх java.util.zip.Inflater (полный контроль скорости и памяти)
 - HTTP через встроенный java.net.http (без новых зависимостей)
@@ -93,60 +99,126 @@
 > Прямой (дословный) порт Cren на JVM-платформы. То же, что Cren —
 > тот же `.crn`-движок, без всякой специфики Minecraft.
 > Выпустить официально как отдельную JVM-библиотеку.
-- [ ] Порт ядра Cren: токенизатор/парсер/резолвер `.crn` (1:1 с Этапом 2)
-- [ ] JVM-библиотека (`kjen`), публикация на Maven/артефакторию
+- [x] Порт ядра Cren: токенизатор/парсер/резолвер `.crn` (1:1 с Этапом 2)
+- [x] JVM-библиотека (`kjen`), публикация на Maven/артефакторию
+  — maven-publish, `publishToMavenLocal` в `~/.m2` (`dev.ggtv:kjen:0.1.0`)
 - [ ] Официальный релиз, версионирование, документация
-- [ ] Тесты-порты из Rust-проекта Cren (100% совпадение поведения)
+- [x] Тесты-порты из Rust-проекта Cren (89 тестов зелёные)
 
 ### 1б. Формат `.kn` — KoreN (Kotlin creN, JVM-аналог Cren под специфику Minecraft)
 > JVM-аналог Cren, но опирается на Minecraft и его функции, а не на базовые
 > сравнения вроде `if .name == "test" { .name = "ok" }`.
 > Это рабочий формат конфигов в моде. Выпустить официально как JVM-библиотеку.
-- [ ] Спецификация KoreN: JVM-аналог Cren с миникайфт-спецификой
-- [ ] Лексика/парсер/резолвер `.kn` (наследует фичи `.crn` из Этапа 2 + MC-подложка)
-- [ ] Специфика Minecraft прямо в языке (см. ниже)
-- [ ] Миграция конфигов `.crn` → `.kn`, обратная совместимость чтения
-- [ ] Официальный релиз KoreN как JVM-библиотеки + встроено в мод
-- [ ] Тесты KoreN (синтаксис + специфика-схемы)
+- [x] Спецификация KoreN: JVM-аналог Cren с миникайфт-спецификой
+  — `koren/SPEC.md` (формат `.kn`: world-корни, функции, динамика, миграция)
+- [x] Лексика/парсер/резолвер `.kn` (наследует фичи `.crn` из Этапа 2 + MC-подложка)
+  — KorenTokenizer (скобки `(`/`)`), KorenParser (вызовы функций → VFunc),
+    KorenResolver (VFunc + world-корни), переиспользует Block/Entry/Value/Path/
+    Span/CrenError/Type от kjen (`kjen` объявлен как `api`, kjen `Value` сделан
+    не-sealed, чтобы Koren добавил VFunc)
+- [x] Специфика Minecraft прямо в языке (см. ниже)
+- [x] Миграция конфигов `.crn` → `.kn`, обратная совместимость чтения
+  — CapeConfig читает `capecraft.kn`, при отсутствии — fallback на `capecraft.crn`
+    (`.crn` ⊂ `.kn`); тесты ProviderLoaderTest переведены на KorenConfig
+- [x] Официальный релиз KoreN как JVM-библиотеки + встроено в мод
+  — `dev.ggtv:koren:0.1.0` в `~/.m2`, mod depends on `implementation "dev.ggtv:koren:0.1.0"`
+- [x] Тесты KoreN (порт 89 kjen-тестов на обратную совместимость `.crn`
+  + функции + world-корни + динамика: 119 тестов зелёные)
 
 #### Специфика Minecraft в KoreN (отличает от Coren)
-- [ ] Блоки-сущности мира: `biome`, `weather`, `time`, `dimension`, `location`
-- [ ] Доступ к полям: `biome.temperature`, `weather.condition`, `dimension.id`
-- [ ] Логика на функциях Minecraft вместо базовых сравнений: вместо
+- [x] Блоки-сущности мира: `biome`, `weather`, `time`, `dimension`, `location`
+  — ecnum WorldRoot + SPI WorldContext (игра реализует, передаёт в KorenConfig;
+    `EmptyWorldContext` = корни недоступны). Конфиг-ключ в корне имеет приоритет над миром
+- [x] Доступ к полям: `biome.temperature`, `weather.condition`, `dimension.id`
+- [x] Логика на функциях Minecraft вместо базовых сравнений: вместо
   `if .name == "test" { .name = "ok" }` — условия по состоянию мира
-- [ ] Встроенные функции: `hash(uuid)`, `clamp`, `lerp`, `seq` и т.п.
-- [ ] Динамическая переоценка в игре без полной пересборки конфига
+- [x] Встроенные функции: `hash(uuid)`, `clamp`, `lerp`, `seq`, `min`, `max`, `abs`
+- [x] Динамическая переоценка в игре без полной пересборки конфига
+  — каждый `KorenConfig.get()` создаёт свежий KorenResolver: world-корни читаются
+    из WorldContext живьём (world поле может меняться между get), функции тоже
+    переоцениваются; `KorenConfig.withContext` меняет контекст без пересборки
 
 > Примечание по названиям: Kjen = Kotlin-java creN (JVM-порт чистого Cren,
 > без MC); KreN/KoreN = Kotlin creN (JVM-порт Cren под специфику Minecraft).
 
 ### 2. Парсер условий выбора провайдера
-- [ ] Условия `when`/`if` в `.kn` для привязки провайдера к контексту
-- [ ] Предикаты: биом (напр. зимний/снежный), погода (ясно/дождь/гроза,
+- [x] Условия `when`/`if` в `.kn` для привязки провайдера к контексту
+  — блок `when: { поле: значение }` в словаре провайдера (`dev.ggtv.capecraft.condition`):
+    ключ — `root.field` (точки в ключах словаря — новый синтаксис KoreN) или короткое
+    имя корня; значение — строка/число с операторами `>`, `>=`, `<`, `<=`, `!`, `a..b`;
+    все предикаты условия — AND; недоступное в мире поле = false, исключений нет
+- [x] Предикаты: биом (напр. зимний/снежный), погода (ясно/дождь/гроза,
   тьма/пасмурно), время суток, измерение, координаты
-- [ ] Приоритет условий: при совпадении нескольких — побеждает условие с
+  — поля WorldRoot: `biome.id/temperature/precipitation`, `weather.condition`,
+    `time.tick/period`, `dimension.type/id`, `location.x/y/z`; семантические алиасы
+    коротких имён: `biome: "snowy"` → precipitation=snow, `weather: "thunder"`,
+    `time: "night"`, `dimension: "nether"`
+- [x] Приоритет условий: при совпадении нескольких — побеждает условие с
   наивысшим приоритетом (не первое в списке)
-- [ ] Пример: `when biome: "snowy" → providerA`, `when weather: "rain" → providerB`,
-  оба совпали → берётся условие с приоритетом выше
-- [ ] `default`/fallback провайдер, если ни одно условие не подошло
-- [ ] Тесты логики выбора провайдера (приоритеты, пересечения, дефолт)
+  — `ProviderSelector.select`: совпавшие по убыванию `priority` (стабильно,
+    при равном — порядок списка), затем default в порядке списка
+- [x] Пример: `when biome: "snowy" → providerA`, `when weather: "rain" → providerB`,
+  оба совпали → берётся условие с приоритетом выше — работает через `priority`
+  (установленный в конфиге), реализация и тесты в `ConditionTest`/`ProviderSelectorTest`
+- [x] `default`/fallback провайдер, если ни одно условие не подошло
+  — провайдеры без `when` всегда активны; `resolveCape(..., world)` тянет
+    `WorldContext` живого мира, по умолчанию `EmptyWorldContext`
+- [x] Тесты логики выбора провайдера (приоритеты, пересечения, дефолт)
+  — +31 тест (всего в моде 215), покрыта и `when`-парсинг в Koren.
+    KoreN: новые dict-ключи с точками (парсер + 2 теста), переиздан в mavenLocal
+
+> Функции мира в KoreN и `condition`-предикаты используют общие WorldRoot/WorldContext,
+> так что условия провайдера и `.kn` в главном конфиге говорят на одном языке.
 
 ### 3. API для разработчиков (аддоны)
 > Публичный стабильный контракт, чтобы сторонний мод-аддон расширял CapeCraft.
 > Отличие от внутреннего API (`dev.ggtv.capecraft.*`): внутренний — без гарантий
 > стабильности, addon-API — задокументированный и версионируемый фасад.
-- [ ] Официальный пакет `dev.ggtv.capecraft.api.*` (изолирован от внутренностей)
-- [ ] Регистрация **провайдеров** аддоном: добавить свой `Provider`/`Source`
+- [x] Официальный пакет `dev.ggtv.capecraft.api.*` (изолирован от внутренностей)
+- [x] Регистрация **провайдеров** аддоном: добавить свой `Provider`/`Source`
   (своя логика получения URL, авторизация, свой источник)
-- [ ] Регистрация **форматов изображений**: аддон вешает декодер для нового
+- [x] Регистрация **форматов изображений**: аддон вешает декодер для нового
   формата картинки (сейчас декодеры захардкожены в `ImageDecoder.when`)
-- [ ] Регистрация **плейсхолдеров**: аддон добавляет свой `{placeholder}` в конфиг
-- [ ] Расширение **конфига** `.crn`: аддон объявляет свои ключи/секции
-- [ ] **События/хуки**: «плащ загружен», «кадр обновлён», «провайдер не найден»
-- [ ] Точка расширения рендера (позже — интеграция с парсером условий KoreN)
-- [ ] Реестр аддон-регистраций (`CapeAddon`/фабрика), инициализация в `entrypoint`
-- [ ] Документация API.md (раздел «Аддоны») + пример аддона в отдельном модуле
+- [x] Регистрация **плейсхолдеров**: аддон добавляет свой `{placeholder}` в конфиг
+- [x] Расширение **конфига** `.crn`: аддон объявляет свои ключи/секции
+- [x] **События/хуки**: «плащ загружен», «кадр обновлён», «провайдер не найден»
+- [x] Точка расширения рендера (позже — интеграция с парсером условий KoreN)
+- [x] Реестр аддон-регистраций (`CapeAddon`/фабрика), инициализация в `entrypoint`
+- [x] Документация API.md (раздел «Аддоны») + пример аддона (**лёгкий вариант**: `src/test/.../examples/ExampleCapeAddon.kt` + интеграционный тест, без отдельного Gradle-модуля)
 - [ ] Версионирование: стабильность метода/между минорными версиями
+
+### 3.5. Порт на MC 26.2 (ребейз с 1.21.10)
+> 26.1+ — первая необфусцированная версия Minecraft: реальные имена Mojang, маппинги не нужны.
+- [x] Сборка: loom 1.17.20 no-remap, loader 0.19.5, fabric-api 0.160.0+26.2, FLK 1.14.1+kotlin.2.4.20, JDK 26
+- [x] Переименование yarn→Mojang во всех файлах: Minecraft/Identifier/PoseStack/Component/Level и др. (таблица в AGENTS.md)
+- [x] Рендер-пайплайн 26.2: `render` → `submit`, `OrderedRenderCommandQueue` → `SubmitNodeCollector`,
+  `PlayerEntityRenderState` → `AvatarRenderState`, `submodel` через `collector.submitModel`
+- [x] Текстуры 26.2: `DynamicTexture`/`NativeImage.setPixel`, `TextureManager.register/release`, `RenderTypes.entitySolid`
+- [x] Мир 26.2: clock-times (`getDefaultClockTime`, `getLevelData().getGameTime`), `getBiomeManager`, `dimension()`
+- [x] `./gradlew compileKotlin`/`test`/`build` зелёные: 248 тестов
+- [ ] Проверка в игре (runClient) на 26.2: рендер плаща/анимация/reload
+
+### 3.6. Мультиверс: 1.21.x (yarn) + 26.2 (Mojang) из одного репозитория
+> Оба сборка завязаны на общий код (cren/koren/kjen/image/schema/provider/condition/api),
+> версионно-зависимая обвязка (команды, клиент, реестр, текстуры, mixin, render-контекст) живёт в `versions/<mc>/`.
+> Выбор версии: `./gradlew build -Pmc=1.21.1` / `-Pmc=1.21.4` / `-Pmc=1.21.8` / `-Pmc=1.21.10` / `-Pmc=1.21.11` / `-Pmc=26.2` (дефолт — 26.2).
+- [x] Вендоринг koren/kjen из отдельного проекта (`/manjaro-home/gg_tv/{koren,kjen}`) в `src/main/kotlin/dev/ggtv/`
+  — раньше koren/kjen подключались через mavenLocal, из-за чего их классы не попадали в jar
+- [x] Общий код отделён от версионного: `versions/*` (по 10 main + 3 test файлов + fabric.mod.json + gradle.properties)
+- [x] Структура build.gradle: conditional loom (`fabric-loom` remap для yarn-версий,
+  `net.fabricmc.fabric-loom` no-remap для необфусцированных), sourceSets на `versions/<mc>/`,
+  toolchain/`release` из версии (21 для 21.x, 26 для 26.2); foojay-resolver-convention в settings.gradle
+  — в loom 1.17.x `net.fabricmc.fabric-loom` — это no-remap маркер, `mappings` в dependencies
+  доступны только у `fabric-loom` (legacy/remap), поэтому плагин выбирается условно
+- [x] Порт-диапазон 21.x: 1.21.1 (классический render + живая сущность + renderCape;
+  нет поля model в CapeFeatureRenderer → mixins без accessor, setColor ABGR без setColorArgb),
+  1.21.4 (RenderState + VertexConsumerProvider), 1.21.8 (RenderState + VertexConsumerProvider,
+  без outlineColor в state), 1.21.10 (OrderedRenderCommandQueue.submitModel), 1.21.11
+  (как 1.21.10, но `RenderLayers.entitySolid` вместо `RenderLayer.getEntitySolid`)
+- [x] `./gradlew clean build -Pmc=<любая версия>`: BUILD SUCCESSFUL, 376 тестов каждая, 0 failures
+  (проверено для 1.21.1/1.21.4/1.21.8/1.21.10/1.21.11/26.2)
+- [x] CI: matrix build по всем версиям (1.21.1/1.21.4/1.21.8/1.21.10/1.21.11/26.2)
+- [ ] Проверка в игре (runClient) на каждой версии: рендер плаща/анимация/reload
 
 ---
 
