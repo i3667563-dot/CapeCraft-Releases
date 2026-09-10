@@ -82,7 +82,7 @@ object GifDecoder {
                                 pos = skipSubBlocks(data, pos, source)
                             }
                         }
-                        else -> skipSubBlocks(data, pos, source)
+                        else -> pos = skipSubBlocks(data, pos, source)
                     }
                 }
                 0x2C -> { // Image Descriptor
@@ -164,7 +164,7 @@ object GifDecoder {
                         3 -> pendingRestore?.copyInto(canvas)
                     }
                 }
-                else -> throw ImageDecodeException("неизвестный блок GIF: 0x${data[pos].toString(16)}", source)
+                else -> throw ImageDecodeException("неизвестный блок GIF: 0x${data[pos].toString(16)} (offset $pos)", source)
             }
         }
 

@@ -45,8 +45,16 @@ object CapeCommands {
 
     private fun list(ctx: CommandContext<FabricClientCommandSource>, registry: CapeRegistry): Int {
         val keys = registry.cachedKeys
+        val errs = registry.errorsSnapshot
         if (keys.isEmpty()) {
-            ctx.source.sendFeedback(Text.literal("Плащей в памяти нет."))
+            if (errs.isEmpty()) {
+                ctx.source.sendFeedback(Text.literal("Плащей в памяти нет."))
+            } else {
+                ctx.source.sendFeedback(Text.literal("Плащей в памяти нет. Ошибки загрузки:"))
+                for (e in errs.values) {
+                    ctx.source.sendFeedback(Text.literal("  $e"))
+                }
+            }
             return 1
         }
         ctx.source.sendFeedback(Text.literal("Плащи в памяти (${keys.size}):"))
@@ -61,13 +69,20 @@ object CapeCommands {
     private fun status(ctx: CommandContext<FabricClientCommandSource>, registry: CapeRegistry): Int {
         val me = MinecraftClient.getInstance()
         val name = me.session?.username ?: "?"
-        ctx.source.sendFeedback(Text.literal("CapeCraft 0.1.0"))
+        ctx.source.sendFeedback(Text.literal("CapeCraft ${modVersion()}"))
         ctx.source.sendFeedback(Text.literal("Игрок: $name"))
         ctx.source.sendFeedback(Text.literal("Провайдеров: ${registry.providers.size}"))
         ctx.source.sendFeedback(Text.literal("Плащей в кэше: ${registry.size}"))
         ctx.source.sendFeedback(Text.literal("Память плащей: ${registry.totalBytes} байт"))
         return 1
     }
+
+    /** Версия мода из fabric.mod.json (не захардкожена). */
+    private fun modVersion(): String =
+        net.fabricmc.loader.api.FabricLoader.getInstance()
+            .getModContainer(CapeCraftClient.MOD_ID)
+            .map { it.metadata.version.friendlyString }
+            .orElse("?")
 
     private fun clear(ctx: CommandContext<FabricClientCommandSource>, registry: CapeRegistry): Int {
         registry.clear()

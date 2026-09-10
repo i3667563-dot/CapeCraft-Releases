@@ -140,6 +140,21 @@ class GifDecoderTest {
             return this
         }
 
+        /** Comment extension (0xFE): text после NETSCAPE — частый случай у GIMP. */
+        fun comment(text: String): GifWriter {
+            out.write(0x21); out.write(0xFE)
+            val bytes = text.toByteArray(Charsets.US_ASCII)
+            var i = 0
+            while (i < bytes.size) {
+                val n = minOf(255, bytes.size - i)
+                out.write(n)
+                out.write(bytes, i, n)
+                i += n
+            }
+            out.write(0)
+            return this
+        }
+
         /** NETSCAPE2.0 loop extension. */
         fun loop(iterations: Int): GifWriter {
             out.write(0x21); out.write(0xFF)
@@ -290,6 +305,20 @@ class GifDecoderTest {
         g.frame(0, 0, 2, 1, listOf(2, 1))
         val img = GifDecoder.decode(g.bytes())
         assertEquals(3, img.loopCount)
+    }
+
+    @Test
+    fun `decode gif with comment extension after netscape`() {
+        // регрессия: comment (0xFE) после NETSCAPE2.0 — так пишут GIMP и
+        // конвертеры; раньше skipSubBlocks не присваивался в pos и декодер
+        // спотыкался на байте размера следующего блока.
+        val g = GifWriter(2, 1)
+        g.loop(0)
+        g.comment("Created with GIMP")
+        g.frame(0, 0, 2, 1, listOf(1, 2))
+        val img = GifDecoder.decode(g.bytes())
+        assertEquals(2, img.width)
+        assertEquals(1, img.height)
     }
 
     @Test

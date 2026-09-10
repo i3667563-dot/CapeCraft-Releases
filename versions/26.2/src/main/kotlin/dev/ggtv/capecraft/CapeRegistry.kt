@@ -217,6 +217,9 @@ class CapeRegistry(
     /** Ошибка последней попытки для заданного UUID (или null). */
     fun error(uuid: String): String? = errors[uuid]
 
+    /** Копия ошибок загрузки: UUID → причина (для `/cp list`, даже если плащей нет). */
+    val errorsSnapshot: Map<String, String> get() = synchronized(lock) { errors.toMap() }
+
     /** Все закэшированные ключи плащей. */
     val cachedKeys: Set<String> get() = synchronized(lock) { memory.keys.toSet() }
 

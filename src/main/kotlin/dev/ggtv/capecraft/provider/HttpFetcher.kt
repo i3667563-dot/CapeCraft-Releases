@@ -50,7 +50,7 @@ class HttpFetcher(
         }
         val req = HttpRequest.newBuilder(uri)
             .timeout(requestTimeout)
-            .header("User-Agent", "CapeCraft/0.1.0")
+            .header("User-Agent", "CapeCraft/1.0.0")
             .GET()
             .build()
         val resp = try {
