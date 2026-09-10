@@ -112,6 +112,41 @@ class ResolveCapeTest {
         val e = assertThrows(FetchError::class.java) { resolveCape(providers, ctx, "/root", fetch) }
         assertTrue(e.message!!.contains("a") && e.message!!.contains("b"))
     }
+
+    @Test
+    fun `resolveCapeOrdered follows externally-provided order`() {
+        // Реалтайм-пересчёт: порядок выбирается на рендер-потоке (по миру),
+        // а resolveCapeOrdered только исполняет его — без повторного мира.
+        val ordered = listOf(
+            Provider("night", Source.Url("https://x/night")),
+            Provider("default", Source.Url("https://x/default")),
+        )
+        val fetch = CapeFetcher { r ->
+            when ((r as Resolved.Url).url) {
+                "https://x/night" -> byteArrayOf(1)
+                "https://x/default" -> byteArrayOf(2)
+                else -> throw FetchError("unexpected")
+            }
+        }
+        val result = resolveCapeOrdered(ordered, ctx, "/root", fetch)
+        assertEquals(1, result.bytes[0])
+        assertEquals("night", result.providerName)
+    }
+
+    @Test
+    fun `resolveCapeOrdered respects fallback within given order`() {
+        val ordered = listOf(
+            Provider("night", Source.Url("https://x/night")),
+            Provider("default", Source.Url("https://x/default")),
+        )
+        val fetch = CapeFetcher { r ->
+            if ((r as Resolved.Url).url == "https://x/night") throw FetchError("missing")
+            byteArrayOf(2)
+        }
+        val result = resolveCapeOrdered(ordered, ctx, "/root", fetch)
+        assertEquals(2, result.bytes[0])
+        assertEquals("default", result.providerName)
+    }
 }
 
 class ProviderLoaderTest {

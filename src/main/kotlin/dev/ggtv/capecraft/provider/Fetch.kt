@@ -70,8 +70,36 @@ fun resolveCape(
     root: String,
     fetcher: CapeFetcher,
     world: WorldContext = EmptyWorldContext,
-): ByteArray {
-    val ordered = ProviderSelector.select(providers, world)
+): ByteArray = resolveCapeResult(providers, ctx, root, fetcher, world).bytes
+
+/**
+ * Как [resolveCape], но возвращает и имя выигравшего провайдера — реестру нужен
+ * он, чтобы при смене мира/времени понять, КАКОЙ плащ сейчас активен и не
+ * перезагружать одинаковый.
+ */
+data class CapeFetchResult(val bytes: ByteArray, val providerName: String)
+
+fun resolveCapeResult(
+    providers: List<Provider>,
+    ctx: dev.ggtv.capecraft.schema.Placeholders.Context,
+    root: String,
+    fetcher: CapeFetcher,
+    world: WorldContext = EmptyWorldContext,
+): CapeFetchResult = resolveCapeOrdered(ProviderSelector.select(providers, world), ctx, root, fetcher)
+
+/**
+ * Как [resolveCapeResult], но порядок выбора уже вычислен и передан явно.
+ *
+ * Реестр использует это, чтобы читать живой мир ТОЛЬКО на рендер-потоке
+ * (где безопасен `MinecraftWorldContext`) и передавать упорядоченный список
+ * в фоновый воркер — без повторного обращения к миру из чужого потока.
+ */
+fun resolveCapeOrdered(
+    ordered: List<Provider>,
+    ctx: dev.ggtv.capecraft.schema.Placeholders.Context,
+    root: String,
+    fetcher: CapeFetcher,
+): CapeFetchResult {
     val errors = mutableListOf<String>()
     for (p in ordered) {
         val resolved = try {
@@ -81,7 +109,8 @@ fun resolveCape(
             continue
         }
         try {
-            return fetcher.fetch(resolved)
+            val bytes = fetcher.fetch(resolved)
+            return CapeFetchResult(bytes, p.name)
         } catch (e: Exception) {
             errors += "провайдер «${p.name}»: ${e.message.orEmpty()}"
         }

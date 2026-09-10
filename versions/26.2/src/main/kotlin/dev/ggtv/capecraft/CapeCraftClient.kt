@@ -90,6 +90,10 @@ class CapeCraftClient : ClientModInitializer {
             // ~100 мс = каждый 2-й тик, чтобы не гонять зря вхолостую.
             if (tick % 2 != 0) return@register
             registry.animate(world.getLevelData().getGameTime() * 50L)
+            // Реалтайм-пересчёт условий провайдеров (день/ночь/погода/биом):
+            // каждый ~20-й тик (~1 сек) проверяем, не сменился ли выбранный
+            // провайдер, и при смене — бесшовно подгружаем новый плащ.
+            if (tick % 20 == 0) registry.refreshConditions(dev.ggtv.capecraft.render.MinecraftWorldContext)
         }
     }
 

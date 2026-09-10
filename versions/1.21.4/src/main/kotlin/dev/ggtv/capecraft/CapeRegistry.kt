@@ -2,6 +2,7 @@ package dev.ggtv.capecraft
 
 import dev.ggtv.capecraft.api.CapeApiHolder
 import dev.ggtv.capecraft.api.event.CapeEvent
+import dev.ggtv.capecraft.condition.ProviderSelector
 import dev.ggtv.capecraft.image.AnimatedImage
 import dev.ggtv.capecraft.image.ImageDecoder
 import dev.ggtv.capecraft.image.ImageDecodeException
@@ -11,8 +12,10 @@ import dev.ggtv.capecraft.provider.CapeFetcher
 import dev.ggtv.capecraft.provider.CompositeFetcher
 import dev.ggtv.capecraft.provider.FetchError
 import dev.ggtv.capecraft.provider.Provider
-import dev.ggtv.capecraft.provider.resolveCape
+import dev.ggtv.capecraft.provider.resolveCapeOrdered
+import dev.ggtv.capecraft.render.MinecraftWorldContext
 import dev.ggtv.capecraft.schema.Placeholders
+import dev.ggtv.koren.WorldContext
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
@@ -51,6 +54,8 @@ class CapeRegistry(
     limits: Limits = Limits(),
     @Volatile
     private var root: String = System.getProperty("user.dir", "."),
+    @Volatile
+    private var world: WorldContext = MinecraftWorldContext,
 ) {
     // @Volatile: reload сбрасывает эти ссылки с рендер-потока, а воркер читает их
     // в фоне — сменившийся провайдер/лимиты/root/кэш должны быть сразу видимы.
@@ -109,11 +114,13 @@ class CapeRegistry(
             loading.clear()          // старые задачи в очереди отбросятся по поколению
             generation.incrementAndGet()
             pendingRefresh.addAll(usernames.keys)
+            lastConditionsFingerprint = ""
             // Перезагрузка всех известных игроков — напрямую в очередь воркера
             // (single-thread, FIFO): последняя задача с новым поколением победит.
+            val ordered = ProviderSelector.select(providers, world)
             for (uuid in usernames.keys) {
                 loading.add(uuid)
-                executor.execute { loadInBackground(uuid) }
+                executor.execute { loadInBackground(uuid, ordered) }
             }
         }
     }
@@ -140,17 +147,21 @@ class CapeRegistry(
         if (ready) return                       // в CPU-кэше — текстуру создаст animate
         if (loading.add(uuid)) {
             usernames[uuid] = username
-            executor.execute { loadInBackground(uuid) }
+            // Порядок провайдеров вычисляем ЗДЕСЬ (рендер-поток), где безопасно
+            // читать живой мир; воркеру передаём уже готовый список.
+            val ordered = ProviderSelector.select(providers, world)
+            synchronized(lock) { lastConditionsFingerprint = ordered.joinToString("\u0000") { it.name } }
+            executor.execute { loadInBackground(uuid, ordered) }
         }
     }
 
     /** Фоновая загрузка+декод+деградация. Работает НЕ на рендер-потоке. */
-    private fun loadInBackground(uuid: String) {
+    private fun loadInBackground(uuid: String, ordered: List<Provider>) {
         val gen = generation.get()
         val username = usernames[uuid] ?: ""
         try {
             val ctx = Placeholders.Context(username = username, uuid = stripDashes(uuid), name = "")
-            val bytes = resolveCape(providers, ctx, root, fetcher)
+            val bytes = resolveCapeOrdered(ordered, ctx, root, fetcher).bytes
             val decoded = ImageDecoder.decode(bytes, source = username)
             // Тяжёлая деградация (area-average по всем кадрам) — на воркере,
             // до захвата lock. Под lock только быстрая вставка в кэш.
@@ -303,6 +314,32 @@ class CapeRegistry(
 
     /** UUID → индекс кадра, который уже залит в текстуру. */
     private val uploadedFrame = HashMap<String, Int>()
+
+    /** Реалтайм-пересчёт выбора провайдера по текущему состоянию мира
+     * (смена плаща по времени суток/погоде/биому по событиям, без `/cp reload`).
+     *
+     * Вызывается из игрового тика (рендер-поток), где безопасно читать живой
+     * мир. Если упорядоченный список провайдеров под текущий мир изменился —
+     * перепланирует загрузку всех известных игроков с новым порядком.
+     */
+    fun refreshConditions(world: WorldContext) {
+        val ordered = ProviderSelector.select(providers, world)
+        val fp = ordered.joinToString("\u0000") { it.name }
+        synchronized(lock) {
+            if (fp == lastConditionsFingerprint) return
+            lastConditionsFingerprint = fp
+            loading.clear()
+            generation.incrementAndGet() // старые загрузки со старым миром отбросятся
+            pendingRefresh.addAll(usernames.keys)
+            for (uuid in usernames.keys) {
+                loading.add(uuid)
+                executor.execute { loadInBackground(uuid, ordered) }
+            }
+        }
+    }
+
+    /** Отпечаток выбранного порядка провайдеров для последнего реалтайм-пересчёта. */
+    private var lastConditionsFingerprint: String = ""
 
     /** Безопасная отправка события в шину (не падаем, если аддон упал). */
     private fun emit(event: CapeEvent) {
