@@ -341,6 +341,40 @@ LCG с общим фиксированным сидом даёт всем кли
 (11.09–13.09.2026) — файл с 4 пользовательскими провайдерами сохранил
 содержимое и mtime, мод каждый раз читал `провайдеров 4`.
 
+## Провайдер: только id-ссылка, никогда не мутабельный алиас
+
+Правило для `providers` в `capecraft.kn`: **не вписывать `.../skins/{username}/cape.png`.**
+
+Этот адрес привязан к НИКУ, а не к id капа, поэтому он физически не меняется
+при смене плаща. Cloudflare держит его в кэше (зональное Cache Rule, наблюдалось
+`public, max-age=14400`) — старый плащ в игре до 4 часов. Проверено на живых
+заголовках: `cape.png` отдавался `HIT` с `age: 2555`, тогда как `cape.json` в тот
+же момент отдавался `no-store`.
+
+Правильно — двухуровневая схема через встроенный `type = "json"`:
+
+```kn
+{ name = "ggshnikk", type = "json",
+  url = "https://skins.ggshnikk.online/api/animated/v1/skins/{username}/cape.json",
+  extract = "$.cape" }
+```
+
+`cape.json` отдаётся как `no-store` (всегда актуален) и содержит
+`{"cape":".../skin-file/<id>.png","animated":true}`. Дальше качается ссылка по id,
+которую можно кэшировать вечно: новый плащ = новый id = новый адрес.
+
+Итог: смена плаща видна сразу, и текстура при этом льётся с CDN, а не с Worker.
+Проверено сквозным прогоном против прод-домена: `cape.json` → id 16 → HTTP 200,
+34131 байт, `cf-cache-status: HIT`.
+
+`Source.Json` требует ровно два ключа — `url` и `extract`
+(`ProviderLoader`: иначе `IllegalArgumentException`). `$.поле` парсится и покрыт
+`JsonPathTest`.
+
+Не путать с прогревом кэша: `~/.bash_scripts/warm-skinbase-cache.sh` дёргает
+`api/v3/equipped?warm=1` (проект Pages — `skinbase-dov`, не путать с
+`skinbase-проект` из wrangler.jsonc).
+
 ## Зависимости: FLK вложен в jar (JiJ)
 
 `fabric-language-kotlin` у пользователя не должен быть — кладём его внутрь
