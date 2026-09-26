@@ -12,7 +12,12 @@ enum class ImageFormat {
 
         /** Определить формат по первым байтам; null — неизвестный формат. */
         fun detect(data: ByteArray): ImageFormat? {
-            if (data.size >= 8 && data.copyOfRange(0, 8).contentEquals(PNG_SIG)) return PNG
+            // PNG и stacked PNG — один и тот же файл по сигнатуре. Различает их
+            // только служебный чанк: обычный плащ 256x512 и четыре кадра
+            // 256x128 выглядят одинаково, поэтому по высоте решать нельзя.
+            if (data.size >= 8 && data.copyOfRange(0, 8).contentEquals(PNG_SIG)) {
+                return if (PngMetadata.stacked(data) != null) STACKED_PNG else PNG
+            }
             if (data.size >= 6 && data.copyOfRange(0, 3).contentEquals(GIF_SIG)) return GIF
             // WebP: RIFF..WEBP (контейнер) либо сырой VP8L (0x2F)
             if (data.size >= 12 && data.copyOfRange(0, 4).contentEquals(RIFF_SIG) &&
