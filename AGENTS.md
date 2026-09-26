@@ -12,7 +12,16 @@
 - `./gradlew build -Pmc=1.21.11`   — yarn (Fabric mod)
 - `./gradlew build -Pmc=26.2`      — необфусцированная MC (дефолт при отсутствии `-Pmc`)
 
-Все сборки: BUILD SUCCESSFUL, 376 тестов, 0 failures.
+Все сборки: BUILD SUCCESSFUL, 573 теста, 0 failures (проверено 26.09.2026).
+Плюс каждая версия проверена запуском `./gradlew runServer -Pmc=<версия>`:
+мод инициализируется, каналы регистрируются, сервер доходит до `Done (...)!`.
+Только эта проверка ловит падение в версионной обвязке — сборки и тесты проходят.
+
+**`clean` при переключении версии НЕ нужен**: у каждой версии свой каталог
+выходов `build/<mc>` (`layout.buildDirectory` в build.gradle), поэтому
+incremental-кэш Kotlin разных версий не смешивается. `./gradlew cleanAll`
+сносит выходы сразу всех версий. До этого фикса общий `build/` ронял сборку
+на соседней версии с «Unresolved reference 'CapeCraftClient'».
 
 ## Структура
 
@@ -20,10 +29,12 @@
 src/main/kotlin/dev/ggtv/                 # ОБЩИЙ версион-независимый код
   koren/  kjen/                           # Вендоренные библиотеки (НЕ менять бесконтрольно)
   capecraft/{cren,image,schema,provider,memory,condition,api}/  # общий движок + addon API
+  capecraft/sync/                         # серверная синхронизация плащей (общая, без MC API)
 src/main/resources/                       # общий mixins.json и ресурсы
 versions/<mc>/src/main/kotlin/dev/ggtv/capecraft/   # версонно-зависимый код
-  CapeCommands|CapeCraftClient|CapeRegistry|CapeTexture|CapeConfig? нет — конфиг общий
-  mixin/, render/MinecraftWorldContext.kt, api/render/
+  CapeCommands|CapeCraftClient|CapeCraftServer|CapeRegistry|CapeTexture|CapeConfig? нет — конфиг общий
+  mixin/, render/MinecraftWorldContext.kt, render/ServerWorldContext.kt, api/render/
+  sync/                                   # MC-обвязка протокола: payload'ы, клиент, сервер, право
 versions/<mc>/src/test/kotlin/            # версионные тесты (RenderModifierTest, examples)
 versions/<mc>/src/main/resources/fabric.mod.json
 versions/<mc>/gradle.properties           # minecraft_version, loader/fabric/yarn, java_version
@@ -52,6 +63,190 @@ versions/<mc>/gradle.properties           # minecraft_version, loader/fabric/yar
 | 1.21.10 | 1.17.20 (remap `fabric-loom`) | 0.19.5 | 0.138.4+1.21.10 | 1.14.1+kotlin.2.4.20 / 2.4.20 | 21 | 1.21.10+build.3 | да |
 | 1.21.11 | 1.17.20 (remap `fabric-loom`) | 0.19.5 | 0.141.6+1.21.11 | 1.14.1+kotlin.2.4.20 / 2.4.20 | 21 | 1.21.11+build.6 | да |
 | 26.2 | 1.17.20 (no-remap `net.fabricmc.fabric-loom`) | 0.19.5 | 0.160.0+26.2 | 1.14.1+kotlin.2.4.20 / 2.4.20 | 26 | — | нет (необфусц.) |
+
+## Серверная синхронизация плащей (CapeCraft Sync)
+
+Протокол v1, каналы `capecraft:sync_req` (C2S) и `capecraft:sync_resp` (S2C).
+Сервер решает `when`-условия провайдеров у себя (мир настоящий) и отдаёт
+**только активные** провайдеры; байты картинок по сети не ходят.
+
+### Разделение на общее и версионное
+- **Общее** (`src/main/kotlin/dev/ggtv/capecraft/sync/`, без MC API, тестируется
+  обычными JUnit-тестами): `SyncProtocol` (каналы/версия/лимиты), `SyncCodec`
+  (строгий бинарный формат), `CapeSyncState` (чистая машина: опрос, таймаут,
+  fingerprint, fallback), `SyncPolicy` (URL/file/addon-политика), `ActiveCape`,
+  `ServerCapeCatalog`, `ServerSyncSettings` (блок `serverSync` конфига).
+- **Версионное** (`versions/<mc>/.../sync/`): `CapeSyncPayloads` (payload'ы
+  и кодек), `CapeSyncClient`, `CapeSyncServer`, `CapeServerPermission`,
+  `ServerCapeConfig`; плюс `render/ServerWorldContext.kt` и `CapeCraftServer`
+  (`main`-entrypoint — мод работает и на выделенном сервере, поэтому
+  `fabric.mod.json` у всех версий: `environment: "*"` + entrypoint `main`).
+
+Оба payload'а кодируются ОДНИМ `SyncCodec`, так клиент и сервер проверяют
+версию протокола и лимиты симметрично.
+
+### Правила fallback (`CapeSyncState` + `CapeSyncClient`)
+- валидный пустой ответ сервера = «плащей нет» (локальный набор отключается);
+- таймаут / сервер без мода = локальный набор, но при `requireServer = true` —
+  пустой набор;
+- первый ответ применяется всегда: fingerprintunset ≠ fingerprint пустого набора.
+
+### Политика источников (`SyncPolicy`)
+- серверный `file` разрешён только внутри папки игры (проверка по факту
+  подстановки `!SyncPolicy.isInside`), иначе провайдер отбрасывается;
+- серверный addon-провайдер восстанавливается ТОЛЬКО из совпадающего
+  локального — сервер не может дописать новые значения аддона.
+
+### Точки расхождения API между версиями
+| Что | 1.21.1–1.21.8 | 1.21.10 | 1.21.11 | 26.2 (Mojang) |
+|---|---|---|---|---|
+| буфер кодеков | `RegistryByteBuf` | `RegistryByteBuf` | `RegistryByteBuf` | `RegistryFriendlyByteBuf` |
+| payload | `CustomPayload` + `getId()` | то же | то же | `CustomPacketPayload` + `type()` |
+| id payload | `CustomPayload.Id(Identifier.of(ns, path))` | то же | то же | `CustomPacketPayload.Type(Identifier.fromNamespaceAndPath(ns, path))` |
+| codec | `PacketCodec` | то же | то же | `StreamCodec` |
+| регистрация каналов | `PayloadTypeRegistry.playC2S/playS2C` | то же | то же | `...serverboundPlay/clientboundPlay` |
+| регистрация команд | `CommandRegistrationCallback` (2 арг.) | то же | то же | 3 арг. (`+ Commands.CommandSelection`) |
+| команда | `CommandManager.literal` | то же | то же | `Commands.literal` |
+| право на `/capecraft` | `hasPermissionLevel(2)` | то же | `permissions.hasPermission(Permission.Level(PermissionLevel.GAMEMASTERS))` | `permissions().hasPermission(Permission.HasCommandLevel(PermissionLevel.GAMEMASTERS))` |
+| мир игрока (сервер) | `player.world` | `player.entityWorld` | `player.entityWorld` | `player.level()` |
+| время суток | `world.timeOfDay` | то же | то же | `world.getOverworldClockTime()` (`getDayTime()` больше нет) |
+| биом | `world.getBiome(pos)` | то же | то же | `world.biomeManager.getBiome(pos)` |
+| ключ измерения | `world.getRegistryKey()` | то же | то же | `world.dimension()` |
+| ответ клиенту | `sendFeedback({ Text })` | то же | то же | `sendSuccess({ Component })` |
+| соединение (клиент) | `MinecraftClient.networkHandler` | то же | то же | `Minecraft.getConnection()` |
+
+`hasPermissionLevel(2)` в 1.21.11 и уровневые права в 26.2 вынесены в
+`CapeServerPermission.GAMEMASTER` — это единственное место, где версии
+расходятся по правам; в 26.2 форма `hasPermission(Permission.HasCommandLevel(...))`
+работает и для `LevelBasedPermissionSet`, и для `PermissionSetUnion`.
+
+### id канала НЕЛЬЗЯ собирать из строки целиком (регрессия, ловилась только в игре)
+
+Ни `CustomPayload.id("ns:path")`, ни `CustomPacketPayload.createType("ns:path")`
+**не понимают** неймспейс. Оба зовут `Identifier.withDefaultNamespace(...)`, а он
+в 26.2 и в yarn 1.21.11 устроен так:
+
+```
+ldc "minecraft"      // неймспейс — всегда
+ldc "minecraft"      // путь для проверки — всегда
+ldc <вся строка>     // path
+```
+
+То есть `capecraft:sync_req` превращается в path `capecraft:sync_req` с двоеточием
+внутри и мод падает на старте:
+
+```
+IdentifierException / InvalidIdentifierException:
+  Non [a-z0-9/._-] character in path of location: minecraft:capecraft:sync_req
+```
+
+Это ломало **все шесть версий** (не только 26.2) и не ловилось ни компиляцией,
+ни тестами — падало только при реальном запуске. Канал собирается только через
+`SyncProtocol.channelNamespace/channelPath` (в общем коде), а версионная обвязка
+собирает `Identifier`/`Id` из готовых частей. Инвариант «ровно одно двоеточие,
+символы из `[a-z0-9/._-]`» закрыт тестом `SyncProtocolChannelTest`.
+
+### Stacked PNG отличается от обычного PNG по чанку, а не по высоте (регрессия)
+
+`ImageFormat.detect` смотрел только на сигнатуру, а stacked PNG — это тот же
+PNG. Файл разбирался как одна картинка и натягивался на плащ целиком.
+
+`skins.ggshnikk.online` отдаёт 256×512 с чанком:
+
+```
+Description Stacked PNG: 4 frames 256x128, order=down
+```
+
+Различать приходится по служебным чанкам: `PngMetadata` читает `tEXt`/`iTXt`
+без распаковки `IDAT` (сжатый `iTXt` и `zTXt` намеренно игнорируются).
+Детект **по метаданным, а не по высоте**: у обычного плаща 256×512 и у четырёх
+кадров по 256×128 одинаковые байты, любая эвристика по размеру растянула бы
+обычные плащи в анимацию. Тест
+`autodetect leaves stacked shaped png as regular png` специально это сторожит.
+
+Требуется именно слово «stacked png» — иначе чужой `Description` вроде
+«шляпа 4 кадра» превратит плащ в анимацию. Объявленная автором геометрия
+строгая (`высота` должна делиться на кадр, кадров должно хватать), угаданная
+(width/2) — как раньше обрезает неполный последний кадр. `order=right` даёт
+понятную ошибку, а не молча перевёрнутую картинку.
+
+Грабли при разборе iTXt: флаг сжатия стоит **за NUL ключа**, а не в начале
+тела, иначе чанк молча пропускается.
+
+### URL-провайдеры проверяются как ШАБЛОНЫ, а не как готовые ссылки (регрессия)
+
+`ActiveCape.isHttpUrl` проверяет `config`-строку ДО подстановки плейсхолдеров,
+а `URI.create` фигурные скобки не принимает:
+
+```
+Illegal character in path at index 52:
+  https://skins.ggshnikk.online/api/animated/v1/skins/{username}/cape.png
+```
+
+Из-за этого `ServerCapeCatalog` выбрасывал провайдер, в интегрированном сервере
+получалось `отдано 0 провайдеров (обрезано 0, отброшено битых 1)`, а в игре —
+`Провайдеров: 0 (набор с сервера)`. Ломались ВСЕ `url`/`json`-провайдеры
+с `{username}`/`{uuid}`/аддон-плейсхолдерами, включая дефолтный конфиг мода.
+
+Плейсхолдеры подставляются только при загрузке (`Placeholders.render`), поэтому
+перед `URI.create` каждый `{...}` заменяется безопасным токеном — для схемы и
+хоста это ничего не меняет. Реальная ссылка проверяется ещё раз при запросе
+(`HttpFetcher.getBytes` зовёт `URI.create` уже на отрендеренном URL).
+Проверка не ослабла: `file:`, `ftp:`, `javascript:` и мусор по-прежнему
+отвергаются. Закрыто `ActiveCapeUrlTemplateTest` (на снятой подстановке падают
+три теста).
+
+**Правило: любое новое расхождение версий и любая новая схема в конфиге
+проверяются запуском игры, а не только сборкой.** Три бага этой сессии (канал,
+`include` вместо `modImplementation`, плейсхолдеры в URL) были видны только так:
+сборка и 500+ тестов были зелёными.
+
+
+### Адаптивный интервал опроса (backoff)
+Клиент опрашивает сервер каналом `capecraft:sync_req`. Фиксированный интервал
+(2 с по умолчанию) — это ~0.5 запроса в секунду на КАЖДОГО игрока, то есть
+500 req/s на 1000 игроков, при том что набор плащей меняет сам владелец
+(несколько раз в день). Почти все эти запросы возвращают неизменившийся ответ.
+`CapeSyncState` поэтому замедляет опрос, пока набор стабилен:
+
+| | было | стало |
+|---|---|---|
+| интервал | 2 с всегда | 2 с → 4 → 8 → 16 → 32 → 60 с |
+| запросов в простое | 30/мин | 1/мин (в 30 раз меньше) |
+| реакция на смену капа | 2 с | 2 с (не изменилась) |
+
+Ключевые свойства (все закреплены тестами в `CapeSyncStateBackoffTest`):
+
+- **Рост**: ×2 за шаг после `STABLE_RESPONSES_BEFORE_BACKOFF` (=3) ответов
+  подряд «без изменений», до потолка `MAX_BACKOFF_INTERVAL_TICKS` (1200 = 60 с).
+- **Сброс на горячий режим**: смена набора возвращает базовый интервал, чтобы
+  поймать комплект «пачками» сразу после переодевания.
+- **Таймаут тоже замедляет**: не отвечающий сервер нельзя дёргать чаще — чем
+  хуже серверу, тем больше от него и так.
+- **Горячий режим без джиттера**: пока интервал не вырос, опрос идёт РОВНО
+  через `intervalTicks` (старый контракт не ломается).
+- **Джиттер только в стационаре**: при выросшем интервале добавляется
+  `0 … +2×BACKOFF_JITTER_PERCENT`% (смещение только вверх — базовый интервал
+  это ограничение СКОРОСТИ, его нельзя превышать случайно).
+
+### Сид джиттера обязан быть случайным
+LCG с общим фиксированным сидом даёт всем клиентам ОДНУ И ТУ ЖЕ
+последовательность сдвигов, то есть herd не расходится никогда — просто
+сдвигается на одну и ту же константу. Поэтому `jitterSeed` по умолчанию
+`Random.nextLong()` на каждый экземпляр, а для тестов инъецируется явно
+(иначе тайминги невоспроизводимы). Проверено тестами
+`same seed keeps clients in lockstep` / `jitter spreads clients apart`.
+
+### Отсчёт интервала — от момента ОТПРАВКИ
+`reschedule()` считает `nextDueTick` от `lastRequestTick`, а не от текущего
+тика. Иначе после таймаута ретрай сдвигался бы на величину задержки
+обнаружения (а она тем больше, чем хуже серверу) и тихо разъехался бы со
+старой каденцией.
+
+### Смена поведения в 3 старых тестах
+`CapeSyncStateTest` фиксирует БАЗОВУЮ каденцию, поэтому три теста про
+таймауты явно передают `backoff = false`. Новое поведение (замедление после
+таймаута) покрыто в `CapeSyncStateBackoffTest`.
 
 ## Рендер-пайплайн по версиям
 
@@ -85,8 +280,22 @@ versions/<mc>/gradle.properties           # minecraft_version, loader/fabric/yar
 | `net.minecraft.entity.Entity` | `net.minecraft.world.entity.Entity` |
 | `net.minecraft.client.MinecraftClient` | `net.minecraft.client.Minecraft` |
 | `net.minecraft.client.world.ClientWorld` | `net.minecraft.client.multiplayer.ClientLevel` |
+| `net.minecraft.network.packet.CustomPayload` | `net.minecraft.network.protocol.common.custom.CustomPacketPayload` |
+| `net.minecraft.network.PacketByteBuf` / `RegistryByteBuf` | `net.minecraft.network.FriendlyByteBuf` / `RegistryFriendlyByteBuf` |
+| `net.minecraft.network.codec.PacketCodec` | `net.minecraft.network.codec.StreamCodec` |
+| `PayloadTypeRegistry.playC2S()/playS2C()` | `PayloadTypeRegistry.serverboundPlay()/clientboundPlay()` |
+| `net.minecraft.server.command.CommandManager` | `net.minecraft.commands.Commands` |
+| `net.minecraft.server.command.ServerCommandSource` | `net.minecraft.commands.CommandSourceStack` |
+| `net.minecraft.server.network.ServerPlayerEntity` | `net.minecraft.server.level.ServerPlayer` |
+| `net.minecraft.server.world.ServerWorld` | `net.minecraft.server.level.ServerLevel` |
+| `net.minecraft.world.World` | `net.minecraft.world.level.Level` |
+| `world.getRegistryKey()` | `world.dimension()` |
+| `world.timeOfDay` | `world.getOverworldClockTime()` |
+| `sendFeedback({ Text })` | `sendSuccess({ Component })` |
+| `ClientCommandManager` | `ClientCommands` |
+| `MinecraftClient.networkHandler` | `Minecraft.getConnection()` |
 
-(таблица неполная — доразбирать при правках рендер-кода в каждой версии)
+(таблица неполная — доразбирать при правках кода в каждой версии)
 
 ## API обеих версий (render)
 
@@ -101,9 +310,38 @@ versions/<mc>/gradle.properties           # minecraft_version, loader/fabric/yar
 ## Команды проверки
 
 ```bash
-./gradlew clean build -Pmc=1.21.1    # и 1.21.4, 1.21.8, 1.21.10, 1.21.11
-./gradlew clean build -Pmc=26.2      # полная сборка 26.2 + тесты
+# Полная сборка версии (компиляция + тесты + remapJar) — clean НЕ обязателен,
+# у каждой версии свой build/<mc>.
+./gradlew build -Pmc=1.21.1    # и 1.21.4, 1.21.8, 1.21.10, 1.21.11, 26.2
+./gradlew cleanAll             # снести выходы всех версий
+./gradlew publishArtifact -Pmc=26.2   # только переопубликовать jar в artifacts/
 ```
+
+Все шесть версий: BUILD SUCCESSFUL, 573 теста на версию (3438 суммарно), 0 failures.
+
+### artifacts/ — ставить ТОЛЬКО отсюда
+
+Сборка кладёт jar в `build/<mc>/libs/`, а задача `publishArtifact` (finalizer
+`assemble`) копирует его в `artifacts/capecraft-<version>-<mc>.jar`. Ставить в
+`mods/` нужно **артефакт из `artifacts/`** — он гарантированно от текущей сборки.
+
+Почему это правило, а не формальность: `artifacts/` долго никто не обновлял, и
+в `mods/` попал jar трёхнедельной давности **без `StackedPngDecoder`**. Мод
+запускался, показывал плащ, но stacked PNG декодировался как одна картинка —
+`CapeTexture: создана 256x1664` вместо кадра `256x128`, то есть стек растягивался
+на весь плащ. Сборка при этом была «успешной», диагностика шла только по логу.
+
+Проверка после установки (дёшево, ловит именно этот класс ошибок):
+
+```bash
+unzip -l artifacts/capecraft-1.0.0-26.2.jar | grep -c 'capecraft/image/StackedPngDecoder'
+md5sum artifacts/capecraft-1.0.0-26.2.jar <mods>/capecraft-1.0.0.jar   # должны совпасть
+```
+
+Ожидаемое `CapeTexture: создана WxH` — это размер **одного кадра**, а не файла.
+Для `13 frames 256x128` правильное значение `256x128`; `256x1664` означает, что
+детект формата не сработал и стек не нарезан.
+
 
 ## mixins.json
 
@@ -111,9 +349,229 @@ versions/<mc>/gradle.properties           # minecraft_version, loader/fabric/yar
 - во всех версиях только `CapeFeatureRendererMixin` (accessor был удалён во всех портах:
   ваниль НЕ отменяется, подменяется лишь текстура плаща в render-state — физика ванильная)
 
+## Конфиг: единственная запись на диск
+
+Мод пишет на диск ровно в одном месте — `CapeConfig.writeDefault()`, и только
+если выбранного файла нет. Выбор файла и проверка «надо ли создавать дефолт»
+вынесены в `CapeConfigFiles` (общий код), потому что этот же выбор повторялся
+в `ServerCapeConfig` на всех шести версиях.
+
+Инвариант: **существующий `config/capecraft.kn` никогда не перезаписывается** —
+ни при старте, ни при `/capecraft reload`, ни при `/capecraft reload` на сервере.
+Если `.kn` нет, но есть legacy `.crn` — читается `.crn`, дефолт не создаётся.
+Закрыто тестом `CapeConfigFilesTest` (на снятой проверке `Files.exists` падают
+четыре теста).
+
+Проверено на реальных логах инстанса 26.2: восемь запусков подряд
+(11.09–13.09.2026) — файл с 4 пользовательскими провайдерами сохранил
+содержимое и mtime, мод каждый раз читал `провайдеров 4`.
+
+## Провайдер: только id-ссылка, никогда не мутабельный алиас
+
+Правило для `providers` в `capecraft.kn`: **не вписывать `.../skins/{username}/cape.png`.**
+
+Этот адрес привязан к НИКУ, а не к id капа, поэтому он физически не меняется
+при смене плаща. Cloudflare держит его в кэше (зональное Cache Rule, наблюдалось
+`public, max-age=14400`) — старый плащ в игре до 4 часов. Проверено на живых
+заголовках: `cape.png` отдавался `HIT` с `age: 2555`, тогда как `cape.json` в тот
+же момент отдавался `no-store`.
+
+Правильно — двухуровневая схема через встроенный `type = "json"`:
+
+```kn
+{ name = "ggshnikk", type = "json",
+  url = "https://skins.ggshnikk.online/api/animated/v1/skins/{username}/cape.json",
+  extract = "$.cape" }
+```
+
+`cape.json` отдаётся как `no-store` (всегда актуален) и содержит
+`{"cape":".../skin-file/<id>.png","animated":true}`. Дальше качается ссылка по id,
+которую можно кэшировать вечно: новый плащ = новый id = новый адрес.
+
+Итог: смена плаща видна сразу, и текстура при этом льётся с CDN, а не с Worker.
+Проверено сквозным прогоном против прод-домена: `cape.json` → id 16 → HTTP 200,
+34131 байт, `cf-cache-status: HIT`.
+
+`Source.Json` требует ровно два ключа — `url` и `extract`
+(`ProviderLoader`: иначе `IllegalArgumentException`). `$.поле` парсится и покрыт
+`JsonPathTest`.
+
+Не путать с прогревом кэша: `~/.bash_scripts/warm-skinbase-cache.sh` дёргает
+`api/v3/equipped?warm=1` (проект Pages — `skinbase-dov`, не путать с
+`skinbase-проект` из wrangler.jsonc).
+
+## `/cp reload` — полная перезагрузка, `/cp clear` — только кэш
+
+Разные команды, разные гарантии. Путать их нельзя.
+
+| | `/cp reload` | `/cp clear` |
+|---|---|---|
+| конфиг с диска | да | нет |
+| дефолт при отсутствии файла | да | нет |
+| новый набор провайдеров | да | нет |
+| CPU-кэш плащей | новый `MemoryManager` | `clear()` |
+| GPU-текстуры и их id | сброшены | сброшены |
+| авторитетность сервера | снята | не трогается |
+| запрос синхронизации | сразу | нет |
+
+`/cp reload` — это «перезагрузить мод», поэтому он сбрасывает ВСЁ состояние,
+включая GPU-текстуры: плащ на время загрузки исчезает, рисуется ванильный.
+`/cp clear` — «сбросить кэш», мод продолжает работать ровно как работал: набор
+провайдеров, лимиты и авторитетность сервера не меняются, плащи просто
+перекачиваются при следующем обращении к рендеру.
+
+В реестре это `reloadAll()` против `reload()`. `reloadAll` = `reload` плюс
+`textureReady`/`textureIds`/`uploadedFrame` и снятие `isServerAuthoritative` с
+`guard`. Общая часть вынесена в приватный `refreshLocked()`.
+
+**Почему `/cp reload` сбрасывает авторитетность сервера:** команда — это явное
+«возьми мой локальный конфиг». Если сервер нужен, он пришлёт свой набор
+следующим ответом.
+
+**Почему reload шлёт запрос синхронизации сразу:** с адаптивным интервалом
+следующий запрос может быть через минуту, и после полной перезагрузки мод целую
+минуту работал бы на локальном конфиге.
+
+**Общее правило:** команда не имеет права рапортовать об успехе, если она
+ничего не сделала. Всегда проверяй результат по логу, а не по тексту ответа.
+
+## Зависимости: FLK вложен в jar (JiJ)
+
+`fabric-language-kotlin` у пользователя не должен быть — кладём его внутрь
+своего jar через `include` в build.gradle:
+
+```groovy
+add(depType, "net.fabricmc:fabric-language-kotlin:${verProps.flk_version}")
+add("include", "net.fabricmc:fabric-language-kotlin:${verProps.flk_version}")
+```
+
+**Обе строки обязательны.** `include` нужен для релизного jar (пользователю
+ничего качать не надо), а обычная зависимость — для компиляции и для дев-запуска:
+с одним только `include` `./gradlew runClient|runServer` падает с
+`Mod 'CapeCraft' requires fabric-language-kotlin, which is missing!`
+(в дев-режиме на classpath FLK не кладут, `include` там не участвует).
+
+Проверено запуском dedicated-сервера 26.2 с одним лишь `capecraft-1.0.0.jar`
+в `mods/` (без отдельного FLK): мод грузится, `KotlinAdapter` из вложенного FLK
+резолвит entrypoint-ы, `/capecraft status` отвечает, ошибок ноль.
+
+Дубль mod id не страшен: загрузчик грузит одну версию, верхнеуровневый jar
+приоритетнее вложенного. Если у игрока свой FLK — выиграет его.
+
+Двухуровневый JiJ штатный: сам FLK — мод с 13 вложенными jar'ами
+(kotlin-stdlib/reflect, kotlinx-coroutines/serialization, atomicfu), загрузчик
+разворачивает вложенные моды рекурсивно. Размер итогового jar ~8.3 МБ.
+
+## Sync v2: клиент объявляет, сервер только рассылает
+
+v1 был устроен наоборот и не имеет смысла: клиент слал только `requestId`,
+сервер отвечал **своими** отобранными по серверному миру провайдерами.
+Направление инвертировано, а `isServerAuthoritative` в `CapeRegistry` делал
+чужой плащ зависимым от сервера.
+
+v2 — сервер НЕ источник истины. Он ретранслирует объявления и ничего не решает.
+
+```
+C2S announce    игрок → сервер: свой набор провайдеров (с условием when)
+C2S upload      игрок → сервер: байты картинки для kind=file, по чанкам
+C2S fetch       игрок → сервер: «дай картинку с хэшем h, с оффсета n»
+S2C roster      сервер → всем: снимок {игрок → его провайдеры} + ревизия
+S2C chunk       сервер → запрашивающему: кусок картинки
+```
+
+Файл лежит на диске игрока, у сервера его нет и взять неоткуда — поэтому
+заливает **владелец**. Из этого следует приятное свойство: клиент не может
+указать на чужой диск в принципе, он предлагает только свой файл. Проверка
+`allowFileProviders`/`isSafeFileTemplate` как защита от сервера больше не нужна —
+защищаться не от кого. Вместо неё `shareLocalProviders` (по умолчанию **false**):
+заливка личного файла на чужой сервер должна быть осознанной.
+
+### Решения, которые неочевидны
+
+**`when` едет по сети.** `Condition` — плоский AST (predicates → Predicate →
+Op + Expected), вложенности нет, сериализуется за десяток строк. Без него все
+увидели бы чужой плащ, посчитанный в биоме *объявившего* — видимый глюп. Условие
+вычисляет каждый клиент сам, против контекста **наблюдаемого** игрока.
+
+**Хэш контента как id картинки.** `file`-провайдер едет как `sha-256` (32 сырых
+байта, не hex). Если 50 игроков носят один и тот же файл — одна загрузка, а не 50,
+и дедуп на разных провайдерах тоже работает сам.
+
+**Роустер — полный снимок с монотонной ревизией, а не дельта.** Дельты рассинхро-
+нятся (пропущенный join/leave → навсегда кривой набор). Снимок самолечится, а
+ревизия даёт дешёвую проверку «у меня свежо». Порядок: игроки по времени входа,
+при нехватке места — старшие отбрасываются, ставится флаг `truncated`.
+
+**Клиент не доверяет серверу.** Сервер валидирует форму и лимиты (он получает
+недоверенный ввод), но ни одно его решение не авторитетно. Клиент перепроверяет
+всё сам: `ActiveCape.validate()`, лимиты, и **декодирует картинку** перед тем как
+показывать — иначе злой сервер скормит мусор, который уйдёт в GL.
+
+**Версия 2 гейтится байтом в начале.** Пайлоад непрозрачный, поэтому версия
+проверяется тривиально. Смешанные версии просто не синхронизируются, без падений.
+
+**`CapeRegistry` становится per-player.** Сейчас `providers` — один глобальный
+список на всех (`order()` отдаёт его каждому uuid). В v2 набор принадлежит игроку:
+локальный игрок живёт из своего конфига, чужой — из роустера. Флаг
+`isServerAuthoritative` и методы `useServerProviders`/`useLocalProviders` уходят.
+
+Проверка живым стендом обязательна минимум на двоих: один объявляет локальный
+`file`-cape, второй должен получить и роустер, и байты картинки. Один клиент
+этого не проверяет — он единственный, кто знает свой набор.
+
 ## Вендоринг (koren/kjen)
 
 koren и kjen — независимые проекты из `/manjaro-home/gg_tv/{koren,kjen}`.
 Их исходники скопированы в `src/main/kotlin/dev/ggtv/` ДЛЯ ПОПАДАНИЯ В JAR
 (mavenLocal-артефакты не упаковывались в наш jar). При обновлении библиотек —
 подтягивать из тех репозиториев и синхронизировать копии + тесты в `src/test/...`.
+## Портирование 26.2 (Mojang) → Yarn-версии
+
+1.21.x версии между собой различаются только API, поэтому Semantic Sync v2
+переносится с 26.2 таблицей подстановок `/tmp/opencode/port/sub.py`
+(в репозиторий не кладётся — это одноразовый инструмент). Файлы, которые
+нельзя переносить механически:
+
+- `sync/CapeSyncPayloads.kt` — у Mojang `Type<T>` c id-ресурсом, в Yarn
+  `CustomPayload.Id<T>` + `PacketCodec<RegistryByteBuf, T>`; пишется руками.
+- `mixin/CapeFeatureRendererMixin.kt` — у каждой версии свой render API,
+  оставляется свой, правится только вызов `ensureLoading` (передать
+  `EntityWorldContext(игрок)`).
+- `render/MinecraftWorldContext.kt` — API мира у Yarn другой, переносится
+  один раз и копируется дальше как есть.
+
+Что уже учтено в таблице и НЕ требует ручной правки:
+
+| Mojang | Yarn |
+| --- | --- |
+| `Minecraft.getInstance()` | `MinecraftClient.getInstance()` |
+| `.user.name` | `.session?.username` |
+| `client.level` | `client.world` |
+| `world.isClientSide()` | `world.isClient` |
+| `world.getLevelData().getGameTime()` | `world.time` |
+| `player.getStringUUID()` | `player.uuidAsString` |
+| `player.getName().getString()` | `player.name.string` |
+| `CommandSourceStack` | `ServerCommandSource` (`net.minecraft.server.command`) |
+| `source.sendSuccess` | `source.sendFeedback` |
+| `PayloadTypeRegistry.serverboundPlay()` | `playC2S()` |
+| `PayloadTypeRegistry.clientboundPlay()` | `playS2C()` |
+| `PoseStack` | `MatrixStack` |
+| `StreamCodec` / `RegistryFriendlyByteBuf` | `PacketCodec` / `RegistryByteBuf` |
+| `server.playerList.players` | `server.playerManager.playerList` |
+
+**Две ловушки, на которые ушла время, повторять не надо:**
+
+1. Регулярка с `\b` сразу после `()` **никогда не срабатывает**: `)` и
+   следующий пробел оба не словесные, границы нет. Вид `X\.getY\(\)\b`
+   молча не заменяет ничего, и таблица выглядит рабочей. Хвостовой `\b`
+   после `)` убирать совсем.
+2. Правило для `Minecraft.getInstance().user.name` должно срабатывать и на
+   уже преобразованный `MinecraftClient.getInstance()`, иначе порядок
+   правил важнее самих правил: `Minecraft(?:Client)?\.\.getInstance\(\)\.user\.name`.
+
+Проверка порта: `./gradlew compileKotlin -Pmc=<версия> --console=plain` даёт
+0 ошибок, но этого мало — компиляция не видит, что миксин не передал
+`EntityWorldContext` (условия молча считались бы по своему миру). Поэтому
+сверять надо руками, что в каждой версии: `EntityWorldContext` в миксине,
+`describe()` в реестре, `publishOwnedImages()` в `onTick()`,
+`registry.forget(it)` в дисконнекте, `settings.allowForeignUrls` в `applyRoster`.

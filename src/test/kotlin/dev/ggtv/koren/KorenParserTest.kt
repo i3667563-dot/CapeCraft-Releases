@@ -424,6 +424,37 @@ class KorenParserTest {
     }
 
     @Test
+    fun `bare substitution is a value, not a broken token`() {
+        val config = KorenConfig.fromStringWithEnv(
+            """
+            bare_braced = ${'$'}{KOREN_HOST}
+            bare_default = ${'$'}{KOREN_MISSING:-fallback}
+            bare_hyphen = ${'$'}{KOREN_MISSING-other}
+            bare_middle = ${'$'}{KOREN_HOST}/capes/${'$'}{KOREN_PORT}/a.png
+            bare_bool = ${'$'}{KOREN_FLAG}
+            """.trimIndent(),
+            mapOf(
+                "KOREN_HOST" to "cdn.example.com",
+                "KOREN_PORT" to "8443",
+                "KOREN_FLAG" to "true",
+            ),
+        )
+
+        assertEquals("cdn.example.com", config.getStr("bare_braced"))
+        assertEquals("fallback", config.getStr("bare_default"))
+        assertEquals("other", config.getStr("bare_hyphen"))
+        assertEquals("cdn.example.com/capes/8443/a.png", config.getStr("bare_middle"))
+        assertEquals("true", config.getStr("bare_bool"))
+    }
+
+    @Test
+    fun `unclosed substitution in a bare value is a parse error`() {
+        val e = assertFailsWith<CrenError.Parse> {
+            KorenConfig.fromStringWithEnv("a = ${'$'}{OPEN\n", mapOf("OPEN" to "x"))
+        }
+        assertTrue(e.messageText.contains("незакрытая подстановка окружения"))
+    }
+    @Test
     fun `missing or malformed environment reference is an error`() {
         val missing = assertFailsWith<CrenError.Parse> {
             KorenConfig.fromStringWithEnv("host = \"${'$'}{KOREN_MISSING}\"\n", emptyMap())

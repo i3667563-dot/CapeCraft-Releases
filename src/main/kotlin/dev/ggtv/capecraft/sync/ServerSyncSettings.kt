@@ -1,6 +1,8 @@
 package dev.ggtv.capecraft.sync
 
 import dev.ggtv.capecraft.CapeConfigEnv
+import dev.ggtv.capecraft.CapeCraftLog
+import dev.ggtv.kjen.CrenError
 import dev.ggtv.koren.KorenConfig
 
 /**
@@ -84,13 +86,34 @@ data class ServerSyncSettings(
             )
         }
 
+        /**
+         * Флаг из `.kn`, иначе дефолт.
+         *
+         * Отсутствие ключа берём молча, несовпадение типа — нет: пользователь
+         * написал значение, а мод затихо заменил его своим. Подстановка
+         * окружения (`enabled = "${CAPE_SYNC}"`) всегда даёт строку, поэтому
+         * для булевых нужен [CapeConfigEnv].
+         */
         private fun bool(cfg: KorenConfig, key: String, def: Boolean): Boolean {
+            val path = "$ROOT.$key"
             val fromFile = try {
-                cfg.getBool("$ROOT.$key")
-            } catch (_: Exception) {
+                cfg.getBool(path)
+            } catch (_: CrenError.NotFound) {
+                def
+            } catch (e: CrenError.TypeMismatch) {
+                CapeCraftLog.LOGGER.warn(
+                    "{}: в конфиге ожидалось {}, а там строка — беру дефолт {}. " +
+                        "Подстановка окружения всегда даёт строку, для флага нужно {} " +
+                        "или -D{}=...",
+                    path,
+                    e.expected,
+                    def,
+                    CapeConfigEnv.variableFor(path),
+                    path,
+                )
                 def
             }
-            return CapeConfigEnv.booleanOr("$ROOT.$key", fromFile)
+            return CapeConfigEnv.booleanOr(path, fromFile)
         }
 
         /** Читаемый текст для `/cp status`. */
