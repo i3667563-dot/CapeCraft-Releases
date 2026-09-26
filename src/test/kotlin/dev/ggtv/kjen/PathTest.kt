@@ -53,6 +53,7 @@ class PathTest {
     @Test
     fun `path invalid index`() {
         assertFailsWith<CrenError.Parse> { Path.parse("server.token[0]") }
+        assertFailsWith<CrenError.Parse> { Path.parse("server.token[-1]") }
         assertFailsWith<CrenError.Parse> { Path.parse("server.token[abc]") }
     }
 

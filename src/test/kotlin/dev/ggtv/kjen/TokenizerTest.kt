@@ -171,4 +171,16 @@ class TokenizerTest {
             kinds("# один\n\n# два\n"),
         )
     }
+
+    @Test
+    fun `non finite float is rejected`() {
+        val e = assertFailsWith<CrenError.Parse> { Tokenizer.tokenize("a = ${"9".repeat(309)}.0\n") }
+        assertTrue(e.messageText.contains("вне диапазона f64"))
+    }
+
+    @Test
+    fun `fractional number suffix is rejected`() {
+        val e = assertFailsWith<CrenError.Parse> { Tokenizer.tokenize("a = 2.3foo\n") }
+        assertTrue(e.messageText.contains("после дробного числа"))
+    }
 }

@@ -2,152 +2,298 @@ package dev.ggtv.koren
 
 import dev.ggtv.kjen.Block
 import dev.ggtv.kjen.CrenError
+import dev.ggtv.kjen.Entry
 import dev.ggtv.kjen.Path
-import dev.ggtv.kjen.Resolver
+import dev.ggtv.kjen.Span
+import dev.ggtv.kjen.Type
 import dev.ggtv.kjen.Value
 
-/**
- * Резолвер `.kn`: как у Kjen, плюс вызовы функций ([VFunc]) и
- * живые корни мира через [WorldContext].
- *
- * Каждый вызов `KorenConfig.get(...)` создаёт новый резолвер —
- * значения функций и мира переоцениваются динамически, без
- * пересборки AST (см. SPEC.md, «Динамическая переоценка»).
- */
 class KorenResolver(
     private val root: Block,
-    private val context: WorldContext,
+    private val context: WorldContext? = null,
 ) {
 
     private val visiting = HashSet<Path>()
-    private val cache = HashMap<Path, Value>()
+    private var workRemaining = MAX_EXPANSION_WORK
 
-    /** Раскрыть путь до конкретного значения (с функциями и миром). */
     fun resolve(path: Path): Value {
+        resetWork()
+        return resolvePath(path, 0)
+    }
+
+    fun resolveRoot(): Value {
+        resetWork()
+        return Value.VBlock(resolveBlock(root, emptyPath(), 0, 0))
+    }
+
+    private fun resetWork() {
+        visiting.clear()
+        workRemaining = MAX_EXPANSION_WORK
+    }
+
+    private fun resolvePath(path: Path, referenceDepth: Int): Value {
         if (path.segments.isEmpty()) {
             throw CrenError.NotFound(path.toString())
         }
-
-        // Живой корень мира: конфиг в корне имеет приоритет над миром.
-        if (path.absolute && path.segments.size == 2 && path.indices.all { it == null }) {
-            val world = WorldRoot.bySegment(path.segments[0])
-            if (world != null && !rootHas(world.segment)) {
-                return context.field(world, path.segments[1], path.toString())
-            }
+        if (path.segments.size > MAX_REFERENCE_DEPTH) {
+            throw depthError("длина пути", MAX_REFERENCE_DEPTH)
         }
-
-        cache[path]?.let { return it }
-
+        if (referenceDepth > MAX_REFERENCE_DEPTH) {
+            throw depthError("глубина ссылок", MAX_REFERENCE_DEPTH)
+        }
         if (!visiting.add(path)) {
             throw CrenError.Cycle(path.toString())
         }
 
-        val result = resolveUncached(path)
-        visiting.remove(path)
-        cache[path] = result
-        return result
+        return try {
+            resolveFromRoot(path, referenceDepth)
+        } finally {
+            visiting.remove(path)
+        }
     }
 
-    private fun rootHas(segment: String): Boolean = root.entries.any { it.key == segment }
+    private fun resolveFromRoot(path: Path, referenceDepth: Int): Value {
+        val first = path.segments.first()
+        val rootHasFirst = root.entries.any { it.key == first }
+        if (
+            !rootHasFirst &&
+            path.absolute &&
+            path.segments.size == 2 &&
+            path.indices.all { it == null } &&
+            context != null
+        ) {
+            val worldRoot = WorldRoot.fromPath(path.segments)
+            if (worldRoot != null) {
+                return resolveValue(
+                    context.field(worldRoot, path.segments[1], path.toString()),
+                    emptyPath(),
+                    referenceDepth,
+                    0,
+                )
+            }
+        }
+        return resolveFromBlock(root, path, 0, emptyPath(), referenceDepth)
+    }
 
-    private fun resolveUncached(path: Path): Value {
-        var current: Value = Value.VBlock(root)
-        val last = path.segments.lastIndex
-        var basePath = Path(emptyList(), emptyList(), true)
+    private fun resolveFromBlock(
+        block: Block,
+        path: Path,
+        next: Int,
+        basePath: Path,
+        referenceDepth: Int,
+    ): Value {
+        if (next == path.segments.size) {
+            return Value.VBlock(resolveBlock(block, basePath, referenceDepth, 0))
+        }
 
-        for ((i, seg) in path.segments.withIndex()) {
-            val index = path.indices.getOrNull(i)
+        val label = path.toString()
+        val segment = path.segments[next]
+        val index = path.indices.getOrNull(next)
+        val entry = resolveSegment(block, segment, index, label)
 
-            val block = (current as? Value.VBlock)?.block
-                ?: throw CrenError.NotFound("${path}.$seg")
-
-            val entry = Resolver.resolveSegment(block, seg, index, path.toString())
-
-            when (val v = entry.value) {
-                is Value.VBlock -> {
-                    current = v
-                    basePath = Path(basePath.segments + seg, basePath.indices + index, true)
+        return when (val value = entry.value) {
+            is Value.VBlock -> resolveFromBlock(
+                value.block,
+                path,
+                next + 1,
+                childPath(basePath, segment, index),
+                referenceDepth,
+            )
+            is Value.VRef -> {
+                var absolute = absolutePath(basePath, value.path)
+                if (absolute.segments.isEmpty()) {
+                    return resolvePath(absolute, referenceDepth + 1)
                 }
-                is Value.VRef -> {
-                    val abs = if (v.path.absolute) {
-                        v.path
-                    } else {
-                        Path(basePath.segments + v.path.segments, basePath.indices + v.path.indices, true)
-                    }
-                    current = resolve(abs)
-                    basePath = abs
+                for (segmentIndex in next + 1 until path.segments.size) {
+                    absolute = absolute.copy(
+                        segments = absolute.segments + path.segments[segmentIndex],
+                        indices = absolute.indices + path.indices.getOrNull(segmentIndex),
+                    )
                 }
-                is VFunc -> {
-                    // Функция переоценивается при каждом разрешении пути.
-                    current = evalFunc(v, basePath)
-                    if (i != last) {
-                        // Функция в середине пути — спускаемся, если это блок.
-                        basePath = Path(basePath.segments + seg, basePath.indices + index, true)
-                    }
+                try {
+                    resolvePath(absolute, referenceDepth + 1)
+                } catch (error: CrenError.NotFound) {
+                    if (next + 1 == path.segments.size) throw error
+                    throw CrenError.NotFound(label)
                 }
-                else -> {
-                    if (i == last) {
-                        return v
-                    }
-                    throw CrenError.NotFound(path.toString())
+            }
+            is VFunc -> {
+                if (next + 1 != path.segments.size) {
+                    throw CrenError.NotFound(label)
+                }
+                val resolved = resolveValue(value, basePath, referenceDepth, 0)
+                checkFunctionResult(entry, resolved)
+                resolved
+            }
+            else -> {
+                if (next + 1 == path.segments.size) {
+                    resolveValue(value, basePath, referenceDepth, 0)
+                } else {
+                    throw CrenError.NotFound(label)
                 }
             }
         }
-
-        return current
     }
 
-    /** Вычислить функцию: все аргументы (ссылки и вложенные функции) разрешаются. */
-    private fun evalFunc(f: VFunc, basePath: Path): Value {
-        val args = f.args.map { arg -> evalArg(arg, basePath) }
-        return Functions.call(f.name, args, f.span)
+    private fun resolveValue(
+        value: Value,
+        basePath: Path,
+        referenceDepth: Int,
+        valueDepth: Int,
+    ): Value {
+        if (valueDepth >= MAX_VALUE_DEPTH) {
+            throw depthError("вложенность значений", MAX_VALUE_DEPTH)
+        }
+        consumeExpansionWork()
+
+        return when (value) {
+            is Value.VRef -> resolvePath(absolutePath(basePath, value.path), referenceDepth + 1)
+            is VFunc -> resolveFunction(value, basePath, referenceDepth, valueDepth)
+            is Value.VArray -> Value.VArray(
+                value.items.map { resolveValue(it, basePath, referenceDepth, valueDepth + 1) },
+            )
+            is Value.VDict -> Value.VDict(
+                value.pairs.map { (key, item) ->
+                    key to resolveValue(item, basePath, referenceDepth, valueDepth + 1)
+                },
+            )
+            is Value.VBlock -> Value.VBlock(
+                resolveBlock(value.block, basePath, referenceDepth, valueDepth),
+            )
+            else -> value
+        }
     }
 
-    private fun evalArg(v: Value, basePath: Path): Value = when (v) {
-        is Value.VRef -> {
-            val abs = if (v.path.absolute) {
-                v.path
+    private fun resolveFunction(
+        function: VFunc,
+        basePath: Path,
+        referenceDepth: Int,
+        valueDepth: Int,
+    ): Value {
+        val args = function.args.map {
+            resolveValue(it, basePath, referenceDepth, valueDepth + 1)
+        }
+        return Functions.call(function.name, args, function.span)
+    }
+
+    private fun resolveBlock(
+        block: Block,
+        basePath: Path,
+        referenceDepth: Int,
+        valueDepth: Int,
+    ): Block {
+        val resolved = Block()
+        val occurrences = HashMap<String, Int>()
+
+        for (entry in block.entries) {
+            val index = occurrences.getOrDefault(entry.key, 0) + 1
+            occurrences[entry.key] = index
+            val entryBase = if (entry.value is Value.VBlock) {
+                childPath(basePath, entry.key, index)
             } else {
-                Path(basePath.segments + v.path.segments, basePath.indices + v.path.indices, true)
+                basePath
             }
-            resolve(abs)
+            val value = resolveValue(
+                entry.value,
+                entryBase,
+                referenceDepth,
+                valueDepth + 1,
+            )
+            checkFunctionResult(entry, value)
+            resolved.entries += Entry(
+                key = entry.key,
+                ty = entry.ty,
+                value = value,
+                comment = entry.comment,
+                span = entry.span,
+            )
         }
-        is VFunc -> evalFunc(v, basePath)
-        else -> v
+        return resolved
     }
-}
 
-/** Корни мира в `.kn`: блоки, которых нет в конфиге, берутся из контекста мира. */
-enum class WorldRoot(val segment: String) {
-    BIOME("biome"),
-    WEATHER("weather"),
-    TIME("time"),
-    DIMENSION("dimension"),
-    LOCATION("location");
+    private fun checkFunctionResult(entry: Entry, resolved: Value) {
+        val expected = entry.ty
+        if (entry.value !is VFunc || expected == null || expected == Type.REF) return
+        val matches = when (expected) {
+            Type.STR -> resolved is Value.VStr
+            Type.INT -> resolved is Value.VInt
+            Type.FLOAT -> resolved is Value.VFloat || resolved is Value.VInt
+            Type.BOOL -> resolved is Value.VBool
+            Type.DICT -> resolved is Value.VDict
+            Type.ARRAY -> resolved is Value.VArray
+            Type.BLOCK -> resolved is Value.VBlock
+            Type.REF -> true
+        }
+        if (!matches) {
+            throw CrenError.TypeMismatch(expected.word, resolved.kind, entry.span)
+        }
+    }
+
+    private fun consumeExpansionWork() {
+        if (workRemaining == 0) {
+            throw CrenError.Parse(
+                "превышен предел раскрытия: максимум $MAX_EXPANSION_WORK",
+                Span(1, 1),
+            )
+        }
+        workRemaining--
+    }
 
     companion object {
-        fun bySegment(seg: String): WorldRoot? = entries.firstOrNull { it.segment == seg }
-    }
-}
+        const val MAX_REFERENCE_DEPTH = 256
+        const val MAX_VALUE_DEPTH = 256
+        const val MAX_EXPANSION_WORK = 65_536
 
-/**
- * SPI живой информации о мире для `.kn`.
- *
- * Игра (Fabric-мод) реализует этот интерфейс и передаёт в [KorenConfig]:
- * при каждом `get()` значения корней мира читаются заново — конфиг не
- * требует пересборки, когда игрок переместился/сменил биом или время.
- */
-interface WorldContext {
-    /**
-     * Значение поля живого корня мира: `biome.temperature`,
-     * `dimension.type` и т.д. Если поле неизвестно — [CrenError.NotFound].
-     */
-    fun field(root: WorldRoot, field: String, path: String): Value
-}
+        fun resolveSegment(block: Block, segment: String, index: Int?, pathLabel: String): Entry {
+            val count = block.entries.count { it.key == segment }
+            if (index != null) {
+                return block.get(segment, index) ?: throw CrenError.NotFound(pathLabel)
+            }
+            return when (count) {
+                0 -> {
+                    val suffixed = splitDigitSuffix(segment)
+                    if (suffixed != null) {
+                        block.get(suffixed.first, suffixed.second)
+                            ?: throw CrenError.NotFound(pathLabel)
+                    } else {
+                        throw CrenError.NotFound(pathLabel)
+                    }
+                }
+                1 -> block.get(segment, 1) ?: throw CrenError.NotFound(pathLabel)
+                else -> throw CrenError.Ambiguous(segment, count)
+            }
+        }
 
-/** [WorldContext] без живой информации: любой запрос — [CrenError.NotFound]. */
-object EmptyWorldContext : WorldContext {
-    override fun field(root: WorldRoot, field: String, path: String): Value {
-        throw CrenError.NotFound(path)
+        fun splitDigitSuffix(value: String): Pair<String, Int>? {
+            var digitStart = value.length
+            while (digitStart > 0 && value[digitStart - 1] in '0'..'9') digitStart--
+            if (digitStart == value.length) return null
+            val base = value.substring(0, digitStart)
+            if (base.isEmpty()) return null
+            val digits = value.substring(digitStart).toIntOrNull() ?: return null
+            return base to digits
+        }
+
+        private fun emptyPath(): Path = Path(emptyList(), emptyList(), true)
+
+        private fun absolutePath(basePath: Path, reference: Path): Path {
+            if (reference.absolute) return reference
+            return Path(
+                basePath.segments + reference.segments,
+                basePath.indices + reference.indices,
+                true,
+            )
+        }
+
+        private fun childPath(basePath: Path, key: String, index: Int?): Path = Path(
+            basePath.segments + key,
+            basePath.indices + index,
+            true,
+        )
+
+        private fun depthError(kind: String, limit: Int): CrenError.Parse = CrenError.Parse(
+            "превышен предел $kind: максимум $limit",
+            Span(1, 1),
+        )
     }
 }

@@ -60,7 +60,7 @@ data class Path(
                     val name = part.substring(0, idxStart)
                     val idx = part.substring(idxStart + 1, part.length - 1).toIntOrNull()
                         ?: fail("неверный номер в пути: «$s»")
-                    if (idx == 0) fail("номер в пути начинается с 1: «$s»")
+                    if (idx <= 0) fail("номер в пути начинается с 1: «$s»")
                     segments += name
                     indices += idx
                 } else {

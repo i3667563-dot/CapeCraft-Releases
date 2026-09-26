@@ -138,7 +138,7 @@ class ParserTest {
     fun `leading and trailing comments`() {
         val root = parseStr("# перед записью\nport = 8080 # после значения\n")
         val port = root.get("port", 1)!!
-        assertEquals("после значения", port.comment)
+        assertEquals("перед записью\nпосле значения", port.comment)
     }
 
     @Test
@@ -276,5 +276,93 @@ class ParserTest {
     fun `multiple leading comments all kept`() {
         val root = parseStr("# первый\n# второй\nkey = 1\n")
         assertEquals("первый\nвторой", root.get("key", 1)!!.comment)
+    }
+
+    @Test
+    fun `explicit ref type requires reference syntax`() {
+        val e = assertFailsWith<CrenError.TypeMismatch> { parseStr("x ref = 42\n") }
+        assertEquals("ref", e.expected)
+        assertEquals("int", e.found)
+    }
+
+    @Test
+    fun `leading and repeated commas are rejected`() {
+        for (input in listOf("a = [,]\n", "a = [1,,2]\n", "a = {x: 1,,}\n")) {
+            val e = assertFailsWith<CrenError.Parse> { parseStr(input) }
+            assertTrue(e.messageText.contains("лишняя «,»"))
+        }
+    }
+
+    @Test
+    fun `trailing commas are accepted`() {
+        val root = parseStr("a = [1,]\nb = {x: 2,}\n")
+        assertEquals(VArray(listOf(VInt(1))), valueOf(root, "a"))
+        assertEquals(VDict(listOf("x" to VInt(2))), valueOf(root, "b"))
+    }
+
+    @Test
+    fun `excessive nesting returns error`() {
+        val input = "a = ${"[".repeat(129)}${"]".repeat(129)}\n"
+        val e = assertFailsWith<CrenError.Parse> { parseStr(input) }
+        assertTrue(e.messageText.contains("максимум 128"))
+        assertEquals(Span(1, 133), e.span)
+    }
+
+    @Test
+    fun `environment variables are interpolated`() {
+        val config = CrenConfig.fromStringWithEnv(
+            """
+            host = "${'$'}{KJEN_HOST}"
+            port = ${'$'}KJEN_PORT
+            url = "jdbc://${'$'}{KJEN_HOST}:${'$'}{KJEN_PORT}/db"
+            fallback = "${'$'}{KJEN_MISSING:-local}"
+            hyphen_fallback = "${'$'}{KJEN_MISSING-test}"
+            empty_default = "${'$'}{KJEN_EMPTY:-fallback}"
+            empty_preserved = "${'$'}{KJEN_EMPTY-test}"
+            escaped = "${'$'}${'$'}{KJEN_HOST}"
+            currency = "cost ${'$'}5"
+            trailing = "value${'$'}"
+            bare_url = ${'$'}KJEN_URL
+            complex = "${'$'}KJEN_COMPLEX"
+            """.trimIndent(),
+            mapOf(
+                "KJEN_HOST" to "localhost",
+                "KJEN_PORT" to "9000",
+                "KJEN_EMPTY" to "",
+                "KJEN_URL" to "https://example.com/a?x=1&y=2",
+                "KJEN_COMPLEX" to "raw=${'$'}{VALUE};quote=\";brace={}",
+            ),
+        )
+
+        assertEquals("localhost", config.getStr("host"))
+        assertEquals("9000", config.getStr("port"))
+        assertEquals("jdbc://localhost:9000/db", config.getStr("url"))
+        assertEquals("local", config.getStr("fallback"))
+        assertEquals("test", config.getStr("hyphen_fallback"))
+        assertEquals("fallback", config.getStr("empty_default"))
+        assertEquals("", config.getStr("empty_preserved"))
+        assertEquals("${'$'}{KJEN_HOST}", config.getStr("escaped"))
+        assertEquals("cost ${'$'}5", config.getStr("currency"))
+        assertEquals("value${'$'}", config.getStr("trailing"))
+        assertEquals("https://example.com/a?x=1&y=2", config.getStr("bare_url"))
+        assertEquals("raw=${'$'}{VALUE};quote=\";brace={}", config.getStr("complex"))
+    }
+
+    @Test
+    fun `missing environment variable is an error`() {
+        val e = assertFailsWith<CrenError.Parse> {
+            CrenConfig.fromStringWithEnv("host = \"${'$'}{KJEN_MISSING}\"\n", emptyMap())
+        }
+        assertTrue(e.messageText.contains("переменная окружения «KJEN_MISSING» не задана"))
+    }
+
+    @Test
+    fun `malformed environment reference is an error`() {
+        for (input in listOf("a = \"${'$'}{1BAD}\"\n", "a = \"${'$'}{OPEN\"\n")) {
+            val e = assertFailsWith<CrenError.Parse> {
+                CrenConfig.fromStringWithEnv(input, emptyMap())
+            }
+            assertTrue(e.messageText.contains("окружения"))
+        }
     }
 }

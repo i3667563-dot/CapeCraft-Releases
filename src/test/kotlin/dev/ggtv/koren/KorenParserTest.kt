@@ -2,6 +2,7 @@ package dev.ggtv.koren
 
 import dev.ggtv.kjen.Block
 import dev.ggtv.kjen.CrenError
+import dev.ggtv.kjen.Span
 import dev.ggtv.kjen.Type
 import dev.ggtv.kjen.Value
 import dev.ggtv.kjen.Value.*
@@ -142,7 +143,7 @@ class KorenParserTest {
     fun `function call is parsed as VFunc`() {
         val v = valueOf(parseStr("x = clamp(a, 0, 100)\n"), "x")
         assertTrue(v is VFunc)
-        assertEquals("clamp", (v as VFunc).name)
+        assertEquals("clamp", v.name)
         assertEquals(3, v.args.size)
         assertTrue(v.args[0] is VRef)
         assertEquals(VInt(0), v.args[1])
@@ -168,7 +169,7 @@ class KorenParserTest {
     fun `leading and trailing comments`() {
         val root = parseStr("# перед записью\nport = 8080 # после значения\n")
         val port = root.get("port", 1)!!
-        assertEquals("после значения", port.comment)
+        assertEquals("перед записью\nпосле значения", port.comment)
     }
 
     @Test
@@ -326,5 +327,114 @@ class KorenParserTest {
         val root = parseStr("x = unknownfunc(a, b)\n")
         val v = valueOf(root, "x")
         assertTrue(v is VFunc)
+    }
+
+    @Test
+    fun `unclosed block reports opening brace span`() {
+        val e = assertFailsWith<CrenError.Parse> { parseStr("server {\n  host = \"x\"\n") }
+        assertEquals(Span(1, 8), e.span)
+    }
+
+    @Test
+    fun `error at eof uses last token span`() {
+        val e = assertFailsWith<CrenError.Parse> { parseStr("a = [1") }
+        assertEquals(Span(1, 6), e.span)
+    }
+
+    @Test
+    fun `explicit ref type requires reference syntax`() {
+        val e = assertFailsWith<CrenError.TypeMismatch> { parseStr("x ref = 42\n") }
+        assertEquals("ref", e.expected)
+        assertEquals("int", e.found)
+    }
+
+    @Test
+    fun `leading and repeated commas are rejected`() {
+        for (input in listOf("a = [,]\n", "a = [1,,2]\n", "a = {x: 1,,}\n", "a = f(1,,2)\n")) {
+            val e = assertFailsWith<CrenError.Parse> { parseStr(input) }
+            assertTrue(e.messageText.contains("лишняя «,»"))
+        }
+    }
+
+    @Test
+    fun `trailing commas are accepted`() {
+        val root = parseStr("a = [1,]\nb = {x: 2,}\nc = f(1,)\n")
+        assertEquals(VArray(listOf(VInt(1))), valueOf(root, "a"))
+        assertEquals(VDict(listOf("x" to VInt(2))), valueOf(root, "b"))
+        assertEquals(1, (valueOf(root, "c") as VFunc).args.size)
+    }
+
+    @Test
+    fun `excessive nesting returns error`() {
+        val input = "a = ${"[".repeat(129)}${"]".repeat(129)}\n"
+        val e = assertFailsWith<CrenError.Parse> { parseStr(input) }
+        assertTrue(e.messageText.contains("максимум 128"))
+        assertEquals(Span(1, 133), e.span)
+    }
+
+    @Test
+    fun `oversized path index is rejected`() {
+        val e = assertFailsWith<CrenError.Parse> {
+            parseStr("a = key[9223372036854775807]\n")
+        }
+        assertTrue(e.messageText.contains("слишком велик"))
+    }
+
+    @Test
+    fun `environment variables are interpolated`() {
+        val config = KorenConfig.fromStringWithEnv(
+            """
+            host = "${'$'}{KOREN_HOST}"
+            port = ${'$'}KOREN_PORT
+            url = "jdbc://${'$'}{KOREN_HOST}:${'$'}{KOREN_PORT}/db"
+            fallback = "${'$'}{KOREN_MISSING:-local}"
+            hyphen_fallback = "${'$'}{KOREN_MISSING-test}"
+            empty_default = "${'$'}{KOREN_EMPTY:-fallback}"
+            empty_preserved = "${'$'}{KOREN_EMPTY-test}"
+            escaped = "${'$'}${'$'}{KOREN_HOST}"
+            currency = "cost ${'$'}5"
+            trailing = "value${'$'}"
+            bare_url = ${'$'}KOREN_URL
+            function_env = hash(${'$'}KOREN_FUNCTION_ARG)
+            complex = "${'$'}KOREN_COMPLEX"
+            """.trimIndent(),
+            mapOf(
+                "KOREN_HOST" to "localhost",
+                "KOREN_PORT" to "9000",
+                "KOREN_EMPTY" to "",
+                "KOREN_URL" to "https://example.com/a?x=1&y=2",
+                "KOREN_FUNCTION_ARG" to "42",
+                "KOREN_COMPLEX" to "raw=${'$'}{VALUE};quote=\";brace={}",
+            ),
+        )
+
+        assertEquals("localhost", config.getStr("host"))
+        assertEquals("9000", config.getStr("port"))
+        assertEquals("jdbc://localhost:9000/db", config.getStr("url"))
+        assertEquals("local", config.getStr("fallback"))
+        assertEquals("test", config.getStr("hyphen_fallback"))
+        assertEquals("fallback", config.getStr("empty_default"))
+        assertEquals("", config.getStr("empty_preserved"))
+        assertEquals("${'$'}{KOREN_HOST}", config.getStr("escaped"))
+        assertEquals("cost ${'$'}5", config.getStr("currency"))
+        assertEquals("value${'$'}", config.getStr("trailing"))
+        assertEquals("https://example.com/a?x=1&y=2", config.getStr("bare_url"))
+        assertEquals(config.getInt("function_env"), KorenConfig.fromString("x = hash(42)\n").getInt("x"))
+        assertEquals("raw=${'$'}{VALUE};quote=\";brace={}", config.getStr("complex"))
+    }
+
+    @Test
+    fun `missing or malformed environment reference is an error`() {
+        val missing = assertFailsWith<CrenError.Parse> {
+            KorenConfig.fromStringWithEnv("host = \"${'$'}{KOREN_MISSING}\"\n", emptyMap())
+        }
+        assertTrue(missing.messageText.contains("не задана"))
+
+        for (input in listOf("a = \"${'$'}{1BAD}\"\n", "a = \"${'$'}{OPEN\"\n")) {
+            val malformed = assertFailsWith<CrenError.Parse> {
+                KorenConfig.fromStringWithEnv(input, emptyMap())
+            }
+            assertTrue(malformed.messageText.contains("окружения"))
+        }
     }
 }

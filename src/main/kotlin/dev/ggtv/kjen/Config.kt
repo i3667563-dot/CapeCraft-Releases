@@ -20,6 +20,13 @@ class CrenConfig private constructor(private val root: Block) {
             return CrenConfig(root)
         }
 
+        /** Разобрать конфиг из строки с заданным окружением. */
+        fun fromStringWithEnv(input: String, env: Map<String, String>): CrenConfig {
+            val tokens = Tokenizer.tokenizeWithEnv(input, env)
+            val root = Parser.parse(tokens)
+            return CrenConfig(root)
+        }
+
         /** Прочитать конфиг из файла `.crn`. */
         fun load(path: JPath): CrenConfig {
             val text = try {
@@ -36,6 +43,9 @@ class CrenConfig private constructor(private val root: Block) {
 
     /** Получить значение по пути, автоматически раскрыв ссылки. */
     fun get(path: String): Value = Resolver(root).resolve(Path.parse(path))
+
+    /** Получить полностью раскрытое дерево конфигурации. */
+    fun toValue(): Value = Resolver(root).resolveRoot()
 
     /** Типизированный доступ: строка. */
     fun getStr(path: String): String = when (val v = get(path)) {

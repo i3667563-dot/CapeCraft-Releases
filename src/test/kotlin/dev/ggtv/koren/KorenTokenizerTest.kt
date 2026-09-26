@@ -200,4 +200,29 @@ class KorenTokenizerTest {
             kinds("# один\n\n# два\n"),
         )
     }
+
+    @Test
+    fun `non finite float is rejected`() {
+        val e = assertFailsWith<CrenError.Parse> {
+            KorenTokenizer.tokenize("a = ${"9".repeat(309)}.0\n")
+        }
+        assertTrue(e.messageText.contains("вне диапазона f64"))
+    }
+
+    @Test
+    fun `fractional number suffix is rejected`() {
+        val e = assertFailsWith<CrenError.Parse> { KorenTokenizer.tokenize("a = 2.3foo\n") }
+        assertTrue(e.messageText.contains("после дробного числа"))
+    }
+
+    @Test
+    fun `raw environment value supports supplementary unicode`() {
+        val tokens = KorenTokenizer.tokenizeWithEnv(
+            "emoji = ${'$'}KOREN_EMOJI\nport = 8080\n",
+            mapOf("KOREN_EMOJI" to "😀"),
+        )
+        assertEquals(Str("😀"), tokens[2].kind)
+        assertEquals(Word("port"), tokens[4].kind)
+        assertEquals(Int(8080), tokens[6].kind)
+    }
 }
