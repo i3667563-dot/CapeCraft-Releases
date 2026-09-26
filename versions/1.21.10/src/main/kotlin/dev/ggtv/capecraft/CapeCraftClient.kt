@@ -1,55 +1,47 @@
 package dev.ggtv.capecraft
 
-import dev.ggtv.capecraft.api.CapeAddon
+import dev.ggtv.capecraft.api.CapeAddonLoader
+import dev.ggtv.capecraft.api.CapeApiHolder
+import dev.ggtv.capecraft.api.CAPE_RUNTIME_API_VERSION
+import dev.ggtv.capecraft.sync.CapeSyncClient
 import net.fabricmc.api.ClientModInitializer
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents
-import net.fabricmc.loader.api.FabricLoader
 
 /**
  * Точка входа CapeCraft (клиент).
  *
- * Мод целиком клиентский: плащи рендерятся локально,
- * серверная часть не затрагивается.
+ * Клиент отвечает за рендер плащей и за скачивание картинок; набор
+ * провайдеров при этом может прийти с сервера (см. [CapeSyncClient]) —
+ * серверная половина живёт в [CapeCraftServer].
  *
  * На init:
  *  1. загружаем аддоны (entrypoint `capecraft:addons`) — они регистрируют
  *     свои типы провайдеров, декодеры и плейсхолдеры;
- *  2. читаем конфиг (провайдеры + лимиты) — ProviderLoader видит аддон-типы;
+ *  2. читаем конфиг (провайдеры + лимиты + serverSync) — ProviderLoader
+ *     видит аддон-типы;
  *  3. собираем реестр плащей;
  *  4. регистрируем команды `/cp`;
- *  5. подписываемся на тик клиента — чтобы при входе в мир локального
- *     игрока сразу подгрузить его плащ (диагностика в логе + кэш готов
- *     до первого кадра рендера).
+ *  5. подписываемся на тик клиента — при входе в мир локального игрока
+ *     сразу подгружаем его плащ (кэш готов до первого кадра рендера);
+ *  6. подписываемся на сетевую синхронизацию с сервером.
+ *
+ * MC 1.21.x: имена yarn.
  */
 class CapeCraftClient : ClientModInitializer {
     override fun onInitializeClient() {
-        loadAddons()
+        CapeAddonLoader.load()
         config = CapeConfig()
         registry = CapeRegistry(providers = config.providers, limits = config.limits, root = config.rootFor())
         CapeCommands.register(registry)
+        CapeSyncClient.initialize()
         warmUpLocalPlayerCape()
         startAnimationTicker()
-        LOGGER.info(
-            "CapeCraft загружен (API ${dev.ggtv.capecraft.api.CAPE_RUNTIME_API_VERSION}): " +
+        CapeCraftLog.LOGGER.info(
+            "CapeCraft загружен (API $CAPE_RUNTIME_API_VERSION): " +
                 "провайдеров ${config.providers.size}, " +
-                "аддон-типов ${CapeCraftClient.addonSourceTypes}, " +
-                "аддон-декодеров ${CapeCraftClient.addonDecoders}",
+                "аддон-типов ${CapeApiHolder.api.sourceTypes.ids().size}, " +
+                "аддон-декодеров ${CapeApiHolder.api.decoders.ids().size}",
         )
-    }
-
-    /** Загрузить аддоны через Fabric entrypoint `capecraft:addons`. */
-    private fun loadAddons() {
-        val containers = FabricLoader.getInstance().getEntrypointContainers(ADDON_ENTRYPOINT, CapeAddon::class.java)
-        val api = dev.ggtv.capecraft.api.CapeApiHolder.api
-        for (c in containers) {
-            try {
-                c.entrypoint.register(api)
-                val meta = c.provider.metadata
-                LOGGER.info("CapeCraft: аддон «${meta.name}» зарегистрирован")
-            } catch (e: Exception) {
-                LOGGER.error("CapeCraft: аддон «${c.provider.metadata.id}» упал при регистрации: ${e.message}", e)
-            }
-        }
     }
 
     /**
@@ -93,16 +85,22 @@ class CapeCraftClient : ClientModInitializer {
             // Реалтайм-пересчёт условий провайдеров (день/ночь/погода/биом):
             // каждый ~20-й тик (~1 сек) проверяем, не сменился ли выбранный
             // провайдер, и при смене — бесшовно подгружаем новый плащ.
-            if (tick % 20 == 0) registry.refreshConditions(dev.ggtv.capecraft.render.MinecraftWorldContext)
+            if (tick % 20 == 0) {
+                registry.refreshConditions(dev.ggtv.capecraft.render.MinecraftWorldContext)
+                // Тот же тик — шаг синхронизации с сервером (интервал внутри).
+                CapeSyncClient.onClientTick(inWorld = true)
+            }
         }
     }
 
     companion object {
-        const val MOD_ID = "capecraft"
-        const val ADDON_ENTRYPOINT = "capecraft:addons"
-        val LOGGER = org.slf4j.LoggerFactory.getLogger(MOD_ID)
+        const val MOD_ID: String = CapeCraftLog.MOD_ID
+        const val ADDON_ENTRYPOINT: String = CapeAddonLoader.ENTRYPOINT
 
-        /** Конфиг мода (провайдеры + лимиты). */
+        /** Логгер мода (общий с серверной частью — см. [CapeCraftLog]). */
+        val LOGGER = CapeCraftLog.LOGGER
+
+        /** Конфиг мода (провайдеры + лимиты + serverSync). */
         lateinit var config: CapeConfig
             private set
 
@@ -111,10 +109,10 @@ class CapeCraftClient : ClientModInitializer {
             private set
 
         /** Статистика: число аддон-типов провайдеров (для логов). */
-        val addonSourceTypes: Int get() = dev.ggtv.capecraft.api.CapeApiHolder.api.sourceTypes.ids().size
+        val addonSourceTypes: Int get() = CapeApiHolder.api.sourceTypes.ids().size
 
         /** Статистика: число аддон-декодеров (для логов). */
-        val addonDecoders: Int get() = dev.ggtv.capecraft.api.CapeApiHolder.api.decoders.ids().size
+        val addonDecoders: Int get() = CapeApiHolder.api.decoders.ids().size
 
         /** Пересоздать реестр после перезагрузки конфига (для `/cp reload`). */
         @Synchronized

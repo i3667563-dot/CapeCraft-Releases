@@ -11,6 +11,7 @@ import dev.ggtv.capecraft.memory.MemoryManager
 import dev.ggtv.capecraft.provider.CapeFetcher
 import dev.ggtv.capecraft.provider.CompositeFetcher
 import dev.ggtv.capecraft.provider.FetchError
+import dev.ggtv.capecraft.provider.Guard
 import dev.ggtv.capecraft.provider.Provider
 import dev.ggtv.capecraft.provider.resolveCapeOrdered
 import dev.ggtv.capecraft.render.MinecraftWorldContext
@@ -63,6 +64,64 @@ class CapeRegistry(
     private var memory: MemoryManager = MemoryManager(limits)
     private val errors = ConcurrentHashMap<String, String>()
     private val usernames = ConcurrentHashMap<String, String>()
+
+    /**
+     * true = [providers] пришли с СЕРВЕРА и уже отобраны по его миру.
+     *
+     * В этом режиме клиент не пересчитывает `when`-условия ([order] отдаёт
+     * список «как есть»), а [refreshConditions] молчит: новый набор придёт
+     * следующим ответом сервера, а не локальным пересчётом по миру клиента.
+     */
+    @Volatile
+    var isServerAuthoritative: Boolean = false
+        private set
+
+    /**
+     * Проверка источника перед скачиванием (см. [Guard]). Задаётся только
+     * для набора с сервера: локальный конфиг пользователь писал сам.
+     */
+    @Volatile
+    private var guard: Guard? = null
+
+    /**
+     * Переключить реестр на набор, присланный сервером.
+     *
+     * Провайдеры приходят уже упорядоченными и активными, поэтому
+     * [ProviderSelector] не применяется, а [refreshConditions] отключается.
+     * Текстуры не трогаются — плащи бесшовно доезжают в фоне.
+     *
+     * Если набор структурно тот же, что уже применён, ничего не делаем: иначе
+     * каждый тик на сервере с `requireServer` (или после каждого ответа с тем
+     * же fingerprint) пересоздавал бы кэш памяти и заново качал все плащи.
+     */
+    fun useServerProviders(newProviders: List<Provider>, newRoot: String, newGuard: Guard? = null) {
+        if (sameAsCurrent(newProviders, newRoot) && isServerAuthoritative && guard != null) return
+        guard = newGuard
+        isServerAuthoritative = true
+        reload(newProviders, memory.limits, newRoot)
+    }
+
+    /** Вернуться к локальному конфигу (сервер не ответил / рассинхрон). */
+    fun useLocalProviders(newProviders: List<Provider>, newRoot: String) {
+        if (sameAsCurrent(newProviders, newRoot) && !isServerAuthoritative && guard == null) return
+        guard = null
+        isServerAuthoritative = false
+        reload(newProviders, memory.limits, newRoot)
+    }
+
+    /**
+     * Структурное сравнение текущего набора с новым.
+     *
+     * [Provider] — обычный класс (не data), поэтому `==` на списках сравнивал
+     * бы ссылки. Сравниваем всё, что реально влияет на загрузку: имя, вид
+     * источника, приоритет и наличие аддон-источника.
+     */
+    private fun sameAsCurrent(newProviders: List<Provider>, newRoot: String): Boolean =
+        root == newRoot && fingerprintOf(providers) == fingerprintOf(newProviders)
+
+    private fun fingerprintOf(list: List<Provider>): String = list.joinToString("\u0000") {
+        "${'$'}{it.name}\u0001${'$'}{it.priority}\u0001${'$'}{it.addonSource != null}\u0001${'$'}{it.source}"
+    }
 
     /** UUID, чей плащ сейчас грузится в фоне (защита от дублей). */
     private val loading = ConcurrentHashMap.newKeySet<String>()
@@ -117,13 +176,23 @@ class CapeRegistry(
             lastConditionsFingerprint = ""
             // Перезагрузка всех известных игроков — напрямую в очередь воркера
             // (single-thread, FIFO): последняя задача с новым поколением победит.
-            val ordered = ProviderSelector.select(providers, world)
+            val ordered = order()
             for (uuid in usernames.keys) {
                 loading.add(uuid)
                 executor.execute { loadInBackground(uuid, ordered) }
             }
         }
     }
+
+    /**
+     * Порядок провайдеров для загрузки.
+     *
+     * Обычный режим — [ProviderSelector] пересчитывает `when`-условия на
+     * живом мире клиента. Режим сервера — список уже отобран и упорядочен
+     * сервером, пересчитывать нечего (и опасно: мир клиента может отличаться).
+     */
+    private fun order(): List<Provider> =
+        if (isServerAuthoritative) providers else ProviderSelector.select(providers, world)
 
     /**
      * Достать плащ по UUID, если он уже загружен. НЕ блокирует рендер-поток:
@@ -149,7 +218,7 @@ class CapeRegistry(
             usernames[uuid] = username
             // Порядок провайдеров вычисляем ЗДЕСЬ (рендер-поток), где безопасно
             // читать живой мир; воркеру передаём уже готовый список.
-            val ordered = ProviderSelector.select(providers, world)
+            val ordered = order()
             synchronized(lock) { lastConditionsFingerprint = ordered.joinToString("\u0000") { it.name } }
             executor.execute { loadInBackground(uuid, ordered) }
         }
@@ -161,7 +230,7 @@ class CapeRegistry(
         val username = usernames[uuid] ?: ""
         try {
             val ctx = Placeholders.Context(username = username, uuid = stripDashes(uuid), name = "")
-            val bytes = resolveCapeOrdered(ordered, ctx, root, fetcher).bytes
+            val bytes = resolveCapeOrdered(ordered, ctx, root, fetcher, guard).bytes
             val decoded = ImageDecoder.decode(bytes, source = username)
             // Тяжёлая деградация (area-average по всем кадрам) — на воркере,
             // до захвата lock. Под lock только быстрая вставка в кэш.
@@ -323,7 +392,8 @@ class CapeRegistry(
      * перепланирует загрузку всех известных игроков с новым порядком.
      */
     fun refreshConditions(world: WorldContext) {
-        val ordered = ProviderSelector.select(providers, world)
+        if (isServerAuthoritative) return
+        val ordered = order()
         val fp = ordered.joinToString("\u0000") { it.name }
         synchronized(lock) {
             if (fp == lastConditionsFingerprint) return

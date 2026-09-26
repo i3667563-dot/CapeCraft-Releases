@@ -93,12 +93,19 @@ fun resolveCapeResult(
  * Реестр использует это, чтобы читать живой мир ТОЛЬКО на рендер-потоке
  * (где безопасен `MinecraftWorldContext`) и передавать упорядоченный список
  * в фоновый воркер — без повторного обращения к миру из чужого потока.
+ *
+ * @param guard опциональная проверка РАЗРЕШЁННОГО источника (см. [Guard]):
+ *          вызывается после подстановки плейсхолдеров, до [CapeFetcher.fetch].
+ *          Бросок = провайдер считается не сработавшим, fallback идёт дальше.
+ *          Нужен для провайдеров, пришедших с сервера: клиент не должен
+ *          читать файлы за пределами своей папки игры.
  */
 fun resolveCapeOrdered(
     ordered: List<Provider>,
     ctx: dev.ggtv.capecraft.schema.Placeholders.Context,
     root: String,
     fetcher: CapeFetcher,
+    guard: Guard? = null,
 ): CapeFetchResult {
     val errors = mutableListOf<String>()
     for (p in ordered) {
@@ -107,6 +114,14 @@ fun resolveCapeOrdered(
         } catch (e: Exception) {
             errors += "провайдер «${p.name}»: сборка шаблона: ${e.message.orEmpty()}"
             continue
+        }
+        if (guard != null) {
+            try {
+                guard.check(resolved)
+            } catch (e: Exception) {
+                errors += "провайдер «${p.name}»: отклонён проверкой: ${e.message.orEmpty()}"
+                continue
+            }
         }
         try {
             val bytes = fetcher.fetch(resolved)
@@ -119,3 +134,9 @@ fun resolveCapeOrdered(
         "ни один провайдер не отдал капку. Причины:\n  " + errors.joinToString("\n  "),
     )
 }
+
+/** Проверка конкретного [Resolved] источника перед загрузкой байтов. */
+fun interface Guard {
+    fun check(resolved: Resolved)
+}
+

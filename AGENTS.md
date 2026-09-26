@@ -12,7 +12,13 @@
 - `./gradlew build -Pmc=1.21.11`   — yarn (Fabric mod)
 - `./gradlew build -Pmc=26.2`      — необфусцированная MC (дефолт при отсутствии `-Pmc`)
 
-Все сборки: BUILD SUCCESSFUL, 376 тестов, 0 failures.
+Все сборки: BUILD SUCCESSFUL, 519 тестов, 0 failures (проверено 26.09.2026).
+
+**`clean` при переключении версии НЕ нужен**: у каждой версии свой каталог
+выходов `build/<mc>` (`layout.buildDirectory` в build.gradle), поэтому
+incremental-кэш Kotlin разных версий не смешивается. `./gradlew cleanAll`
+сносит выходы сразу всех версий. До этого фикса общий `build/` ронял сборку
+на соседней версии с «Unresolved reference 'CapeCraftClient'».
 
 ## Структура
 
@@ -20,10 +26,12 @@
 src/main/kotlin/dev/ggtv/                 # ОБЩИЙ версион-независимый код
   koren/  kjen/                           # Вендоренные библиотеки (НЕ менять бесконтрольно)
   capecraft/{cren,image,schema,provider,memory,condition,api}/  # общий движок + addon API
+  capecraft/sync/                         # серверная синхронизация плащей (общая, без MC API)
 src/main/resources/                       # общий mixins.json и ресурсы
 versions/<mc>/src/main/kotlin/dev/ggtv/capecraft/   # версонно-зависимый код
-  CapeCommands|CapeCraftClient|CapeRegistry|CapeTexture|CapeConfig? нет — конфиг общий
-  mixin/, render/MinecraftWorldContext.kt, api/render/
+  CapeCommands|CapeCraftClient|CapeCraftServer|CapeRegistry|CapeTexture|CapeConfig? нет — конфиг общий
+  mixin/, render/MinecraftWorldContext.kt, render/ServerWorldContext.kt, api/render/
+  sync/                                   # MC-обвязка протокола: payload'ы, клиент, сервер, право
 versions/<mc>/src/test/kotlin/            # версионные тесты (RenderModifierTest, examples)
 versions/<mc>/src/main/resources/fabric.mod.json
 versions/<mc>/gradle.properties           # minecraft_version, loader/fabric/yarn, java_version
@@ -52,6 +60,62 @@ versions/<mc>/gradle.properties           # minecraft_version, loader/fabric/yar
 | 1.21.10 | 1.17.20 (remap `fabric-loom`) | 0.19.5 | 0.138.4+1.21.10 | 1.14.1+kotlin.2.4.20 / 2.4.20 | 21 | 1.21.10+build.3 | да |
 | 1.21.11 | 1.17.20 (remap `fabric-loom`) | 0.19.5 | 0.141.6+1.21.11 | 1.14.1+kotlin.2.4.20 / 2.4.20 | 21 | 1.21.11+build.6 | да |
 | 26.2 | 1.17.20 (no-remap `net.fabricmc.fabric-loom`) | 0.19.5 | 0.160.0+26.2 | 1.14.1+kotlin.2.4.20 / 2.4.20 | 26 | — | нет (необфусц.) |
+
+## Серверная синхронизация плащей (CapeCraft Sync)
+
+Протокол v1, каналы `capecraft:sync_req` (C2S) и `capecraft:sync_resp` (S2C).
+Сервер решает `when`-условия провайдеров у себя (мир настоящий) и отдаёт
+**только активные** провайдеры; байты картинок по сети не ходят.
+
+### Разделение на общее и версионное
+- **Общее** (`src/main/kotlin/dev/ggtv/capecraft/sync/`, без MC API, тестируется
+  обычными JUnit-тестами): `SyncProtocol` (каналы/версия/лимиты), `SyncCodec`
+  (строгий бинарный формат), `CapeSyncState` (чистая машина: опрос, таймаут,
+  fingerprint, fallback), `SyncPolicy` (URL/file/addon-политика), `ActiveCape`,
+  `ServerCapeCatalog`, `ServerSyncSettings` (блок `serverSync` конфига).
+- **Версионное** (`versions/<mc>/.../sync/`): `CapeSyncPayloads` (payload'ы
+  и кодек), `CapeSyncClient`, `CapeSyncServer`, `CapeServerPermission`,
+  `ServerCapeConfig`; плюс `render/ServerWorldContext.kt` и `CapeCraftServer`
+  (`main`-entrypoint — мод работает и на выделенном сервере, поэтому
+  `fabric.mod.json` у всех версий: `environment: "*"` + entrypoint `main`).
+
+Оба payload'а кодируются ОДНИМ `SyncCodec`, так клиент и сервер проверяют
+версию протокола и лимиты симметрично.
+
+### Правила fallback (`CapeSyncState` + `CapeSyncClient`)
+- валидный пустой ответ сервера = «плащей нет» (локальный набор отключается);
+- таймаут / сервер без мода = локальный набор, но при `requireServer = true` —
+  пустой набор;
+- первый ответ применяется всегда: fingerprintunset ≠ fingerprint пустого набора.
+
+### Политика источников (`SyncPolicy`)
+- серверный `file` разрешён только внутри папки игры (проверка по факту
+  подстановки `!SyncPolicy.isInside`), иначе провайдер отбрасывается;
+- серверный addon-провайдер восстанавливается ТОЛЬКО из совпадающего
+  локального — сервер не может дописать новые значения аддона.
+
+### Точки расхождения API между версиями
+| Что | 1.21.1–1.21.8 | 1.21.10 | 1.21.11 | 26.2 (Mojang) |
+|---|---|---|---|---|
+| буфер кодеков | `RegistryByteBuf` | `RegistryByteBuf` | `RegistryByteBuf` | `RegistryFriendlyByteBuf` |
+| payload | `CustomPayload` + `getId()` | то же | то же | `CustomPacketPayload` + `type()` |
+| id payload | `CustomPayload.id(String)` | то же | то же | `CustomPacketPayload.createType(String)` |
+| codec | `PacketCodec` | то же | то же | `StreamCodec` |
+| регистрация каналов | `PayloadTypeRegistry.playC2S/playS2C` | то же | то же | `...serverboundPlay/clientboundPlay` |
+| регистрация команд | `CommandRegistrationCallback` (2 арг.) | то же | то же | 3 арг. (`+ Commands.CommandSelection`) |
+| команда | `CommandManager.literal` | то же | то же | `Commands.literal` |
+| право на `/capecraft` | `hasPermissionLevel(2)` | то же | `permissions.hasPermission(Permission.Level(PermissionLevel.GAMEMASTERS))` | `permissions().hasPermission(Permission.HasCommandLevel(PermissionLevel.GAMEMASTERS))` |
+| мир игрока (сервер) | `player.world` | `player.entityWorld` | `player.entityWorld` | `player.level()` |
+| время суток | `world.timeOfDay` | то же | то же | `world.getOverworldClockTime()` (`getDayTime()` больше нет) |
+| биом | `world.getBiome(pos)` | то же | то же | `world.biomeManager.getBiome(pos)` |
+| ключ измерения | `world.getRegistryKey()` | то же | то же | `world.dimension()` |
+| ответ клиенту | `sendFeedback({ Text })` | то же | то же | `sendSuccess({ Component })` |
+| соединение (клиент) | `MinecraftClient.networkHandler` | то же | то же | `Minecraft.getConnection()` |
+
+`hasPermissionLevel(2)` в 1.21.11 и уровневые права в 26.2 вынесены в
+`CapeServerPermission.GAMEMASTER` — это единственное место, где версии
+расходятся по правам; в 26.2 форма `hasPermission(Permission.HasCommandLevel(...))`
+работает и для `LevelBasedPermissionSet`, и для `PermissionSetUnion`.
 
 ## Рендер-пайплайн по версиям
 
@@ -85,8 +149,22 @@ versions/<mc>/gradle.properties           # minecraft_version, loader/fabric/yar
 | `net.minecraft.entity.Entity` | `net.minecraft.world.entity.Entity` |
 | `net.minecraft.client.MinecraftClient` | `net.minecraft.client.Minecraft` |
 | `net.minecraft.client.world.ClientWorld` | `net.minecraft.client.multiplayer.ClientLevel` |
+| `net.minecraft.network.packet.CustomPayload` | `net.minecraft.network.protocol.common.custom.CustomPacketPayload` |
+| `net.minecraft.network.PacketByteBuf` / `RegistryByteBuf` | `net.minecraft.network.FriendlyByteBuf` / `RegistryFriendlyByteBuf` |
+| `net.minecraft.network.codec.PacketCodec` | `net.minecraft.network.codec.StreamCodec` |
+| `PayloadTypeRegistry.playC2S()/playS2C()` | `PayloadTypeRegistry.serverboundPlay()/clientboundPlay()` |
+| `net.minecraft.server.command.CommandManager` | `net.minecraft.commands.Commands` |
+| `net.minecraft.server.command.ServerCommandSource` | `net.minecraft.commands.CommandSourceStack` |
+| `net.minecraft.server.network.ServerPlayerEntity` | `net.minecraft.server.level.ServerPlayer` |
+| `net.minecraft.server.world.ServerWorld` | `net.minecraft.server.level.ServerLevel` |
+| `net.minecraft.world.World` | `net.minecraft.world.level.Level` |
+| `world.getRegistryKey()` | `world.dimension()` |
+| `world.timeOfDay` | `world.getOverworldClockTime()` |
+| `sendFeedback({ Text })` | `sendSuccess({ Component })` |
+| `ClientCommandManager` | `ClientCommands` |
+| `MinecraftClient.networkHandler` | `Minecraft.getConnection()` |
 
-(таблица неполная — доразбирать при правках рендер-кода в каждой версии)
+(таблица неполная — доразбирать при правках кода в каждой версии)
 
 ## API обеих версий (render)
 
@@ -101,9 +179,13 @@ versions/<mc>/gradle.properties           # minecraft_version, loader/fabric/yar
 ## Команды проверки
 
 ```bash
-./gradlew clean build -Pmc=1.21.1    # и 1.21.4, 1.21.8, 1.21.10, 1.21.11
-./gradlew clean build -Pmc=26.2      # полная сборка 26.2 + тесты
+# Полная сборка версии (компиляция + тесты + remapJar) — clean НЕ обязателен,
+# у каждой версии свой build/<mc>.
+./gradlew build -Pmc=1.21.1    # и 1.21.4, 1.21.8, 1.21.10, 1.21.11, 26.2
+./gradlew cleanAll             # снести выходы всех версий
 ```
+
+Все шесть версий: BUILD SUCCESSFUL, 519 тестов, 0 failures.
 
 ## mixins.json
 

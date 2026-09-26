@@ -1,6 +1,7 @@
 package dev.ggtv.capecraft
 
 import com.mojang.brigadier.context.CommandContext
+import dev.ggtv.capecraft.sync.CapeSyncClient
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback
 import net.fabricmc.fabric.api.client.command.v2.ClientCommands
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource
@@ -12,7 +13,8 @@ import net.minecraft.network.chat.Component
  *
  *  - `/cp reload` — перечитать конфиг провайдеров и сбросить кэш плащей;
  *  - `/cp list`   — показать закэшированные плащи (UUID) и объём памяти;
- *  - `/cp status` — общее состояние: число плащей, память, лимиты;
+ *  - `/cp status` — общее состояние: число плащей, память, лимиты, sync;
+ *  - `/cp sync`   — спросить у сервера активный набор плащей прямо сейчас;
  *  - `/cp clear`  — очистить кэш плащей.
  *
  * Регистрируются как клиентские команды (Fabric API) — работают в одиночке
@@ -27,6 +29,7 @@ object CapeCommands {
                     .then(ClientCommands.literal("reload").executes { reload(it, registry) })
                     .then(ClientCommands.literal("list").executes { list(it, registry) })
                     .then(ClientCommands.literal("status").executes { status(it, registry) })
+                    .then(ClientCommands.literal("sync").executes { sync(it) })
                     .then(ClientCommands.literal("clear").executes { clear(it, registry) }),
             )
         }
@@ -37,9 +40,28 @@ object CapeCommands {
         // реестре (бесшовно: старые текстуры висят, пока новые грузятся в фоне).
         val cfg = CapeCraftClient.config
         cfg.reload()
-        registry.reload(cfg.providers, cfg.limits, cfg.rootFor())
+        CapeSyncClient.applySettings(cfg.serverSync)
+        // Если сейчас активен набор с сервера — перечитывание локального
+        // конфига его не отменяет: сервер пришлёт свой набор следующим ответом.
+        if (!registry.isServerAuthoritative) {
+            registry.reload(cfg.providers, cfg.limits, cfg.rootFor())
+        }
         val msg = if (cfg.lastError != null) " с ошибкой: ${cfg.lastError}" else ""
         ctx.source.sendFeedback(Component.literal("Конфиг перезагружен ($cfg.path). Провайдеров: ${cfg.providers.size}, перезагрузка плащей в фоне$msg"))
+        return 1
+    }
+
+    private fun sync(ctx: CommandContext<FabricClientCommandSource>): Int {
+        val id = CapeSyncClient.requestNow()
+        ctx.source.sendFeedback(
+            Component.literal(
+                if (id == null) {
+                    "CapeCraft: запрос не отправлен — синхронизация выключена или сервер без мода."
+                } else {
+                    "CapeCraft: запрос отправлен (requestId $id), ждём ответ."
+                },
+            ),
+        )
         return 1
     }
 
@@ -70,11 +92,17 @@ object CapeCommands {
         val name = Minecraft.getInstance().user.name
         ctx.source.sendFeedback(Component.literal("CapeCraft ${modVersion()}"))
         ctx.source.sendFeedback(Component.literal("Игрок: $name"))
-        ctx.source.sendFeedback(Component.literal("Провайдеров: ${registry.providers.size}"))
+        ctx.source.sendFeedback(Component.literal("Провайдеров: ${registry.providers.size} (${sourceOf(registry)})"))
         ctx.source.sendFeedback(Component.literal("Плащей в кэше: ${registry.size}"))
         ctx.source.sendFeedback(Component.literal("Память плащей: ${registry.totalBytes} байт"))
+        for (line in CapeSyncClient.statusLines()) {
+            ctx.source.sendFeedback(Component.literal(line))
+        }
         return 1
     }
+
+    private fun sourceOf(registry: CapeRegistry): String =
+        if (registry.isServerAuthoritative) "набор с сервера" else "локальный конфиг"
 
     /** Версия мода из fabric.mod.json (не захардкожена). */
     private fun modVersion(): String =

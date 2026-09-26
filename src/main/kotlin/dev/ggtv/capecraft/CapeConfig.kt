@@ -3,6 +3,7 @@ package dev.ggtv.capecraft
 import dev.ggtv.capecraft.memory.Limits
 import dev.ggtv.capecraft.provider.ProviderLoader
 import dev.ggtv.capecraft.provider.Provider
+import dev.ggtv.capecraft.sync.ServerSyncSettings
 import dev.ggtv.koren.KorenConfig
 import net.fabricmc.loader.api.FabricLoader
 import java.nio.file.Files
@@ -37,6 +38,10 @@ import java.nio.file.Path
  * Если файла нет — создаёт дефолтный и использует его. Ошибки парсинга
  * не роняют мод: [providers]/[limits] остаются дефолтными, а описание
  * кладётся в [lastError] для `/cp status`.
+ *
+ * Класс работает и на клиенте, и на выделенном сервере (тот же файл
+ * `config/capecraft.kn` в папке сервера — источник провайдеров для
+ * синхронизации, см. `capeCraft.sync.ServerCapeCatalog`).
  */
 class CapeConfig {
     @Volatile
@@ -45,6 +50,11 @@ class CapeConfig {
 
     @Volatile
     var limits: Limits = Limits()
+        private set
+
+    /** Настройки синхронизации с сервером (блок `capeCraft.serverSync`). */
+    @Volatile
+    var serverSync: ServerSyncSettings = ServerSyncSettings()
         private set
 
     @Volatile
@@ -71,11 +81,12 @@ class CapeConfig {
             val cfg = KorenConfig.load(active)
             providers = ProviderLoader.load(cfg)
             limits = parseLimits(cfg)
+            serverSync = ServerSyncSettings.parse(cfg)
             dev.ggtv.capecraft.api.CapeApiHolder.api.config.loadFrom(cfg)
             lastError = null
         } catch (e: Exception) {
             lastError = e.message ?: e.javaClass.simpleName
-            CapeCraftClient.LOGGER.error("CapeCraft: не удалось прочитать конфиг: ${e.message}", e)
+            CapeCraftLog.LOGGER.error("CapeCraft: не удалось прочитать конфиг: ${e.message}", e)
         }
     }
 
@@ -121,6 +132,19 @@ class CapeConfig {
                     maxBytesPerCape = 67108864
                     # Суммарно байт под все плащи в кэше.
                     maxBytesTotal = 134217728
+                }
+                serverSync {
+                    # Опрашивать ли сервер об активных плащах.
+                    enabled = true
+                    # Как часто спрашивать (тиков, 20 = сек): 40 = раз в 2 сек.
+                    intervalTicks = 40
+                    # Сколько ждать ответа (тиков): 100 = 5 сек.
+                    timeoutTicks = 100
+                    # true = без ответа сервера локальный набор НЕ используется.
+                    requireServer = false
+                    # Разрешить серверу присылать `type = file` (чтение с диска
+                    # клиента). По умолчанию запрещено из соображений безопасности.
+                    allowFileProviders = false
                 }
             }
         """.trimIndent()

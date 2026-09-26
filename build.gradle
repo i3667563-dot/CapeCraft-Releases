@@ -50,6 +50,12 @@ sourceSets {
 	}
 }
 
+// Каждая версия MC собирается в СВОЙ каталог: переключение -Pmc не должно
+// смешивать классы и incremental-кэш Kotlin разных версий. Раньше общий
+// build/ приводил к ровно этому — после 26.2 сборка 1.21.11 без clean падала
+// с «Unresolved reference 'CapeCraftClient'», показывая классы от другой версии.
+layout.buildDirectory = layout.projectDirectory.dir("build/${mc}")
+
 repositories {
 	mavenCentral()
 }
@@ -86,6 +92,12 @@ processResources {
 	filesMatching('fabric.mod.json') {
 		expand 'version': project.version
 	}
+}
+
+// `clean` базового плагина чистит только build/<mc> (см. buildDirectory выше).
+// cleanAll — снести выходы сразу всех версий.
+tasks.register('cleanAll', Delete) {
+	delete layout.projectDirectory.dir('build')
 }
 
 tasks.withType(JavaCompile).configureEach {
