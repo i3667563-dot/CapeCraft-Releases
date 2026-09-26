@@ -80,9 +80,27 @@ data class ActiveCape(
 
     /** Восстановить провайдера НЕЛЬЗЯ без локального конфига — см. [SyncPolicy]. */
     companion object {
-        /** Только http/https — иначе клиент по ссылке сервера прочитает что угодно. */
+        /**
+         * Плейсхолдер в шаблоне: `{username}`, `{uuid}`, `{name}`, `{root}` и любые
+         * аддон-плейсхолдеры. Ровно та же форма, которую понимает
+         * [dev.ggtv.capecraft.schema.Placeholders.render].
+         */
+        private val PLACEHOLDER = Regex("\\{[^{}]*\\}")
+
+        /**
+         * Только http/https — иначе клиент по ссылке сервера прочитает что угодно.
+         *
+         * Проверяется именно ШАБЛОН, а не готовая ссылка: плейсхолдеры
+         * подставляются только при загрузке ([dev.ggtv.capecraft.schema.Placeholders]),
+         * а `URI.create` фигурные скобки не принимает («Illegal character in path»).
+         * Поэтому перед разбором каждый `{...}` заменяется безопасным токеном —
+         * для схемы и хоста это ничего не меняет, а шаблоны перестают отбрасываться.
+         *
+         * Реальная ссылка проверяется ещё раз при запросе:
+         * `HttpFetcher.getBytes` зовёт `URI.create` уже на отрендеренном URL.
+         */
         fun isHttpUrl(value: String): Boolean = try {
-            val uri = URI.create(value)
+            val uri = URI.create(PLACEHOLDER.replace(value, "x"))
             val scheme = uri.scheme?.lowercase()
             (scheme == "http" || scheme == "https") && !uri.host.isNullOrBlank()
         } catch (_: Exception) {
