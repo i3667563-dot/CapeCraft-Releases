@@ -36,25 +36,25 @@ object CapeCommands {
     }
 
     private fun reload(ctx: CommandContext<FabricClientCommandSource>, registry: CapeRegistry): Int {
-        // Перечитать конфиг и перезагрузить провайдеры/лимиты/плащи в том же
-        // реестре (бесшовно: старые текстуры висят, пока новые грузятся в фоне).
+        // Полная перезагрузка: конфиг с диска, дефолт при отсутствии, новый
+        // набор провайдеров, полный сброс кэша и GPU-текстур, авторитетность
+        // сервера снята. Бесшовного обновления здесь намеренно нет — это
+        // команда «перезагрузить мод», а не «пнуть провайдеров».
         val cfg = CapeCraftClient.config
         cfg.reload()
         CapeSyncClient.applySettings(cfg.serverSync)
-        // Если сейчас активен набор с сервера — перечитывание локального
-        // конфига его не отменяет: сервер пришлёт свой набор следующим ответом.
-        if (!registry.isServerAuthoritative) {
-            registry.reload(cfg.providers, cfg.limits, cfg.rootFor())
-        } else {
-            // Набор с сервера не подменяем (он приедет следующим ответом), но
-            // плащи перечитываем — иначе `/cp reload` не делает ничего.
-            registry.refresh()
-        }
+        registry.reloadAll(cfg.providers, cfg.limits, cfg.rootFor())
+        // Синхронизация с сервером с адаптивным интервалом: следующий запрос
+        // может быть через минуту, поэтому после полной перезагрузки просим
+        // набор сразу — иначе мод до минуты работает на локальном конфиге.
+        val syncId = CapeSyncClient.requestNow()
         val msg = if (cfg.lastError != null) " с ошибкой: ${cfg.lastError}" else ""
         ctx.source.sendFeedback(
             Text.literal(
-                "Конфиг перезагружен (${cfg.path}). Провайдеров: ${cfg.providers.size}, " +
-                    "перезагрузка плащей в фоне$msg",
+                "CapeCraft перезагружен (${cfg.path}). Провайдеров: ${cfg.providers.size}, " +
+                    "кэш плащей очищен, загрузка в фоне, набор — локальный конфиг" +
+                    (if (syncId != null) ", запрос синхронизации $syncId" else ", синхронизация не отправлена") +
+                    "$msg",
             ),
         )
         return 1
@@ -123,7 +123,7 @@ object CapeCommands {
 
     private fun clear(ctx: CommandContext<FabricClientCommandSource>, registry: CapeRegistry): Int {
         registry.clear()
-        ctx.source.sendFeedback(Text.literal("Кэш плащей очищен."))
+        ctx.source.sendFeedback(Text.literal("Кэш плащей очищен. Мод продолжает работать, плащи загрузятся заново."))
         return 1
     }
 }
