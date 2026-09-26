@@ -6,7 +6,7 @@ import net.minecraft.network.protocol.common.custom.CustomPacketPayload
 import net.minecraft.resources.Identifier
 
 /**
- * Сетевые payload'ы CapeCraft Sync (Fabric custom payload, play-канал).
+ * Сетевые payload'ы CapeCraft Sync v2 (Fabric custom payload, play-канал).
  *
  * Формат байт описан в [SyncCodec]; здесь — только обёртка в типы Minecraft.
  * Разделение намеренное: протокол проверяется обычными тестами без игры, а
@@ -14,73 +14,99 @@ import net.minecraft.resources.Identifier
  * `PacketCodec` + `RegistryByteBuf`, в 26.2/Mojang — `CustomPacketPayload` +
  * `StreamCodec` + `RegistryFriendlyByteBuf`; форма одинаковая).
  *
- * Оба payload'а кодируются ОДНИМ И ТЕМ ЖЕ [SyncCodec]: так клиент и сервер
- * гарантированно проверяют версию протокола и лимиты одинаково, и в сеть не
- * уходит «случайный» байтовый формат в обход валидации.
+ * ## Почему payload'ов всего два, а не по одному на сообщение
+ *
+ * В v1 их тоже было два, но каждый знал про свою форму: `Request` знал про
+ * `requestId`, `Response` — про список провайдеров. В v2 сообщений пять
+ * (announce, upload, fetch, roster, chunk), и если бы каждое стало отдельным
+ * payload'ом, версионный слой размножился бы и в шести копиях пришлось бы
+ * поддерживать пять типов.
+ *
+ * Здесь payload — просто байты, а разбор по типу из заголовка делает
+ * [SyncCodec.decodeC2S]/[SyncCodec.decodeS2C]. Версионная обвязка не знает
+ * ни про одно сообщение: её работа — «положить байты в сеть» и «достать байты
+ * из сети». Разбор, версия и лимиты — в одном месте, поэтому клиент и сервер
+ * проверяют их гарантированно одинаково, и в сеть не уходит «случайный»
+ * байтовый формат в обход валидации.
  *
  * Буфер — [RegistryFriendlyByteBuf]: play-регистры Fabric принимают кодек
  * именно с таким типом буфера.
  */
 object CapeSyncPayloads {
 
-    /** C2S: клиент спрашивает активный набор плащей. */
-    data class Request(val requestId: Int) : CustomPacketPayload {
-        override fun type(): CustomPacketPayload.Type<Request> = TYPE
-        fun toSyncState(): SyncRequest = SyncRequest(requestId)
+    /** C2S: любой клиентский пакет — announce / upload / fetch. */
+    class ClientMessage(val bytes: ByteArray) : CustomPacketPayload {
+        override fun type(): CustomPacketPayload.Type<ClientMessage> = TYPE
+
+        override fun equals(other: Any?): Boolean =
+            other is ClientMessage && bytes.contentEquals(other.bytes)
+
+        override fun hashCode(): Int = bytes.contentHashCode()
 
         companion object {
             // НЕ createType(): в 26.2 он подставляет неймспейс `minecraft`
             // ко всей строке и ломает `ns:path` — см. SyncProtocol.channelParts.
-            val TYPE: CustomPacketPayload.Type<Request> = CustomPacketPayload.Type(
+            val TYPE: CustomPacketPayload.Type<ClientMessage> = CustomPacketPayload.Type(
                 Identifier.fromNamespaceAndPath(
                     SyncProtocol.channelNamespace(SyncProtocol.REQUEST_CHANNEL),
                     SyncProtocol.channelPath(SyncProtocol.REQUEST_CHANNEL),
                 ),
             )
-            val CODEC: StreamCodec<RegistryFriendlyByteBuf, Request> =
-                object : StreamCodec<RegistryFriendlyByteBuf, Request> {
-                    override fun encode(buf: RegistryFriendlyByteBuf, value: Request) {
-                        buf.writeBytes(value.toSyncState().encode())
+
+            val CODEC: StreamCodec<RegistryFriendlyByteBuf, ClientMessage> =
+                object : StreamCodec<RegistryFriendlyByteBuf, ClientMessage> {
+                    override fun encode(buf: RegistryFriendlyByteBuf, value: ClientMessage) {
+                        buf.writeBytes(value.bytes)
                     }
 
-                    override fun decode(buf: RegistryFriendlyByteBuf): Request {
+                    override fun decode(buf: RegistryFriendlyByteBuf): ClientMessage {
                         val bytes = ByteArray(buf.readableBytes())
                         buf.readBytes(bytes)
-                        return Request(SyncCodec.decodeRequest(bytes).requestId)
+                        return ClientMessage(bytes)
                     }
                 }
         }
     }
 
-    /** S2C: сервер присылает ТОЛЬКО активные провайдеры для этого игрока. */
-    data class Response(
-        val requestId: Int,
-        val providers: List<ActiveCape>,
-        val truncated: Int = 0,
-    ) : CustomPacketPayload {
-        override fun type(): CustomPacketPayload.Type<Response> = TYPE
-        fun toSyncState(): SyncResponse = SyncResponse(requestId, providers, truncated)
+    /** S2C: любой серверный пакет — roster / chunk. */
+    class ServerMessage(val bytes: ByteArray) : CustomPacketPayload {
+        override fun type(): CustomPacketPayload.Type<ServerMessage> = TYPE
+
+        override fun equals(other: Any?): Boolean =
+            other is ServerMessage && bytes.contentEquals(other.bytes)
+
+        override fun hashCode(): Int = bytes.contentHashCode()
 
         companion object {
-            val TYPE: CustomPacketPayload.Type<Response> = CustomPacketPayload.Type(
+            val TYPE: CustomPacketPayload.Type<ServerMessage> = CustomPacketPayload.Type(
                 Identifier.fromNamespaceAndPath(
                     SyncProtocol.channelNamespace(SyncProtocol.RESPONSE_CHANNEL),
                     SyncProtocol.channelPath(SyncProtocol.RESPONSE_CHANNEL),
                 ),
             )
-            val CODEC: StreamCodec<RegistryFriendlyByteBuf, Response> =
-                object : StreamCodec<RegistryFriendlyByteBuf, Response> {
-                    override fun encode(buf: RegistryFriendlyByteBuf, value: Response) {
-                        buf.writeBytes(value.toSyncState().encode())
+
+            val CODEC: StreamCodec<RegistryFriendlyByteBuf, ServerMessage> =
+                object : StreamCodec<RegistryFriendlyByteBuf, ServerMessage> {
+                    override fun encode(buf: RegistryFriendlyByteBuf, value: ServerMessage) {
+                        buf.writeBytes(value.bytes)
                     }
 
-                    override fun decode(buf: RegistryFriendlyByteBuf): Response {
+                    override fun decode(buf: RegistryFriendlyByteBuf): ServerMessage {
                         val bytes = ByteArray(buf.readableBytes())
                         buf.readBytes(bytes)
-                        val decoded = SyncCodec.decodeResponse(bytes)
-                        return Response(decoded.requestId, decoded.providers, decoded.truncated)
+                        return ServerMessage(bytes)
                     }
                 }
         }
     }
+
+    /**
+     * Проверить, что в байтах C2S лежит сообщение, а не обрывок пакета.
+     *
+     * Отдельный метод, а не `decodeC2S` в обработчике, чтобы версионный слой
+     * мог отличить «это не наше» от «наше, но битое» и не логировать второе
+     * как ошибку протокола на каждом чужом канале.
+     */
+    fun isClientMessage(bytes: ByteArray): Boolean = bytes.size >= 2 &&
+        (bytes[0].toInt() and 0xFF) == SyncProtocol.VERSION
 }

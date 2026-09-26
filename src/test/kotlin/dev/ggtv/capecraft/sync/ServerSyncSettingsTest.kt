@@ -2,122 +2,112 @@ package dev.ggtv.capecraft.sync
 
 import dev.ggtv.koren.KorenConfig
 import org.junit.jupiter.api.Test
-import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * Настройки `capeCraft.serverSync`: значения из `.kn` зажимаются в разумные
- * пределы, чтобы опечатка в конфиге не превратилась в DDoS сервера.
+ * Настройки Sync v2.
+ *
+ * Главное, что тут проверяется, — **значения по умолчанию**. В v2 появились
+ * два флага, выключающих то, что раньше было безусловно: раздачу своего
+ * локального файла и доверие чужим `http`-адресам. Оба по умолчанию `false`
+ * не из осторожности, а потому что оба включают передачу личного: первый
+ * увозит байты твоего плаща всем, второй даёт чужим клиентам возможность
+ * втянуть тебя в запрос к их адресу.
  */
 class ServerSyncSettingsTest {
 
+    /** Конфиг собирается блоком: точечный `a.b.c = v` Cren не понимает. */
     private fun config(vararg pairs: Pair<String, String>): KorenConfig {
-        val body = pairs.joinToString("\n") { "    ${it.first} = ${it.second}" }
-        return KorenConfig.fromString("capeCraft {\n    serverSync {\n$body\n    }\n}")
+        val body = pairs.joinToString("\n") { (k, v) -> "        $k = $v" }
+        return KorenConfig.fromString(
+            """
+            |capeCraft {
+            |    serverSync {
+            |$body
+            |    }
+            |}
+            """.trimMargin(),
+        )
     }
 
     @Test
-    fun `defaults are usable as-is`() {
-        val s = ServerSyncSettings()
-        assertEquals(SyncProtocol.DEFAULT_INTERVAL_TICKS, s.intervalTicks)
-        assertEquals(SyncProtocol.DEFAULT_TIMEOUT_TICKS, s.timeoutTicks)
+    fun `локальный файл по умолчанию не раздаётся`() {
+        assertFalse(ServerSyncSettings().shareLocalProviders, "личный файл не должен уезжать без явного согласия")
+    }
+
+    @Test
+    fun `чужие http-адреса по умолчанию не принимаются`() {
+        assertFalse(
+            ServerSyncSettings().allowForeignUrls,
+            "иначе любой клиент может заставить всех загрузить его адрес",
+        )
+    }
+
+    @Test
+    fun `синхронизация по умолчанию включена, backoff включён`() {
+        val d = ServerSyncSettings()
+        assertTrue(d.enabled)
+        assertTrue(d.backoff)
+    }
+
+    @Test
+    fun `флаги читаются из конфига`() {
+        val s = ServerSyncSettings.parse(
+            config("shareLocalProviders" to "true", "allowForeignUrls" to "true", "enabled" to "false"),
+        )
+        assertTrue(s.shareLocalProviders)
+        assertTrue(s.allowForeignUrls)
+        assertFalse(s.enabled)
+    }
+
+    @Test
+    fun `пустой конфиг даёт умолчания`() {
+        val s = ServerSyncSettings.parse(KorenConfig.fromString(""))
         assertTrue(s.enabled)
-        assertFalse(s.requireServer)
-        assertFalse(s.allowFileProviders)
+        assertFalse(s.shareLocalProviders)
+        assertFalse(s.allowForeignUrls)
     }
 
     @Test
-    fun `the default interval survives clamping`() {
-        assertEquals(
-            SyncProtocol.DEFAULT_INTERVAL_TICKS,
-            ServerSyncSettings().toState().intervalTicks,
-            "дефолт не должен превращаться в другое число clamping'ом",
+    fun `битое значение не ломает разбор, а берётся умолчание`() {
+        val s = ServerSyncSettings.parse(
+            config("shareLocalProviders" to "не_булево", "enabled" to "true"),
         )
-        assertTrue(
-            SyncProtocol.DEFAULT_INTERVAL_TICKS >= SyncProtocol.MIN_INTERVAL_TICKS,
-            "дефолт меньше минимума",
-        )
+        assertTrue(s.enabled, "живой ключ должен читаться")
+        assertFalse(s.shareLocalProviders, "битое значение должно упасть в умолчание, а не в true")
     }
 
     @Test
-    fun `the default timeout survives clamping`() {
-        assertEquals(SyncProtocol.DEFAULT_TIMEOUT_TICKS, ServerSyncSettings().toState().timeoutTicks)
-        assertTrue(SyncProtocol.DEFAULT_TIMEOUT_TICKS >= SyncProtocol.MIN_TIMEOUT_TICKS)
-    }
-
-    @Test
-    fun `values are read from the kn block`() {
+    fun `удалённые ключи v1 игнорируются, а не превращаются в v2-флаги`() {
+        // Самое опасное, что тут могло сломаться: allowFileProviders из v1
+        // молча стал бы shareLocalProviders, и старый конфиг за молча начал бы
+        // раздавать локальные файлы всем. Не должен.
         val s = ServerSyncSettings.parse(
             config(
-                "enabled" to "false",
-                "intervalTicks" to "80",
-                "timeoutTicks" to "200",
                 "requireServer" to "true",
                 "allowFileProviders" to "true",
+                "intervalTicks" to "1",
+                "timeoutTicks" to "1",
             ),
         )
+        assertFalse(s.shareLocalProviders, "allowFileProviders из v1 не должен включать раздачу файлов")
+        assertFalse(s.allowForeignUrls, "requireServer из v1 не должен включать чужие адреса")
+        assertTrue(s.enabled, "отсутствующий ключ enabled = умолчание true")
+    }
+
+    @Test
+    fun `состояние собирается из настроек`() {
+        val s = ServerSyncSettings(enabled = false, backoff = false).toState()
         assertFalse(s.enabled)
-        assertEquals(80, s.intervalTicks)
-        assertEquals(200, s.timeoutTicks)
-        assertTrue(s.requireServer)
-        assertTrue(s.allowFileProviders)
+        assertFalse(s.backoff)
     }
 
     @Test
-    fun `a missing block means defaults`() {
-        val empty = KorenConfig.fromString("capeCraft {\n    providers = []\n}")
-        assertEquals(ServerSyncSettings(), ServerSyncSettings.parse(empty))
-    }
-
-    @Test
-    fun `a broken value falls back to the default instead of failing`() {
-        val s = ServerSyncSettings.parse(config("intervalTicks" to "не-число"))
-        assertEquals(SyncProtocol.DEFAULT_INTERVAL_TICKS, s.intervalTicks)
-    }
-
-    @Test
-    fun `an absurdly small interval is clamped`() {
-        assertEquals(
-            SyncProtocol.MIN_INTERVAL_TICKS,
-            ServerSyncSettings.parse(config("intervalTicks" to "1")).toState().intervalTicks,
-        )
-    }
-
-    @Test
-    fun `an absurdly long interval is clamped`() {
-        assertEquals(
-            SyncProtocol.MAX_INTERVAL_TICKS,
-            ServerSyncSettings.parse(config("intervalTicks" to "99999999")).toState().intervalTicks,
-        )
-    }
-
-    @Test
-    fun `a zero timeout is clamped so the reply can still arrive`() {
-        assertEquals(
-            SyncProtocol.MIN_TIMEOUT_TICKS,
-            ServerSyncSettings.parse(config("timeoutTicks" to "0")).toState().timeoutTicks,
-        )
-    }
-
-    @Test
-    fun `negative numbers are clamped, not rejected`() {
-        val state = ServerSyncSettings.parse(config("intervalTicks" to "-5", "timeoutTicks" to "-5")).toState()
-        assertEquals(SyncProtocol.MIN_INTERVAL_TICKS, state.intervalTicks)
-        assertEquals(SyncProtocol.MIN_TIMEOUT_TICKS, state.timeoutTicks)
-    }
-
-    @Test
-    fun `requireServer reaches the state machine`() {
-        assertTrue(ServerSyncSettings.parse(config("requireServer" to "true")).toState().requireServer)
-        assertFalse(ServerSyncSettings.DISABLED.toState().enabled)
-    }
-
-    @Test
-    fun `describe mentions every knob`() {
+    fun `описание не упоминает удалённые ключи`() {
         val text = ServerSyncSettings.describe(ServerSyncSettings())
-        for (key in listOf("enabled", "requireServer", "allowFileProviders")) {
-            assertTrue(text.contains(key), "нет $key в «$text»")
-        }
+        assertFalse(text.contains("requireServer"), "в описании остался ключ из v1: $text")
+        assertFalse(text.contains("intervalTicks"), "в описании остался ключ из v1: $text")
+        assertTrue(text.contains("shareLocal"), "новый ключ должен быть виден в статусе")
     }
 }

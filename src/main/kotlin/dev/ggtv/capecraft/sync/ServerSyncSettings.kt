@@ -10,41 +10,59 @@ import dev.ggtv.koren.KorenConfig
  * ```
  * capeCraft {
  *     serverSync {
- *         enabled          = true   # вообще опрашивать сервер
- *         intervalTicks    = 40     # как часто (40 тиков = 2 сек)
- *         timeoutTicks     = 100    # сколько ждать ответа (5 сек)
- *         requireServer    = false  # true: без ответа сервера локальный набор НЕ используется
- *         allowFileProviders = false # разрешить серверу присылать `type = file`
- *         backoff          = true   # замедлять опрос, пока набор не меняется
+ *         enabled             = true   # вообще объявлять набор и принимать чужие
+ *         shareLocalProviders = false  # true: отдавать свой локальный `file`-плащ всем
+ *         allowForeignUrls    = false  # true: принимать чужие `http`-адреса
+ *         backoff             = true   # замедлять запросы картинок, пока нет ответа
  *     }
  * }
  * ```
  *
- * Значения зажимаются в разумные пределы ([SyncProtocol]), чтобы опечатка в
- * конфиге (например `intervalTicks = 1`) не превратилась в DDoS сервера
- * или в вечное ожидание.
+ * ## Что изменилось в v2
  *
- * `backoff = true` (по умолчанию) — адаптивный интервал: пока набор плащей не
- * меняется, клиент замедляет опрос до раза в минуту вместо раза в пару секунд
- * и возвращается к `intervalTicks`, как только набор сменился. На сервере это
- * снимает большую часть работы (в простое — в ~30 раз меньше запросов), а на
- * игроках заметно не сказывается. Выключайте только для отладки протокола.
+ * В v1 здесь был опрос: `intervalTicks`, `timeoutTicks`, `requireServer`.
+ * В v2 опроса нет — клиент объявляет набор один раз при входе и при
+ * `/cp reload`, а обновления приходят рассылкой. Поэтомуinterval-ов больше
+ * нет, и `requireServer` тоже: сервер не диктует, что носить, он только
+ * объясняет, у какого объекта какой набор. Без ростера у чужого объекта нет
+ * функций, и это не поломка, а норма — надевать на него свой конфиг нельзя
+ * (см. [dev.ggtv.capecraft.CapeRegistry.orderFor]).
+ *
+ * Ключи `intervalTicks`, `timeoutTicks`, `requireServer`, `allowFileProviders`
+ * больше не читаются. Оставлены в конфиге — они просто игнорируются.
+ *
+ * `backoff` остался и теперь относится к докачке картинок, а не к опросу.
+ *
  */
 data class ServerSyncSettings(
     val enabled: Boolean = true,
-    val intervalTicks: Int = SyncProtocol.DEFAULT_INTERVAL_TICKS,
-    val timeoutTicks: Int = SyncProtocol.DEFAULT_TIMEOUT_TICKS,
-    val requireServer: Boolean = false,
-    val allowFileProviders: Boolean = false,
+
+    /**
+     * Отдавать ли другим свои локальные `file`-плащи.
+     *
+     * По умолчанию **выключено**, и это осознанно: включение означает, что
+     * байты твоего плаща уезжают на сервер и оттуда ко всем остальным. Локальный
+     * файл — это личное, и по умолчанию оно не раздаётся. `http`/`json` и так
+     * видны всем, кто откроет ссылку, — там отдельного согласия не нужно.
+     */
+    val shareLocalProviders: Boolean = false,
+
+    /**
+     * Разрешать ли чужие объявления с произвольным `http`-адресом.
+     *
+     * По умолчанию **выключено**: иначе любой клиент в чате может объявить
+     * функцию, чей адрес указывает на его хост, и каждый, кто на меня
+     * посмотрит, схватит этот адрес. Это превращает мой рендер в маячок.
+     * Включать только если доверяешь всем в лобби.
+     */
+    val allowForeignUrls: Boolean = false,
+
     val backoff: Boolean = true,
 ) {
     /** Настройки для машины состояний [CapeSyncState] с уже зажатыми числами. */
     fun toState(): CapeSyncState = CapeSyncState(
         enabled = enabled,
-        intervalTicks = clamp(intervalTicks, SyncProtocol.MIN_INTERVAL_TICKS, SyncProtocol.MAX_INTERVAL_TICKS),
-        timeoutTicks = clamp(timeoutTicks, SyncProtocol.MIN_TIMEOUT_TICKS, SyncProtocol.MAX_INTERVAL_TICKS),
-        requireServer = requireServer,
-        maxIntervalTicks = SyncProtocol.MAX_BACKOFF_INTERVAL_TICKS,
+        maxRetryTicks = SyncProtocol.MAX_BACKOFF_INTERVAL_TICKS,
         backoff = backoff,
     )
 
@@ -60,22 +78,10 @@ data class ServerSyncSettings(
             val d = ServerSyncSettings()
             return ServerSyncSettings(
                 enabled = bool(cfg, "enabled", d.enabled),
-                intervalTicks = clamp(int(cfg, "intervalTicks", d.intervalTicks), SyncProtocol.MIN_INTERVAL_TICKS, SyncProtocol.MAX_INTERVAL_TICKS),
-                timeoutTicks = clamp(int(cfg, "timeoutTicks", d.timeoutTicks), SyncProtocol.MIN_TIMEOUT_TICKS, SyncProtocol.MAX_INTERVAL_TICKS),
-                requireServer = bool(cfg, "requireServer", d.requireServer),
-                allowFileProviders = bool(cfg, "allowFileProviders", d.allowFileProviders),
+                shareLocalProviders = bool(cfg, "shareLocalProviders", d.shareLocalProviders),
+                allowForeignUrls = bool(cfg, "allowForeignUrls", d.allowForeignUrls),
                 backoff = bool(cfg, "backoff", d.backoff),
             )
-        }
-
-        private fun int(cfg: KorenConfig, key: String, def: Int): Int {
-            val fromFile = try {
-                cfg.getInt("$ROOT.$key").toInt()
-            } catch (_: Exception) {
-                def
-            }
-            return CapeConfigEnv.longOr("$ROOT.$key", fromFile.toLong())
-                .coerceIn(Int.MIN_VALUE.toLong(), Int.MAX_VALUE.toLong()).toInt()
         }
 
         private fun bool(cfg: KorenConfig, key: String, def: Boolean): Boolean {
@@ -87,12 +93,9 @@ data class ServerSyncSettings(
             return CapeConfigEnv.booleanOr("$ROOT.$key", fromFile)
         }
 
-        private fun clamp(value: Int, min: Int, max: Int): Int = value.coerceIn(min, max)
-
         /** Читаемый текст для `/cp status`. */
         fun describe(s: ServerSyncSettings): String =
-            "enabled=${s.enabled}, интервал=${s.intervalTicks} тиков, " +
-                "таймаут=${s.timeoutTicks} тиков, requireServer=${s.requireServer}, " +
-                "allowFileProviders=${s.allowFileProviders}, backoff=${s.backoff}"
+            "enabled=${s.enabled}, shareLocal=${s.shareLocalProviders}, " +
+                "allowForeignUrls=${s.allowForeignUrls}, backoff=${s.backoff}"
     }
 }

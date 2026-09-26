@@ -45,26 +45,30 @@ object CapeCommands {
         cfg.reload()
         CapeSyncClient.applySettings(cfg.serverSync)
         registry.reloadAll(cfg.providers, cfg.limits, cfg.rootFor())
-        // Синхронизация с сервером с адаптивным интервалом: следующий запрос
-        // может быть через минуту, поэтому после полной перезагрузки просим
-        // набор сразу — иначе мод до минуты работает на локальном конфиге.
-        val syncId = CapeSyncClient.requestNow()
+        // В v2 запроса нет: клиент сам объявляет набор. После перезагрузки
+        // конфига объявляем сразу, иначе остальные до следующего изменения
+        // видят прежний набор.
+        CapeSyncClient.announceNow()
         val msg = if (cfg.lastError != null) " с ошибкой: ${cfg.lastError}" else ""
         ctx.source.sendFeedback(Component.literal("CapeCraft перезагружен (${cfg.path}). Провайдеров: ${cfg.providers.size}, " +
             "кэш плащей очищен, загрузка в фоне, набор — локальный конфиг" +
-            (if (syncId != null) ", запрос синхронизации $syncId" else ", синхронизация не отправлена") +
+            ", набор объявлен" +
             "$msg"))
         return 1
     }
 
     private fun sync(ctx: CommandContext<FabricClientCommandSource>): Int {
-        val id = CapeSyncClient.requestNow()
+        // В v2 «запросить набор» = «объявить свой заново».
+        CapeSyncClient.announceNow()
+        val state = CapeSyncClient.stateForStatus()
         ctx.source.sendFeedback(
             Component.literal(
-                if (id == null) {
-                    "CapeCraft: запрос не отправлен — синхронизация выключена или сервер без мода."
+                if (!state.enabled) {
+                    "CapeCraft: синхронизация выключена в конфиге."
                 } else {
-                    "CapeCraft: запрос отправлен (requestId $id), ждём ответ."
+                    "CapeCraft: набор объявлен, ревизия роустера ${state.revision}, " +
+                        "применено снимков ${state.rostersApplied}. " +
+                        "Сервер отвечает только роустером и чанками картинок."
                 },
             ),
         )
@@ -104,14 +108,35 @@ object CapeCommands {
         for (override in CapeConfigEnv.activeOverrides()) {
             ctx.source.sendFeedback(Component.literal("Переопределение из окружения: $override"))
         }
-        for (line in CapeSyncClient.statusLines()) {
-            ctx.source.sendFeedback(Component.literal(line))
-        }
+        ctx.source.sendFeedback(Component.literal("Объектов с набором: ${registry.knownObjectIds().size}"))
+        ctx.source.sendFeedback(Component.literal("Картинок по сети в кэше: ${registry.networkImages.count()} " +
+            "(${registry.networkImages.totalBytes()} байт), своих: ${registry.networkImages.ownedCount()}"))
+        val state = CapeSyncClient.stateForStatus()
+        ctx.source.sendFeedback(
+            Component.literal(
+                "Sync v2: ревизия ${state.revision}, объявлений отправлено ${state.announcesSent}, " +
+                    "ростеров применено ${state.rostersApplied} (устаревших ${state.rostersStale}), " +
+                    "запрошено картинок ${state.fetchesSent}, чанков принято ${state.chunksReceived}, " +
+                    "не хватает картинок ${state.missingHashes().size}" +
+                    if (CapeSyncClient.lastTruncatedCount() > 0) {
+                        ", ПОТЕРЯНО ОБЪЕКТОВ ПРИ ОБРЕЗКЕ: ${CapeSyncClient.lastTruncatedCount()}"
+                    } else {
+                        ""
+                    } +
+                    (state.lastError?.let { ", ошибка: $it" } ?: ""),
+            ),
+        )
         return 1
     }
 
-    private fun sourceOf(registry: CapeRegistry): String =
-        if (registry.isServerAuthoritative) "набор с сервера" else "локальный конфиг"
+    /**
+     * Откуда набор.
+     *
+     * Формулировка про сервер убрана намеренно: в v2 сервер не присылает мой
+     * набор, он только сообщает чужие. Свой набор всегда локальный, а чужие
+     * лежат по объектам и в этом счётчике не участвуют.
+     */
+    private fun sourceOf(registry: CapeRegistry): String = "локальный конфиг"
 
     /** Версия мода из fabric.mod.json (не захардкожена). */
     private fun modVersion(): String =

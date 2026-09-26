@@ -1,273 +1,380 @@
 package dev.ggtv.capecraft.sync
 
+import dev.ggtv.capecraft.sync.SyncProtocol.CHUNK_BYTES
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
-import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * Машина состояний опроса: интервал, «один запрос в полёте», таймаут и
- * ключевое различие «сервер ответил „плащей нет“» vs «сервер молчит».
+ * Машина состояний Sync v2.
+ *
+ * Отличие от v1, которое тут и проверяется: **опроса нет**. Клиент не ходит к
+ * серверу по расписанию и не ждёт `requestId`. Он объявляет набор сам при входе
+ * и при смене конфига, а обновления приходят рассылкой. Поэтому здесь нет ни
+ * `requestId`, ни `currentIntervalTicks`, и их отсутствие — часть контракта, а
+ * не потеря покрытия.
  */
 class CapeSyncStateTest {
 
-    private fun cape(name: String, priority: Int = 0) =
-        ActiveCape(name, ActiveCape.Kind.URL, "https://e.com/$name.png", priority = priority)
+    private fun state(backoff: Boolean = true) = CapeSyncState(backoff = backoff)
 
-    private fun tick(state: CapeSyncState, n: Int, inWorld: Boolean = true, ready: Boolean = true): List<Int> =
-        (1..n).mapNotNull { state.onTick(inWorld, ready) }
+    private fun urlFunction(name: String, priority: Int = 0) = ActiveCape(
+        kind = ActiveCape.Kind.URL,
+        name = name,
+        primary = "https://example.invalid/$name.png",
+        extract = "",
+        priority = priority,
+        condition = null,
+        imageHash = null,
+    )
+
+    /**
+     * Функция с картинкой, которую надо привезти с сервера.
+     *
+     * Только [ActiveCape.Kind.FILE]: хэш у `url`-функции запрещён, и такой
+     * набор `SyncRosterPolicy.accept` выкинет целиком — вместе с ним из
+     * роустера исчезнет и всё остальное, что в нём было.
+     */
+    private fun fileFunction(name: String, hash: ImageHash) = ActiveCape(
+        kind = ActiveCape.Kind.FILE,
+        name = name,
+        primary = "",
+        extract = "",
+        priority = 0,
+        condition = null,
+        imageHash = hash,
+    )
+
+    // ── объявление ──────────────────────────────────────────────────────────
 
     @Test
-    fun `disabled state never asks`() {
-        val state = CapeSyncState(enabled = false)
-        assertNull(state.onTick(true, true))
-        assertNull(state.requestNow())
-        assertEquals(0, state.lastRequestId)
+    fun `смена конфига порождает ровно одно объявление`() {
+        val s = state()
+        val out = s.onConfigChanged(listOf(urlFunction("a"), urlFunction("b")))
+        val announce = out.filterIsInstance<SyncOutbound.Announce>()
+
+        assertEquals(1, announce.size, "объявление должно быть одно, а не по одному на провайдер")
+        assertEquals(2, announce.single().functions.size, "в объявление должны войти все функции набора")
+        assertEquals(1, s.announcesSent)
     }
 
     @Test
-    fun `join asks immediately`() {
-        val state = CapeSyncState(intervalTicks = 100)
-        assertEquals(1, state.onJoin())
-        assertEquals(1, state.lastRequestId)
+    fun `выключенная синхронизация не объявляет ничего`() {
+        val s = CapeSyncState(enabled = false)
+        assertTrue(s.onConfigChanged(listOf(urlFunction("a"))).isEmpty())
+        assertEquals(0, s.announcesSent)
     }
 
-    @Test
-    fun `no second request while one is in flight`() {
-        val state = CapeSyncState(intervalTicks = 20, timeoutTicks = 100)
-        assertEquals(1, state.onJoin())
-        // Даже спустя 3 интервала тикать нельзя: первый запрос ещё не отвечен.
-        assertEquals(emptyList(), tick(state, 60))
-    }
+    // ── роустер ─────────────────────────────────────────────────────────────
 
     @Test
-    fun `reply clears the pending request and re-arms the interval`() {
-        val state = CapeSyncState(intervalTicks = 20, timeoutTicks = 100)
-        val id = state.onJoin()!!
-        assertTrue(state.onResponse(SyncResponse(id, emptyList())))
-        // Сразу после ответа интервал ещё не выдержан.
-        assertNull(state.onTick(true, true))
-        assertEquals(2, tick(state, 20).single())
-    }
-
-    @Test
-    fun `timeout releases the pending request and counts itself`() {
-        // backoff = false: тест фиксирует базовую каденцию, а не замедление
-        // после таймаута (см. CapeSyncStateBackoffTest).
-        val state = CapeSyncState(intervalTicks = 20, timeoutTicks = 30, backoff = false)
-        state.onJoin()
-        val ids = tick(state, 40)
-        assertEquals(2, ids.single())
-        assertEquals(1, state.timedOut)
-        assertNotNull(state.lastError)
-    }
-
-    @Test
-    fun `unchanged provider set does not ask for a reload`() {
-        val state = CapeSyncState(intervalTicks = 20, timeoutTicks = 100)
-        val id = state.onJoin()!!
-        assertTrue(state.onResponse(SyncResponse(id, listOf(cape("a"), cape("b")))))
-        assertTrue(state.usingServerProviders)
-
-        val id2 = tick(state, 20).single()
-        assertFalse(state.onResponse(SyncResponse(id2, listOf(cape("a"), cape("b")))))
-        assertEquals(2, state.responsesAccepted)
-    }
-
-    @Test
-    fun `changed provider set asks for a reload`() {
-        val state = CapeSyncState(intervalTicks = 20, timeoutTicks = 100)
-        val id = state.onJoin()!!
-        assertTrue(state.onResponse(SyncResponse(id, listOf(cape("a")))))
-        val id2 = tick(state, 20).single()
-        assertTrue(state.onResponse(SyncResponse(id2, listOf(cape("a"), cape("b")))))
-    }
-
-    @Test
-    fun `provider order is part of the fingerprint`() {
-        val state = CapeSyncState(intervalTicks = 20, timeoutTicks = 100)
-        var id = state.onJoin()!!
-        assertTrue(state.onResponse(SyncResponse(id, listOf(cape("a"), cape("b")))))
-
-        id = tick(state, 20).single()
-        assertFalse(state.onResponse(SyncResponse(id, listOf(cape("a"), cape("b")))), "тот же набор")
-
-        id = tick(state, 20).single()
-        assertTrue(state.onResponse(SyncResponse(id, listOf(cape("b"), cape("a")))), "порядок важен")
-    }
-
-    @Test
-    fun `priority is part of the fingerprint`() {
-        val state = CapeSyncState(intervalTicks = 20, timeoutTicks = 100)
-        val id = state.onJoin()!!
-        assertTrue(state.onResponse(SyncResponse(id, listOf(cape("a", priority = 0)))))
-        val id2 = tick(state, 20).single()
-        assertTrue(state.onResponse(SyncResponse(id2, listOf(cape("a", priority = 5)))))
-    }
-
-    @Test
-    fun `an empty set is not the same as an unset one`() {
-        val state = CapeSyncState(intervalTicks = 20, timeoutTicks = 100)
-        assertEquals(CapeSyncState.FINGERPRINT_UNSET, state.fingerprint)
-        val id = state.onJoin()!!
-        assertTrue(
-            state.onResponse(SyncResponse(id, emptyList())),
-            "первый пустой ответ обязан примениться, иначе локальный набор останется",
+    fun `первый снимок применяется`() {
+        val s = state()
+        val applied = s.onRoster(
+            Roster(1, listOf(RosterObject("obj-1", listOf(urlFunction("x"))))),
         )
-        assertEquals(CapeSyncState.FINGERPRINT_EMPTY_SERVER, state.fingerprint)
+        assertTrue(applied)
+        assertEquals(1, s.revision)
+        assertEquals(1, s.rostersApplied)
     }
 
     @Test
-    fun `stale reply with a foreign requestId is ignored`() {
-        val state = CapeSyncState(intervalTicks = 20)
-        val id = state.onJoin()!!
-        assertFalse(state.onResponse(SyncResponse(id + 100, listOf(cape("evil")))))
-        assertFalse(state.hasServerAnswer)
-        assertFalse(state.usingServerProviders)
-        assertEquals(0, state.responsesAccepted)
+    fun `устаревшая ревизия отбрасывается молча`() {
+        val s = state()
+        s.onRoster(Roster(5, listOf(RosterObject("a", emptyList()))))
+
+        // Ростер с меньшей ревизией приходит, когда пакеты переплелись — из-за
+        // TCP такое возможно даже при отправке по порядку (пересоединение).
+        assertFalse(s.onRoster(Roster(3, listOf(RosterObject("a", listOf(urlFunction("stale")))))))
+        assertEquals(1, s.rostersStale)
+        assertEquals(5, s.revision, "ревизия не должна откатываться")
     }
 
     @Test
-    fun `empty reply is a no-capes answer and marks the set authoritative`() {
-        val state = CapeSyncState(intervalTicks = 20)
-        val id = state.onJoin()!!
-        assertTrue(state.onResponse(SyncResponse(id, emptyList())))
-        assertTrue(state.usingServerProviders)
-        assertTrue(state.hasServerAnswer)
+    fun `та же ревизия повторно не применяется`() {
+        val s = state()
+        s.onRoster(Roster(2, emptyList()))
+        assertFalse(s.onRoster(Roster(2, listOf(RosterObject("a", emptyList())))))
     }
 
     @Test
-    fun `missing server without requireServer keeps the local set`() {
-        val state = CapeSyncState(intervalTicks = 20, requireServer = false)
-        val id = state.onJoin()!!
-        state.onResponse(SyncResponse(id, listOf(cape("a"))))
-        assertTrue(state.usingServerProviders)
-        state.onServerUnsupported()
-        assertFalse(state.usingServerProviders, "сервер исчез — возвращаемся к локальному набору")
+    fun `снимок без объектов применять можно, и он не считается пустым`() {
+        val s = state()
+        assertTrue(s.onRoster(Roster(7, emptyList())))
+        assertEquals(7, s.revision)
+    }
+
+    // ── картинки ────────────────────────────────────────────────────────────
+
+    @Test
+    fun `недостающая картинка запрашивается чанком`() {
+        val hash = ImageHash.compute(byteArrayOf(7, 7, 7))
+        val s = state()
+        s.onRoster(Roster(1, listOf(RosterObject("a", listOf(fileFunction("f", hash))))))
+
+        val fetch = s.onTick(channelReady = true).filterIsInstance<SyncOutbound.FetchImage>()
+        assertEquals(1, fetch.size, "нужна картинка — должен быть ровно один fetch")
+        assertEquals(0, fetch.single().offset, "первый запрос всегда с нуля")
+        assertEquals(1, s.fetchesSent)
     }
 
     @Test
-    fun `a server reply after a fallback is applied again`() {
-        val state = CapeSyncState(intervalTicks = 20, requireServer = false)
-        val id = state.onJoin()!!
-        state.onResponse(SyncResponse(id, listOf(cape("a"))))
-        state.onServerUnsupported()
-        // Тот же набор, что и раньше: после отката к локальному он обязан
-        // снова переключить реестр на серверный.
-        val id2 = tick(state, 20).single()
-        assertTrue(state.onResponse(SyncResponse(id2, listOf(cape("a")))))
-        assertTrue(state.usingServerProviders)
+    fun `готовая картинка повторно не запрашивается`() {
+        // Хэш обязан считаться от тех же байтов, что придут в чанке: иначе
+        // ассемблер отбросит сборку по «хеш не совпал» и картинка не станет
+        // готовой — но по другой, неверной причине.
+        val bytes = ByteArray(4) { 7 }
+        val hash = ImageHash.compute(bytes)
+        val s = state()
+        s.onRoster(Roster(1, listOf(RosterObject("a", listOf(fileFunction("f", hash))))))
+
+        s.onChunk(Chunk(hash = hash, totalSize = 4, offset = 0, bytes = bytes))
+        assertTrue(s.onTick(channelReady = true).filterIsInstance<SyncOutbound.FetchImage>().isEmpty())
+        assertTrue(s.missingHashes().isEmpty())
     }
 
     @Test
-    fun `missing server with requireServer means no capes`() {
-        val state = CapeSyncState(intervalTicks = 20, requireServer = true)
-        state.onServerUnsupported()
-        assertTrue(state.usingServerProviders)
-        assertEquals(CapeSyncState.FINGERPRINT_EMPTY_SERVER, state.fingerprint)
+    fun `канал не готов — запросы не летят, но и счётчик не растёт`() {
+        val hash = ImageHash.compute(byteArrayOf(7))
+        val s = state()
+        s.onRoster(Roster(1, listOf(RosterObject("a", listOf(fileFunction("f", hash))))))
+
+        val out = s.onTick(channelReady = false)
+        assertTrue(out.isEmpty(), "при закрытом канале отправлять нечего")
+        assertEquals(0, s.fetchesSent, "неотправленный запрос не должен считаться отправленным")
+    }
+
+    // ── загрузка своих картинок ─────────────────────────────────────────────
+
+    @Test
+    fun `заливаются только те мои картинки, на которые ссылаются чужие`() {
+        val wanted = ImageHash.compute(byteArrayOf(1, 1))
+        val mine = ImageHash.compute(byteArrayOf(2, 2))
+        val unused = ImageHash.compute(byteArrayOf(3, 3))
+        val s = state()
+        s.onRoster(Roster(1, listOf(RosterObject("other", listOf(fileFunction("f", wanted))))))
+
+        val pending = s.pendingUploads(s.referencedHashes(exceptId = "me"), owned = setOf(mine, unused))
+        assertTrue(pending.isEmpty(), "чужие ссылки на МОИ картинки не должны появляться из моего набора")
+
+        // А теперь чужой набор ссылается ровно на одну из моих.
+        s.onRoster(
+            Roster(
+                2,
+                listOf(
+                    RosterObject("other", listOf(fileFunction("f", mine))),
+                    RosterObject("me", listOf(fileFunction("g", unused))),
+                ),
+            ),
+        )
+        val pending2 = s.pendingUploads(s.referencedHashes(exceptId = "me"), setOf(mine, unused))
+        assertEquals(listOf(mine), pending2, "заливаться должна только реально затребованная картинка")
     }
 
     @Test
-    fun `unsupported server does not spam the fingerprint`() {
-        val state = CapeSyncState(intervalTicks = 20, requireServer = true)
-        repeat(100) { state.onServerUnsupported() }
-        assertEquals(CapeSyncState.FINGERPRINT_EMPTY_SERVER, state.fingerprint)
+    fun `многочанковая загрузка продолжается тик за тиком`() {
+        val mine = ImageHash.compute(byteArrayOf(2, 2))
+        val s = state()
+        s.onRoster(Roster(1, listOf(RosterObject("other", listOf(fileFunction("f", mine))))))
+        val referenced = s.referencedHashes()
+
+        // Владелец отдаёт куски по одному и отмечает отправленный объём.
+        // Если следующий кусок перестал предлагаться, многочанковая загрузка
+        // (а локальный файл вправе весить больше чанка) намертво залипла бы.
+        // Смещение — это то, из чего клиент режет следующий кусок. Если оно не
+        // двигается, «предлагается» один и тот же первый кусок вечно.
+        s.markUploadProgress(mine, sentTotal = 0)
+        assertEquals(1, s.pendingUploads(referenced, setOf(mine)).size, "первый кусок должен предлагаться")
+        assertEquals(0, s.uploadedBytesOf(mine), "до отправки смещение нулевое")
+
+        val afterFirst = s.markUploadProgress(mine, sentTotal = CHUNK_BYTES)
+        assertEquals(CHUNK_BYTES, afterFirst, "после первого куска смещение должно уехать на размер чанка")
+        assertEquals(1, s.pendingUploads(referenced, setOf(mine)).size, "второй кусок должен предлагаться")
+        assertEquals(CHUNK_BYTES, s.uploadedBytesOf(mine), "смещение обязано совпадать с отправленным объёмом")
+
+        s.markUploadProgress(mine, sentTotal = CHUNK_BYTES * 3)
+        s.markUploadComplete(mine)
+        assertTrue(s.pendingUploads(referenced, setOf(mine)).isEmpty(), "после полной отправки кусков нет")
     }
 
     @Test
-    fun `out of world and unsupported server ask nothing`() {
-        val state = CapeSyncState(intervalTicks = 20)
-        assertEquals(emptyList(), tick(state, 50, inWorld = false))
-        assertEquals(emptyList(), tick(state, 50, ready = false))
-        assertEquals(0, state.lastRequestId)
+    fun `загруженная картинка больше не предлагается`() {
+        val mine = ImageHash.compute(byteArrayOf(2, 2))
+        val s = state()
+        s.onRoster(Roster(1, listOf(RosterObject("other", listOf(fileFunction("f", mine))))))
+        val referenced = s.referencedHashes()
+
+        assertEquals(listOf(mine), s.pendingUploads(referenced, setOf(mine)))
+        s.markUploadProgress(mine, sentTotal = 128)
+        s.markUploadComplete(mine)
+        assertTrue(s.pendingUploads(referenced, setOf(mine)).isEmpty())
     }
 
     @Test
-    fun `leaving a world without a server answers nothing`() {
-        val state = CapeSyncState(intervalTicks = 20)
-        state.onJoin()
-        tick(state, 100, ready = false)
-        assertEquals(0, state.timedOut, "обрыв канала — не таймаут")
+    fun `прогресс загрузки не откатывается назад`() {
+        val h = ImageHash.compute(byteArrayOf(5))
+        val s = state()
+        assertEquals(0, s.uploadedBytesOf(h))
+        assertEquals(64, s.markUploadProgress(h, 64))
+        // Повторный кусок с меньшим смещением — не должно уменьшать отданное.
+        assertEquals(64, s.markUploadProgress(h, 32))
+    }
+
+    // ── зависшая докачка ────────────────────────────────────────────────────
+
+    @Test
+    fun `пока куски идут, повторно не просим`() {
+        val hash = ImageHash.compute(ByteArray(8))
+        val s = state()
+        s.onRoster(Roster(1, listOf(RosterObject("a", listOf(fileFunction("f", hash))))))
+        // Первый кусок из двух пришёл — сборка идёт.
+        s.onChunk(Chunk(hash = hash, totalSize = 16, offset = 0, bytes = ByteArray(8)))
+        repeat(SyncProtocol.MIN_INTERVAL_TICKS) { s.onTickAdvance() }
+
+        // Ответ на прошлый запрос получен, значит запрос на следующий кусок
+        // не только допустим, но и необходим: иначе картинка из нескольких
+        // чанков никогда не доходит до конца.
+        val next = s.onTick(channelReady = true).filterIsInstance<SyncOutbound.FetchImage>().firstOrNull()
+        assertNotNull(next, "после пришедшего куска докачка обязана продолжиться")
+        assertEquals(8, next.offset, "следующий кусок берётся с места обрыва")
+
+        // А вот повторный запрос, пока ответ не пришёл, отправлять нельзя:
+        // сервер завалит одинаковыми запросами, а толку от них ноль.
+        repeat(SyncProtocol.MIN_INTERVAL_TICKS) { s.onTickAdvance() }
+        assertTrue(
+            s.onTick(channelReady = true).filterIsInstance<SyncOutbound.FetchImage>().isEmpty(),
+            "нельзя перебивать запрошенный кусок новым запросом — сервер завалит одинаковыми запросами",
+        )
     }
 
     @Test
-    fun `disconnect wipes the session but keeps the tick clock`() {
-        val state = CapeSyncState(intervalTicks = 20)
-        state.onJoin()
-        state.onResponse(SyncResponse(1, listOf(cape("a"))))
-        state.onDisconnect()
-        assertFalse(state.hasServerAnswer)
-        assertFalse(state.usingServerProviders)
-        assertEquals(CapeSyncState.FINGERPRINT_UNSET, state.fingerprint)
-        assertEquals(0, state.responsesAccepted)
+    fun `зависшая на середине картинка сбрасывается и запрашивается заново с нуля`() {
+        val hash = ImageHash.compute(ByteArray(8))
+        val s = state()
+        s.onRoster(Roster(1, listOf(RosterObject("a", listOf(fileFunction("f", hash))))))
+        // Первый кусок из двух пришёл, второй — нет: сервер замолчал посреди картинки.
+        s.onChunk(Chunk(hash = hash, totalSize = 16, offset = 0, bytes = ByteArray(8)))
+
+        // Молчание терпимо, но не бесконечно: картинка, которую так и не
+        // доставили, обязана снова стать запрашиваемой, иначе игрок останется
+        // без плаща до самого выхода с сервера. Ждём заведомо больше
+        // stall-таймаута — он обязан перекрывать худший интервал backoff, иначе
+        // нормальная медленная передача будет выглядеть зависшей.
+        repeat(SyncProtocol.stallTicks(SyncProtocol.MAX_BACKOFF_INTERVAL_TICKS) + 50) { s.onTickAdvance() }
+        val fetch = s.onTick(channelReady = true).filterIsInstance<SyncOutbound.FetchImage>().firstOrNull()
+        assertNotNull(fetch, "зависшая картинка должна быть переспрошена, а не ждать вечно")
+        assertEquals(0, fetch.offset, "докачка начинается с нуля, а не с места обрыва")
     }
 
     @Test
-    fun `requestNow bypasses the interval`() {
-        val state = CapeSyncState(intervalTicks = 1000)
-        val id = state.onJoin()!!
-        val forced = state.requestNow()!!
-        assertTrue(forced > id, "ручной запрос должен получить свежий id")
+    fun `молчащий сервер всё равно приводит к повтору запроса`() {
+        val hash = ImageHash.compute(ByteArray(8))
+        // Потолок намеренно крошечный: иначе проверка шла бы тысячи тиков.
+        val s = CapeSyncState(maxRetryTicks = 40)
+        s.onRoster(Roster(1, listOf(RosterObject("a", listOf(fileFunction("f", hash))))))
+
+        val first = s.onTick(channelReady = true).filterIsInstance<SyncOutbound.FetchImage>().firstOrNull()
+        assertNotNull(first, "нужен первый запрос")
+        // Ответа нет вообще: ни отказа, ни куска.
+        repeat(60) { s.onTickAdvance() }
+        val again = s.onTick(channelReady = true).filterIsInstance<SyncOutbound.FetchImage>().firstOrNull()
+        assertNotNull(again, "молчание сервера обязано приводить к повтору, иначе игрок останется без плаща")
+        assertEquals(first.offset, again.offset, "повтор спрашивает тот же кусок, а не начинает заново")
     }
 
     @Test
-    fun `requestNow replaces a pending request instead of blocking on it`() {
-        val state = CapeSyncState(intervalTicks = 1000)
-        state.onJoin()
-        val forced = state.requestNow()!!
-        // Старый ответ больше не подходит, новый — подходит.
-        assertFalse(state.onResponse(SyncResponse(forced - 1, listOf(cape("a")))))
-        assertTrue(state.onResponse(SyncResponse(forced, listOf(cape("a")))))
-    }
+    fun `интервал между попытками не превышает потолок`() {
+        val hash = ImageHash.compute(ByteArray(8))
+        val cap = 100
+        val s = CapeSyncState(maxRetryTicks = cap)
+        s.onRoster(Roster(1, listOf(RosterObject("a", listOf(fileFunction("f", hash))))))
 
-    @Test
-    fun `request ids are unique and never reused after a reset`() {
-        val state = CapeSyncState(intervalTicks = 20)
-        val ids = generateSequence { state.onJoin() }.take(50).toList()
-        assertEquals(ids.size, ids.toSet().size)
-    }
-
-    @Test
-    fun `after a timeout the retry still waits for the interval`() {
-        // backoff = false: здесь важна базовая каденция повтора.
-        // С backoff=true повтор после таймаута ждал бы удвоенный интервал.
-        val state = CapeSyncState(intervalTicks = 20, timeoutTicks = 5, backoff = false)
-        state.onJoin()
-        // Таймаут (5 тиков) истёк раньше интервала (20): запрос рассыпался,
-        // но следующий не отправляется мгновенно — иначе это цикл запросов
-        // к серверу, который и не отвечает.
-        assertEquals(emptyList(), tick(state, 5))
-        assertEquals(1, state.timedOut)
-        assertEquals(2, tick(state, 15).single())
-    }
-
-    @Test
-    fun `a timeout is counted once per request, not once per tick`() {
-        // backoff = false: считаем таймауты на базовой каденции, иначе
-        // окно в 100 тиков перестаёт накрывать целое число попыток.
-        val state = CapeSyncState(intervalTicks = 20, timeoutTicks = 5, backoff = false)
-        val sent = mutableListOf(state.onJoin()!!)
-        val timeouts = mutableListOf<Int>()
-        for (t in 1..100) {
-            val before = state.timedOut
-            val id = state.onTick(true, true)
-            if (id != null) sent += id
-            if (state.timedOut > before) timeouts += t
+        val at = mutableListOf<Int>()
+        for (tick in 0 until 2000) {
+            s.onTickAdvance()
+            if (s.onTick(channelReady = true).filterIsInstance<SyncOutbound.FetchImage>().isNotEmpty()) at += tick
         }
-        assertEquals(
-            sent.size - 1,
-            timeouts.size,
-            "каждый завершившийся без ответа запрос даёт ровно один таймаут, последний ещё в полёте",
-        )
-        assertTrue(
-            timeouts.zipWithNext().all { (a, b) -> b - a >= state.timeoutTicks },
-            "таймауты не сливаются: $timeouts",
-        )
-        assertTrue(
-            sent.zipWithNext().all { (a, b) -> b > a },
-            "идентификаторы запросов строго растут",
-        )
+        assertTrue(at.size >= 3, "нужно несколько попыток, получили ${at.size}")
+        for (i in 1 until at.size) {
+            val gap = at[i] - at[i - 1]
+            assertTrue(
+                gap <= cap,
+                "между попытками прошло $gap тиков при потолке $cap: разброс не упирается в потолок",
+            )
+        }
     }
-}
+
+    // ── разрыв ──────────────────────────────────────────────────────────────
+
+      @Test
+      fun `разрыв обнуляет ревизию и состояние загрузок`() {
+          val s = state()
+          s.onRoster(Roster(9, listOf(RosterObject("a", listOf(fileFunction("f", ImageHash.compute(byteArrayOf(1))))))))
+          s.markUploadProgress(ImageHash.compute(byteArrayOf(1)), 64)
+
+          s.onDisconnect()
+          assertEquals(0, s.revision, "после разрыва старый роустер не должен считаться текущим")
+          assertEquals(0, s.uploadedBytesOf(ImageHash.compute(byteArrayOf(1))))
+      }
+
+      // ── перенастройка без потери снимка ─────────────────────────────────────
+
+      @Test
+      fun `reload не обнуляет ревизию снимка`() {
+          val s = state()
+          s.onRoster(Roster(4, listOf(RosterObject("a", listOf(urlFunction("x"))))))
+
+          s.reconfigure(enabled = true, backoff = true)
+
+          assertEquals(4, s.revision, "после reload прежний снимок всё ещё текущий")
+          assertEquals(1, s.roster.objects.size, "после reload роустер должен остаться на месте")
+      }
+
+      @Test
+      fun `reload не обрывает докачку своей картинки`() {
+          val s = state()
+          val hash = ImageHash.compute(ByteArray(300_000) { (it % 251).toByte() })
+          // Свой `file`-плащ: байты лежат на сервере, клиент их обязан вытянуть
+          // обратно по своему же хэшу из роустера.
+          s.onRoster(Roster(1, listOf(RosterObject("me", listOf(fileFunction("local", hash))))))
+
+          s.reconfigure(enabled = true, backoff = true)
+          val fetch = s.onTick(channelReady = true).filterIsInstance<SyncOutbound.FetchImage>()
+
+          assertEquals(
+              1,
+              fetch.size,
+              "после reload клиент обязан продолжать запрашивать свою картинку, " +
+                  "иначе плащ пропадает до чужого reload",
+          )
+          assertEquals(hash, fetch.single().hash)
+      }
+
+      @Test
+      fun `reload применяет новые настройки и сбрасывает таймер докачки`() {
+          val s = state(backoff = true)
+
+          s.reconfigure(enabled = false, backoff = false)
+
+          assertFalse(s.enabled, "новый enabled должен применяться на месте")
+          assertFalse(s.backoff, "новый backoff должен применяться на месте")
+          assertTrue(
+              s.onTick(channelReady = true).isEmpty(),
+              "при выключенной синхронизации тик не должен ничего слать",
+          )
+      }
+
+      @Test
+      fun `разрыв после reload всё равно обнуляет ревизию`() {
+          val s = state()
+          s.onRoster(Roster(6, listOf(RosterObject("a", listOf(urlFunction("x"))))))
+          s.reconfigure(enabled = true, backoff = true)
+
+          s.onDisconnect()
+
+          assertEquals(0, s.revision, "смена сервера обязана забыть снимок, в отличие от reload")
+      }
+  }
+

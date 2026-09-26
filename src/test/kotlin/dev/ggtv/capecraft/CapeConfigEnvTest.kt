@@ -8,6 +8,7 @@ import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -122,20 +123,42 @@ class CapeConfigEnvTest {
 
     @Test
     fun `переменная важнее значения из файла конфига`() {
-        val cfg = serverSync("intervalTicks" to "40", "backoff" to "true")
-        env("CAPECRAFT_SERVERSYNC_INTERVALTICKS" to "80")
+        // Ключи v2: в v1 здесь был intervalTicks, которого в v2 больше нет —
+        // опроса не существует, клиент объявляет набор сам.
+        val cfg = serverSync("shareLocalProviders" to "false", "backoff" to "true")
+        env("CAPECRAFT_SERVERSYNC_SHARELOCALPROVIDERS" to "true")
         val s = ServerSyncSettings.parse(cfg)
-        assertEquals(80, s.intervalTicks)
+        assertTrue(s.shareLocalProviders, "переменная должна победить значение из файла")
         assertTrue(s.backoff, "опция без переменной должна остаться из файла")
     }
 
     @Test
     fun `без переменных настройки остаются файловыми`() {
-        val cfg = serverSync("intervalTicks" to "40", "requireServer" to "true")
+        val cfg = serverSync("shareLocalProviders" to "true", "allowForeignUrls" to "true")
         env()
         val s = ServerSyncSettings.parse(cfg)
-        assertEquals(40, s.intervalTicks)
-        assertTrue(s.requireServer)
+        assertTrue(s.shareLocalProviders)
+        assertTrue(s.allowForeignUrls)
+    }
+
+    @Test
+    fun `удалённые ключи v1 не ломают разбор и не влияют на результат`() {
+        // Старый конфиг в мире: requireServer/intervalTicks там есть, читать их
+        // нельзя, а сломать на них разбор — можно. Проверяем, что выживает.
+        val cfg = serverSync(
+            "intervalTicks" to "40",
+            "timeoutTicks" to "100",
+            "requireServer" to "true",
+            "allowFileProviders" to "true",
+            "enabled" to "true",
+        )
+        env()
+        val s = ServerSyncSettings.parse(cfg)
+        assertTrue(s.enabled, "живые ключи должны читаться как раньше")
+        assertFalse(
+            s.shareLocalProviders,
+            "allowFileProviders из v1 не должен молча превратиться в shareLocalProviders",
+        )
     }
 
     @Test

@@ -5,21 +5,32 @@ import dev.ggtv.capecraft.provider.Source
 import java.net.URI
 
 /**
- * Один активный Cape-провайдер в том виде, в каком он идёт по сети и
- * восстанавливается на клиенте в [Provider].
+ * Один Cape-провайдер в том виде, в каком он едет по сети в Sync v2.
  *
- * Это НЕ [Provider] из конфига: здесь нет условия `when` (сервер уже
- * отобрал активные) и нет addon-объекта [dev.ggtv.capecraft.api.provider.CapeSource]
- * (у клиента он свой, см. [toProvider]).
+ * Это НЕ [Provider] из конфига: здесь нет addon-объекта
+ * [dev.ggtv.capecraft.api.provider.CapeSource] (у клиента он свой, см.
+ * [toProvider]) и нет локального пути для [Kind.FILE] — вместо пути едет
+ * [imageHash].
+ *
+ * ## Направление
+ *
+ * В v1 этот класс описывал то, что **сервер** прислал клиенту. В v2 он
+ * описывает то, что **клиент** объявил серверу, и то, что сервер разослал
+ * остальным. Поля те же, но смысл `primary` для [Kind.FILE] изменился с
+ * «путь на диске» на «пусто» — см. [validate].
  */
 data class ActiveCape(
     val name: String,
     val kind: Kind,
-    /** url-шаблон / путь-шаблон / url для json / имя аддон-типа. */
+    /** url-шаблон / url для json / имя аддон-типа. Для [Kind.FILE] — пусто. */
     val primary: String,
     /** JSONPath-инструкция для [Kind.JSON], иначе пусто. */
     val extract: String = "",
     val priority: Int = 0,
+    /** Условие `when`, вычисляет его получатель против своего контекста. */
+    val condition: WireCondition? = null,
+    /** Хэш картинки — только для [Kind.FILE]. */
+    val imageHash: ImageHash? = null,
 ) {
     /** Вид провайдера. Значения совпадают с тегами в [SyncCodec]. */
     enum class Kind(val tag: Int) {
@@ -35,11 +46,20 @@ data class ActiveCape(
     }
 
     /**
-     * Проверить поле до отправки/после приёма: длины, обязательность
-     * `extract` у json, безопасную схему URL.
+     * Проверить поле до отправки/после приёма: длины, обязательность полей,
+     * безопасную схему URL.
      *
      * Возвращает список проблем (пустой = всё в порядке) — вызывающий
      * решает, логировать это или отбросить пакет целиком.
+     *
+     * ## Правила [Kind.FILE] в v2
+     *
+     * Здесь `primary` обязан быть **пустым**, а [imageHash] — присутствовать.
+     * Это не формальность, а граница приватности: локальный путь владельца
+     * не уезжает никогда (кому он на другом диске?), а получатель узнаёт
+     * картинку только по хэшу и скачивает её байты у того, кто её залил.
+     * Провайдер `file` без хэша отбрасывается: показать его нечем, и молча
+     * пропустить его — значит оставить игрока без плаща без объяснения.
      */
     fun validate(): List<String> {
         val out = ArrayList<String>()
@@ -47,7 +67,6 @@ data class ActiveCape(
         if (utf8Len(name) > SyncProtocol.MAX_NAME_BYTES) {
             out += "имя «${truncate(name)}» длиннее ${SyncProtocol.MAX_NAME_BYTES} байт"
         }
-        if (primary.isEmpty()) out += "у провайдера «$name» пустой параметр"
         if (utf8Len(primary) > SyncProtocol.MAX_STRING_BYTES) {
             out += "параметр провайдера «$name» длиннее ${SyncProtocol.MAX_STRING_BYTES} байт"
         }
@@ -56,25 +75,39 @@ data class ActiveCape(
         }
         when (kind) {
             Kind.URL -> {
-                if (primary.isNotEmpty() && !isHttpUrl(primary)) {
+                if (primary.isEmpty()) out += "у url-провайдера «$name» пустой параметр"
+                else if (!isHttpUrl(primary)) {
                     out += "у url-провайдера «$name» недопустимая ссылка «${truncate(primary)}»"
                 }
+                if (imageHash != null) out += "у url-провайдера «$name» не должно быть хэша картинки"
             }
 
             Kind.JSON -> {
-                if (primary.isNotEmpty() && !isHttpUrl(primary)) {
+                if (primary.isEmpty()) out += "у json-провайдера «$name» пустой параметр"
+                else if (!isHttpUrl(primary)) {
                     out += "у json-провайдера «$name» недопустимая ссылка «${truncate(primary)}»"
                 }
                 if (extract.isEmpty()) {
                     out += "у json-провайдера «$name» пустой extract"
                 }
+                if (imageHash != null) out += "у json-провайдера «$name» не должно быть хэша картинки"
             }
 
-            Kind.FILE -> Unit // путь проверяется политикой клиента (см. SyncPolicy)
+            Kind.FILE -> {
+                if (primary.isNotEmpty()) {
+                    out += "у file-провайдера «$name» не должно быть пути на проводе"
+                }
+                if (imageHash == null) {
+                    out += "у file-провайдера «$name» нет хэша картинки"
+                }
+            }
+
             Kind.ADDON -> {
                 if (primary.isEmpty()) out += "у аддон-провайдера «$name» пустой тип"
+                if (imageHash != null) out += "у аддон-провайдера «$name» не должно быть хэша картинки"
             }
         }
+        condition?.let { out += it.validate().map { p -> "у провайдера «$name»: $p" } }
         return out
     }
 
@@ -115,18 +148,63 @@ data class ActiveCape(
 }
 
 /**
- * Собрать сетевое описание провайдера из [Provider].
+ * Собрать проводное описание провайдера из [Provider].
  *
- * Условие `when` намеренно НЕ переносится: сервер уже применил
- * [dev.ggtv.capecraft.condition.ProviderSelector] и отправил только
- * активные. Аддон-тип переносится именем типа — параметры аддона клиент
- * восстановит из своего локального конфига (см. CapeSyncClient).
+ * Звонит **клиент**: в v2 он объявляет свой набор, а не получает чужой.
+ *
+ * Условие `when` переносится ([WireCondition.from]) — получатель вычислит его
+ * против своего контекста наблюдаемого игрока. Локальный путь [Source.File] на
+ * провод **не уходит**: вместо него [fileHash], который клиент посчитал,
+ * прочитав файл. Если хэша нет (файл не нашёлся/не прочитался), возвращается
+ * `null` — объявлять `file`-провайдер без хэша бессмысленно, его бы отбросили
+ * при первом же разборе.
+ *
+ * Аддон-тип переносится именем типа: параметры аддона у получателя свои.
  */
-fun Provider.toActiveCape(): ActiveCape? = when {
-    addonSource != null -> values?.let { ActiveCape(name, ActiveCape.Kind.ADDON, it.type, priority = priority) }
+fun Provider.toActiveCape(fileHash: ImageHash? = null): ActiveCape? = when {
+    addonSource != null -> values?.let {
+        ActiveCape(
+            name = name,
+            kind = ActiveCape.Kind.ADDON,
+            primary = it.type,
+            priority = priority,
+            condition = WireCondition.from(condition),
+        )
+    }
+
     else -> when (val s = source) {
-        is Source.Url -> ActiveCape(name, ActiveCape.Kind.URL, s.template, priority = priority)
-        is Source.File -> ActiveCape(name, ActiveCape.Kind.FILE, s.template, priority = priority)
-        is Source.Json -> ActiveCape(name, ActiveCape.Kind.JSON, s.template, s.extract, priority = priority)
+        is Source.Url -> ActiveCape(
+            name = name,
+            kind = ActiveCape.Kind.URL,
+            primary = s.template,
+            priority = priority,
+            condition = WireCondition.from(condition),
+        )
+
+        is Source.Json -> ActiveCape(
+            name = name,
+            kind = ActiveCape.Kind.JSON,
+            primary = s.template,
+            extract = s.extract,
+            priority = priority,
+            condition = WireCondition.from(condition),
+        )
+
+        is Source.File -> if (fileHash == null) {
+            null
+        } else {
+            ActiveCape(
+                name = name,
+                kind = ActiveCape.Kind.FILE,
+                primary = "",
+                priority = priority,
+                condition = WireCondition.from(condition),
+                imageHash = fileHash,
+            )
+        }
+
+        // Сетевая картинка уже привязана к хэшу — заново объявлять её как
+        // «свою функцию» незачем: наружу уйдёт тот же хэш, что уже в кэше.
+        is Source.NetImage -> null
     }
 }

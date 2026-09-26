@@ -36,6 +36,8 @@ class FileFetcher : CapeFetcher {
             readFile(url)
         }
         is Resolved.Addon -> r.source.fetch(r.values)
+        // Своих байтов у file-источника нет: картинку с этого хэша принёс Sync.
+        is Resolved.NetImage -> throw FetchError("file-источник не умеет сетевую картинку: ${r.hash.take(12)}")
     }
 
     private fun readFile(path: String): ByteArray {

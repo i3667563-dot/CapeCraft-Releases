@@ -80,6 +80,11 @@ class CapeCraftClient : ClientModInitializer {
             val world = client.level ?: return@register
             if (!world.isClientSide()) return@register
             tick++
+            // Синхронизация с сервером — каждый игровой тик. Её интервалы
+            // (backoff, троттлинг докачки) считаются в игровых тиках, поэтому
+            // шаг реже 20 тиков ломает всю шкалу: счётчик внутри состояния
+            // отставал от игрового времени в 20 раз.
+            CapeSyncClient.onTick()
             // ~100 мс = каждый 2-й тик, чтобы не гонять зря вхолостую.
             if (tick % 2 != 0) return@register
             registry.animate(world.getLevelData().getGameTime() * 50L)
@@ -88,8 +93,6 @@ class CapeCraftClient : ClientModInitializer {
             // провайдер, и при смене — бесшовно подгружаем новый плащ.
             if (tick % 20 == 0) {
                 registry.refreshConditions(dev.ggtv.capecraft.render.MinecraftWorldContext)
-                // Тот же тик — шаг синхронизации с сервером (интервал внутри).
-                CapeSyncClient.onClientTick(inWorld = true)
             }
         }
     }

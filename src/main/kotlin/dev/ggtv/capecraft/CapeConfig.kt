@@ -43,6 +43,67 @@ import java.nio.file.Path
  * `config/capecraft.kn` в папке сервера — источник провайдеров для
  * синхронизации, см. `capeCraft.sync.ServerCapeCatalog`).
  */
+/**
+ * Шаблон `config/capecraft.kn`, который создаётся при первом запуске.
+ *
+ * Вынесен в константу ради тестируемости: [CapeConfig] берёт путь из
+ * `FabricLoader`, в тестах её не создать, а шаблон должен быть проверяемым.
+ * Пока он жил внутри метода, в нём месяцами лежали ключи v1
+ * (`intervalTicks`, `requireServer`, `allowFileProviders`), которые
+ * [dev.ggtv.capecraft.sync.ServerSyncSettings] уже не читает, и два активных
+ * провайдера-заглушки, из-за чего чистая установка считала их своими.
+ */
+internal val DEFAULT_KN_TEXT: String = """
+            # CapeCraft — конфиг плащей (.kn, надмножество .crn).
+            # Провайдеры проверяются по порядку: первый успешный отдаёт плащ (fallback).
+            capeCraft {
+                providers [
+                    # URL-провайдер: прямая ссылка на картинку.
+                    # {username} — имя игрока, {uuid} — UUID без дефисов.
+                    # Все три примера ниже закомментированы намеренно: на чистой
+                    # установке активных провайдеров нет, и мод не пытается никуда
+                    # ходить. Раскомментируй или допиши свой — это единственное,
+                    # что нужно для работы.
+                    #
+                    # URL-провайдер: прямая ссылка на картинку.
+                    # {username} — имя игрока, {uuid} — UUID без дефисов.
+                    # { name = "example", type = "url", url = "https://example.com/capes/{username}.png" },
+                    # JSON-провайдер: тянем URL плаща из JSON по инструкции.
+                    # { name = "api", type = "json", url = "https://api.example.com/cape?u={username}", extract = "$.data.cape_url" },
+                    # Локальный файл в папке игры: {root} = папка игры.
+                    # Чтобы его увидели другие, включи shareLocalProviders ниже.
+                    # { name = "local", type = "file", path = "{root}/capes/{uuid}.png" }
+                ]
+                limits {
+                    # Пикселей в одном кадре (ширина*высота), дальше — сжатие.
+                    maxPixelsPerFrame = 4000000
+                    # Максимум кадров в анимации, дальше — скип кадров.
+                    maxFrames = 100
+                    # Байт под пиксели одного плаща (все кадры).
+                    maxBytesPerCape = 67108864
+                    # Суммарно байт под все плащи в кэше.
+                    maxBytesTotal = 134217728
+                }
+                serverSync {
+                    # Объявлять ли свой набор и принимать чужие (протокол v2).
+                    # В v1 здесь был опрос по таймеру; в v2 клиент объявляет
+                    # один раз при входе и при /cp reload, а обновления приходят
+                    # рассылкой, поэтому intervalTicks/timeoutTicks больше не нужны.
+                    enabled = true
+                    # Отдавать ли другим свой локальный `file`-плащ: байты уедут
+                    # на сервер и оттуда ко всем, кто на меня смотрит. Выключено
+                    # по умолчанию. У `http`/`json` отдельного согласия не нужно.
+                    shareLocalProviders = false
+                    # Принимать ли чужие объявления с чужим `http`-адресом.
+                    # Выключено по умолчанию: иначе мой рендер становится маячком
+                    # для адресов, придуманных другим игроком.
+                    allowForeignUrls = false
+                    # Замедлять запросы картинок, пока нет ответа.
+                    backoff = true
+                }
+            }
+""".trimIndent()
+
 class CapeConfig {
     @Volatile
     var providers: List<Provider> = emptyList()
@@ -140,44 +201,7 @@ class CapeConfig {
         CapeConfigEnv.longOr("capeCraft.limits.$key", cfg.getIntOr("capeCraft.limits.$key", def))
 
     private fun writeDefault() {
-        val text = """
-            # CapeCraft — конфиг плащей (.kn, надмножество .crn).
-            # Провайдеры проверяются по порядку: первый успешный отдаёт плащ (fallback).
-            capeCraft {
-                providers [
-                    # URL-провайдер: прямая ссылка на картинку.
-                    # {username} — имя игрока, {uuid} — UUID без дефисов.
-                    { name = "example", type = "url", url = "https://example.com/capes/{username}.png" },
-                    # JSON-провайдер: тянем URL плаща из JSON по инструкции.
-                    # { name = "api", type = "json", url = "https://api.example.com/cape?u={username}", extract = "$.data.cape_url" },
-                    # Локальный файл в папке игры: {root} = папка игры.
-                    { name = "local", type = "file", path = "{root}/capes/{uuid}.png" }
-                ]
-                limits {
-                    # Пикселей в одном кадре (ширина*высота), дальше — сжатие.
-                    maxPixelsPerFrame = 4000000
-                    # Максимум кадров в анимации, дальше — скип кадров.
-                    maxFrames = 100
-                    # Байт под пиксели одного плаща (все кадры).
-                    maxBytesPerCape = 67108864
-                    # Суммарно байт под все плащи в кэше.
-                    maxBytesTotal = 134217728
-                }
-                serverSync {
-                    # Опрашивать ли сервер об активных плащах.
-                    enabled = true
-                    # Как часто спрашивать (тиков, 20 = сек): 40 = раз в 2 сек.
-                    intervalTicks = 40
-                    # Сколько ждать ответа (тиков): 100 = 5 сек.
-                    timeoutTicks = 100
-                    # true = без ответа сервера локальный набор НЕ используется.
-                    requireServer = false
-                    # Разрешить серверу присылать `type = file` (чтение с диска
-                    # клиента). По умолчанию запрещено из соображений безопасности.
-                    allowFileProviders = false
-                }
-            }
-        """.trimIndent()
+        val text = DEFAULT_KN_TEXT
         Files.createDirectories(path.parent)
         Files.writeString(path, text)
     }

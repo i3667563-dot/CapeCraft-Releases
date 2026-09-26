@@ -21,11 +21,12 @@ import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents
  *     видит аддон-типы;
  *  3. собираем реестр плащей;
  *  4. регистрируем команды `/cp`;
- *  5. подписываемся на тик клиента — при входе в мир локального игрока
- *     сразу подгружаем его плащ (кэш готов до первого кадра рендера);
+ *  5. подписываемся на тик клиента — чтобы при входе в мир локального
+ *     игрока сразу подгрузить его плащ (диагностика в логе + кэш готов
+ *     до первого кадра рендера);
  *  6. подписываемся на сетевую синхронизацию с сервером.
  *
- * MC 1.21.x: имена yarn.
+ * MC 26.2: необфусцированные имена Mojang.
  */
 class CapeCraftClient : ClientModInitializer {
     override fun onInitializeClient() {
@@ -36,7 +37,7 @@ class CapeCraftClient : ClientModInitializer {
         CapeSyncClient.initialize()
         warmUpLocalPlayerCape()
         startAnimationTicker()
-        CapeCraftLog.LOGGER.info(
+        LOGGER.info(
             "CapeCraft загружен (API $CAPE_RUNTIME_API_VERSION): " +
                 "провайдеров ${config.providers.size}, " +
                 "аддон-типов ${CapeApiHolder.api.sourceTypes.ids().size}, " +
@@ -79,6 +80,11 @@ class CapeCraftClient : ClientModInitializer {
             val world = client.world ?: return@register
             if (!world.isClient) return@register
             tick++
+            // Синхронизация с сервером — каждый игровой тик. Её интервалы
+            // (backoff, троттлинг докачки) считаются в игровых тиках, поэтому
+            // шаг реже 20 тиков ломает всю шкалу: счётчик внутри состояния
+            // отставал от игрового времени в 20 раз.
+            CapeSyncClient.onTick()
             // ~100 мс = каждый 2-й тик, чтобы не гонять зря вхолостую.
             if (tick % 2 != 0) return@register
             registry.animate(world.time * 50L)
@@ -87,8 +93,6 @@ class CapeCraftClient : ClientModInitializer {
             // провайдер, и при смене — бесшовно подгружаем новый плащ.
             if (tick % 20 == 0) {
                 registry.refreshConditions(dev.ggtv.capecraft.render.MinecraftWorldContext)
-                // Тот же тик — шаг синхронизации с сервером (интервал внутри).
-                CapeSyncClient.onClientTick(inWorld = true)
             }
         }
     }

@@ -7,6 +7,9 @@ import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Files
+import dev.ggtv.capecraft.provider.ProviderLoader
+import dev.ggtv.capecraft.sync.ServerSyncSettings
+import dev.ggtv.koren.KorenConfig
 import java.nio.file.Path
 
 /**
@@ -103,5 +106,53 @@ class CapeConfigFilesTest {
         // exists() == false для битого линка, поэтому .kn не выбирается.
         val active = CapeConfigFiles.active(dir)
         assertEquals(CapeConfigFiles.CRN_NAME, active.fileName.toString())
+    }
+
+    @Test
+    fun `дефолтный шаблон валиден и без мёртвых ключей v1`() {
+        val text = DEFAULT_KN_TEXT
+        // Ключи v1 в ServerSyncSettings больше не читаются. Пока они были в
+        // шаблоне, новичок видел в своём конфиге опрос по таймеру и
+        // `allowFileProviders`, которых в протоколе v2 нет.
+        // Проверяем присваивания, а не любое упоминание: в комментарии про
+        // миграцию ключи v1 назвать нужно, чтобы человек понял, куда делись
+        // его настройки. Задавать их нельзя — их никто не читает.
+        for (dead in listOf("intervalTicks", "timeoutTicks", "requireServer", "allowFileProviders")) {
+            assertFalse(
+                text.contains("$dead ="),
+                "в дефолтном шаблоне осталось присваивание мёртвого ключа v1: $dead",
+            )
+        }
+        for (live in listOf("shareLocalProviders", "allowForeignUrls", "backoff")) {
+            assertTrue(text.contains(live), "в шаблоне нет ключа v2: $live")
+        }
+        // Заглушки закомментированы: example.com недостижим, и чистая
+        // установка не должна никуда ходить сама.
+        // Заглушка `example.com` недостижима: на чистой установке она должна
+        // остаться закомментированной, иначе мод сам пойдёт по мёртвой ссылке.
+        for (line in text.lines().filter { it.contains("name = \"example\"") }) {
+            assertTrue(
+                line.trimStart().startsWith("#"),
+                "провайдер-заглушка снова активен — новая установка полезет в example.com: $line",
+            )
+        }
+    }
+
+    @Test
+    fun `дефолтный шаблон парсится и даёт дефолтные настройки v2`(@TempDir dir: Path) {
+        val path = dir.resolve(CapeConfigFiles.KN_NAME)
+        Files.writeString(path, DEFAULT_KN_TEXT)
+
+        val cfg = KorenConfig.load(path)
+        assertEquals(
+            0,
+            ProviderLoader.load(cfg).size,
+            "активных провайдеров в шаблоне быть не должно — иначе чистая установка снова получит два",
+        )
+        val sync = ServerSyncSettings.parse(cfg)
+        assertTrue(sync.enabled)
+        assertFalse(sync.shareLocalProviders, "раздача своих файлов по умолчанию выключена")
+        assertFalse(sync.allowForeignUrls, "чужие адреса по умолчанию выключены")
+        assertTrue(sync.backoff)
     }
 }

@@ -4,6 +4,7 @@ import com.mojang.blaze3d.vertex.PoseStack
 import dev.ggtv.capecraft.CapeCraftClient
 import dev.ggtv.capecraft.api.CapeApiHolder
 import dev.ggtv.capecraft.api.render.CapeRenderContext
+import dev.ggtv.capecraft.render.EntityWorldContext
 import dev.ggtv.capecraft.render.MinecraftWorldContext
 import net.minecraft.client.Minecraft
 import net.minecraft.client.renderer.SubmitNodeCollector
@@ -50,7 +51,10 @@ abstract class CapeFeatureRendererMixin {
         val uuid = player.getStringUUID()
 
         val registry = CapeCraftClient.registry
-        registry.ensureLoading(uuid, player.getName().getString())
+        // Условия `when` считаем против ЭТОГО игрока, а не против моего мира:
+        // объявленный набор функций принадлежит ему, и «джунглевый» плащ
+        // должен показаться только тем, кто смотрит действительно из джунглей.
+        registry.ensureLoading(uuid, player.getName().getString(), EntityWorldContext(player))
 
         val defaultTexture: Identifier = registry.textureId(uuid) ?: return
 
