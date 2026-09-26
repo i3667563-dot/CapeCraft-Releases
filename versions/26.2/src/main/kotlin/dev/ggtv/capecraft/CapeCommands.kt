@@ -45,6 +45,10 @@ object CapeCommands {
         // конфига его не отменяет: сервер пришлёт свой набор следующим ответом.
         if (!registry.isServerAuthoritative) {
             registry.reload(cfg.providers, cfg.limits, cfg.rootFor())
+        } else {
+            // Набор с сервера не подменяем (он приедет следующим ответом), но
+            // плащи перечитываем — иначе `/cp reload` не делает ничего.
+            registry.refresh()
         }
         val msg = if (cfg.lastError != null) " с ошибкой: ${cfg.lastError}" else ""
         ctx.source.sendFeedback(Component.literal("Конфиг перезагружен ($cfg.path). Провайдеров: ${cfg.providers.size}, перезагрузка плащей в фоне$msg"))

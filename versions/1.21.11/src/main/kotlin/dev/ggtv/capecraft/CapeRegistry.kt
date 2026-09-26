@@ -169,18 +169,33 @@ class CapeRegistry(
             providers = newProviders
             root = newRoot
             memory = MemoryManager(newLimits)
-            errors.clear()
-            loading.clear()          // старые задачи в очереди отбросятся по поколению
-            generation.incrementAndGet()
-            pendingRefresh.addAll(usernames.keys)
-            lastConditionsFingerprint = ""
-            // Перезагрузка всех известных игроков — напрямую в очередь воркера
-            // (single-thread, FIFO): последняя задача с новым поколением победит.
-            val ordered = order()
-            for (uuid in usernames.keys) {
-                loading.add(uuid)
-                executor.execute { loadInBackground(uuid, ordered) }
-            }
+            refreshLocked()
+        }
+    }
+
+    /**
+     * Перечитать плащи ТЕКУЩИМ набором провайдеров, не меняя сам набор.
+     *
+     * Нужен для `/cp reload` при активном наборе с сервера: конфиг команда
+     * перечитывает всегда, а реестр обязан заново сходить к провайдерам. Иначе
+     * смена плаща на сайте видна только после рестарта игры, а команда врёт,
+     * отчитавшись «перезагрузка плащей».
+     */
+    fun refresh() = synchronized(lock) { refreshLocked() }
+
+    /** Общее тело: сбросить состояние и перепланировать загрузку всех игроков. */
+    private fun refreshLocked() {
+        errors.clear()
+        loading.clear()          // старые задачи в очереди отбросятся по поколению
+        generation.incrementAndGet()
+        pendingRefresh.addAll(usernames.keys)
+        lastConditionsFingerprint = ""
+        // Перезагрузка всех известных игроков — напрямую в очередь воркера
+        // (single-thread, FIFO): последняя задача с новым поколением победит.
+        val ordered = order()
+        for (uuid in usernames.keys) {
+            loading.add(uuid)
+            executor.execute { loadInBackground(uuid, ordered) }
         }
     }
 
