@@ -76,19 +76,39 @@ limits {
 
 ```
 serverSync {
-    enabled            = true   # опрашивать сервер об активных плащах
-    intervalTicks      = 40     # как часто (20 тиков = сек)
-    timeoutTicks       = 100    # сколько ждать ответа
-    requireServer      = false  # true: без ответа сервера локальный набор НЕ используется
-    allowFileProviders = false  # разрешить серверу присылать `type = file`
-    backoff            = true   # замедлять опрос, пока набор не меняется
+    enabled              = true   # объявлять свой набор и брать чужие
+    shareLocalProviders  = false  # отдавать другим свои ЛОКАЛЬНЫЕ файлы
+    allowForeignUrls     = false  # выполнять чужие объявления с http/json
+    backoff              = true   # замедлять докачку при неудачах
 }
 ```
 
-С `backoff = true` клиент, пока набор плащей не меняется, снижает частоту опроса
-с раза в пару секунд до раза в минуту и возвращается к `intervalTicks`, как
-только набор сменился. На сервере это снимает большую часть работы, на
-игроках незаметно. Выключай только для отладки протокола.
+Как это работает: ты объявляешь серверу свой набор функций, сервер рассылает
+всем снимок, и каждый считает приоритет **своего** набора и условия **чужого**
+плаща против мира того, на кого смотрит. Джунглевый плащ показывается только
+тому, кто смотрит действительно из джунглей, а не всем подряд.
+
+Три настройки, которые стоит понимать до включения:
+
+- **`shareLocalProviders`** по умолчанию выключен намеренно: `true` означает,
+  что байты твоего плаща уезжают на сервер и оттуда ко всем остальным. Локальный
+  файл — это личное. `http`/`json` и так видны всем, кто откроет ссылку, там
+  отдельного согласия не нужно. Путь на провод не уходит никогда — вместо него
+  передаётся SHA-256, а байты забираются у владельца через сервер.
+- **`allowForeignUrls`** по умолчанию выключен: иначе любой в чате может
+  объявить функцию, чей адрес указывает на его хост, и каждый, кто на тебя
+  посмотрит, схватит этот адрес — это превращает твой рендер в маячок. Включай
+  только если доверяешь всем в лобби.
+- **`backoff`** относится к докачке картинок, а не к опросу: опроса в v2 нет
+  вообще, сервер сам рассылает снимки при изменениях.
+
+Ключи `intervalTicks`, `timeoutTicks`, `requireServer` и `allowFileProviders`
+относятся к протоколу 1.x и **игнорируются**. Если они есть в твоём конфиге —
+можно удалять.
+
+Сервер проверяет форму объявлений и лимиты, но не решает, кто что носит: он не
+сверяет картинку с объявлением и не хранит игроков после рестарта. Правду
+объявления проверяет каждый клиент сам — отсюда и `allowForeignUrls`.
 
 ### Настройка через окружение и аргументы JVM
 
@@ -120,8 +140,9 @@ CAPECRAFT_CONFIG=/etc/capecraft/prod.kn
 |---|---|---|
 | `capeCraft.limits.maxFrames` | `CAPECRAFT_LIMITS_MAXFRAMES` | `-DcapeCraft.limits.maxFrames=20` |
 | `capeCraft.limits.maxBytesTotal` | `CAPECRAFT_LIMITS_MAXBYTESTOTAL` | `-Dcapecraft.limits.maxBytesTotal=268435456` |
-| `capeCraft.serverSync.intervalTicks` | `CAPECRAFT_SERVERSYNC_INTERVALTICKS` | `-Dcapecraft.serverSync.intervalTicks=80` |
 | `capeCraft.serverSync.enabled` | `CAPECRAFT_SERVERSYNC_ENABLED` | `-Dcapecraft.serverSync.enabled=false` |
+| `capeCraft.serverSync.shareLocalProviders` | `CAPECRAFT_SERVERSYNC_SHARELOCALPROVIDERS` | `-Dcapecraft.serverSync.shareLocalProviders=true` |
+| `capeCraft.serverSync.allowForeignUrls` | `CAPECRAFT_SERVERSYNC_ALLOWFOREIGNURLS` | `-Dcapecraft.serverSync.allowForeignUrls=true` |
 
 Приоритет: переменная окружения → `-D` → файл `capecraft.kn` → дефолт.
 Флаговые значения понимаются как `true/yes/on/1` и `false/no/off/0`.
