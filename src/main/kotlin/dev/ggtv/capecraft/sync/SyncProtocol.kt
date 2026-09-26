@@ -19,6 +19,35 @@ object SyncProtocol {
     /** Канал сервер→клиент. */
     const val RESPONSE_CHANNEL: String = "capecraft:sync_resp"
 
+    /**
+     * Разобрать id канала на `namespace` и `path`.
+     *
+     * Нужно, потому что API версий трактуют строку канала по-разному:
+     * yarn `CustomPayload.id("ns:path")` ждёт полный id, а Mojang
+     * `CustomPacketPayload.createType(...)` в 26.2 вызывает
+     * `Identifier.withDefaultNamespace(...)`, который НЕ проверяет наличие
+     * неймспейса — он безусловно подставляет `minecraft` и берёт всю строку
+     * как path. С `capecraft:sync_req` это даёт path с двоеточием и
+     * `IdentifierException` на старте мода (поймано запуском сервера 26.2).
+     *
+     * Поэтому версионная обвязка не «переинтерпретирует» константу, а
+     * зовёт этот разбор и собирает `Identifier`/`Id` из готовых частей —
+     * так id канала совпадает на всех версиях.
+     */
+    fun channelParts(channel: String): Pair<String, String> {
+        val colon = channel.indexOf(':')
+        require(colon > 0 && colon == channel.lastIndexOf(':') && colon < channel.length - 1) {
+            "id канала должен быть ровно namespace:path с непустыми частями, а не «$channel»"
+        }
+        return channel.substring(0, colon) to channel.substring(colon + 1)
+    }
+
+    /** Namespace части канала (например `capecraft`). */
+    fun channelNamespace(channel: String): String = channelParts(channel).first
+
+    /** Path части канала (например `sync_req`). */
+    fun channelPath(channel: String): String = channelParts(channel).second
+
     /** Максимум провайдеров в одном ответе. */
     const val MAX_PROVIDERS: Int = 64
 

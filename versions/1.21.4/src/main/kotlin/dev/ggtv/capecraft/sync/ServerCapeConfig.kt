@@ -1,11 +1,11 @@
 package dev.ggtv.capecraft.sync
 
+import dev.ggtv.capecraft.CapeConfigFiles
 import dev.ggtv.capecraft.CapeCraftLog
 import dev.ggtv.capecraft.provider.Provider
 import dev.ggtv.capecraft.provider.ProviderLoader
 import dev.ggtv.koren.KorenConfig
 import net.fabricmc.loader.api.FabricLoader
-import java.nio.file.Files
 import java.nio.file.Path
 
 /**
@@ -38,10 +38,8 @@ class ServerCapeConfig private constructor(
 
         private fun readProviders(): List<Provider> {
             val configDir: Path = FabricLoader.getInstance().configDir
-            val kn = configDir.resolve("capecraft.kn")
-            val crn = configDir.resolve("capecraft.crn")
-            val active = if (!Files.exists(kn) && Files.exists(crn)) crn else kn
-            if (!Files.exists(active)) {
+            val active = CapeConfigFiles.active(configDir)
+            if (CapeConfigFiles.mustCreateDefault(active)) {
                 CapeCraftLog.LOGGER.info(
                     "CapeCraft: серверный конфиг «${active.fileName}» не найден — " +
                         "активные плащи с сервера отдаваться не будут",

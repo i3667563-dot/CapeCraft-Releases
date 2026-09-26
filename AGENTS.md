@@ -12,7 +12,10 @@
 - `./gradlew build -Pmc=1.21.11`   — yarn (Fabric mod)
 - `./gradlew build -Pmc=26.2`      — необфусцированная MC (дефолт при отсутствии `-Pmc`)
 
-Все сборки: BUILD SUCCESSFUL, 519 тестов, 0 failures (проверено 26.09.2026).
+Все сборки: BUILD SUCCESSFUL, 529 тестов, 0 failures (проверено 26.09.2026).
+Плюс каждая версия проверена запуском `./gradlew runServer -Pmc=<версия>`:
+мод инициализируется, каналы регистрируются, сервер доходит до `Done (...)!`.
+Только эта проверка ловит падение в версионной обвязке — сборки и тесты проходят.
 
 **`clean` при переключении версии НЕ нужен**: у каждой версии свой каталог
 выходов `build/<mc>` (`layout.buildDirectory` в build.gradle), поэтому
@@ -99,7 +102,7 @@ versions/<mc>/gradle.properties           # minecraft_version, loader/fabric/yar
 |---|---|---|---|---|
 | буфер кодеков | `RegistryByteBuf` | `RegistryByteBuf` | `RegistryByteBuf` | `RegistryFriendlyByteBuf` |
 | payload | `CustomPayload` + `getId()` | то же | то же | `CustomPacketPayload` + `type()` |
-| id payload | `CustomPayload.id(String)` | то же | то же | `CustomPacketPayload.createType(String)` |
+| id payload | `CustomPayload.Id(Identifier.of(ns, path))` | то же | то же | `CustomPacketPayload.Type(Identifier.fromNamespaceAndPath(ns, path))` |
 | codec | `PacketCodec` | то же | то же | `StreamCodec` |
 | регистрация каналов | `PayloadTypeRegistry.playC2S/playS2C` | то же | то же | `...serverboundPlay/clientboundPlay` |
 | регистрация команд | `CommandRegistrationCallback` (2 арг.) | то же | то же | 3 арг. (`+ Commands.CommandSelection`) |
@@ -116,6 +119,36 @@ versions/<mc>/gradle.properties           # minecraft_version, loader/fabric/yar
 `CapeServerPermission.GAMEMASTER` — это единственное место, где версии
 расходятся по правам; в 26.2 форма `hasPermission(Permission.HasCommandLevel(...))`
 работает и для `LevelBasedPermissionSet`, и для `PermissionSetUnion`.
+
+### id канала НЕЛЬЗЯ собирать из строки целиком (регрессия, ловилась только в игре)
+
+Ни `CustomPayload.id("ns:path")`, ни `CustomPacketPayload.createType("ns:path")`
+**не понимают** неймспейс. Оба зовут `Identifier.withDefaultNamespace(...)`, а он
+в 26.2 и в yarn 1.21.11 устроен так:
+
+```
+ldc "minecraft"      // неймспейс — всегда
+ldc "minecraft"      // путь для проверки — всегда
+ldc <вся строка>     // path
+```
+
+То есть `capecraft:sync_req` превращается в path `capecraft:sync_req` с двоеточием
+внутри и мод падает на старте:
+
+```
+IdentifierException / InvalidIdentifierException:
+  Non [a-z0-9/._-] character in path of location: minecraft:capecraft:sync_req
+```
+
+Это ломало **все шесть версий** (не только 26.2) и не ловилось ни компиляцией,
+ни тестами — падало только при реальном запуске. Канал собирается только через
+`SyncProtocol.channelNamespace/channelPath` (в общем коде), а версионная обвязка
+собирает `Identifier`/`Id` из готовых частей. Инвариант «ровно одно двоеточие,
+символы из `[a-z0-9/._-]`» закрыт тестом `SyncProtocolChannelTest`.
+
+**Правило: любое новое расхождение версий проверяется запуском сервера
+(`./gradlew runServer -Pmc=<версия>`), а не только сборкой.** Два бага этой
+сессии (канал и `include` вместо `modImplementation`) были видны только так.
 
 ## Рендер-пайплайн по версиям
 
@@ -192,6 +225,50 @@ versions/<mc>/gradle.properties           # minecraft_version, loader/fabric/yar
 Версионный (в `versions/<mc>/src/main/resources/`), НЕ общий в `src/main/resources/`:
 - во всех версиях только `CapeFeatureRendererMixin` (accessor был удалён во всех портах:
   ваниль НЕ отменяется, подменяется лишь текстура плаща в render-state — физика ванильная)
+
+## Конфиг: единственная запись на диск
+
+Мод пишет на диск ровно в одном месте — `CapeConfig.writeDefault()`, и только
+если выбранного файла нет. Выбор файла и проверка «надо ли создавать дефолт»
+вынесены в `CapeConfigFiles` (общий код), потому что этот же выбор повторялся
+в `ServerCapeConfig` на всех шести версиях.
+
+Инвариант: **существующий `config/capecraft.kn` никогда не перезаписывается** —
+ни при старте, ни при `/capecraft reload`, ни при `/capecraft reload` на сервере.
+Если `.kn` нет, но есть legacy `.crn` — читается `.crn`, дефолт не создаётся.
+Закрыто тестом `CapeConfigFilesTest` (на снятой проверке `Files.exists` падают
+четыре теста).
+
+Проверено на реальных логах инстанса 26.2: восемь запусков подряд
+(11.09–13.09.2026) — файл с 4 пользовательскими провайдерами сохранил
+содержимое и mtime, мод каждый раз читал `провайдеров 4`.
+
+## Зависимости: FLK вложен в jar (JiJ)
+
+`fabric-language-kotlin` у пользователя не должен быть — кладём его внутрь
+своего jar через `include` в build.gradle:
+
+```groovy
+add(depType, "net.fabricmc:fabric-language-kotlin:${verProps.flk_version}")
+add("include", "net.fabricmc:fabric-language-kotlin:${verProps.flk_version}")
+```
+
+**Обе строки обязательны.** `include` нужен для релизного jar (пользователю
+ничего качать не надо), а обычная зависимость — для компиляции и для дев-запуска:
+с одним только `include` `./gradlew runClient|runServer` падает с
+`Mod 'CapeCraft' requires fabric-language-kotlin, which is missing!`
+(в дев-режиме на classpath FLK не кладут, `include` там не участвует).
+
+Проверено запуском dedicated-сервера 26.2 с одним лишь `capecraft-1.0.0.jar`
+в `mods/` (без отдельного FLK): мод грузится, `KotlinAdapter` из вложенного FLK
+резолвит entrypoint-ы, `/capecraft status` отвечает, ошибок ноль.
+
+Дубль mod id не страшен: загрузчик грузит одну версию, верхнеуровневый jar
+приоритетнее вложенного. Если у игрока свой FLK — выиграет его.
+
+Двухуровневый JiJ штатный: сам FLK — мод с 13 вложенными jar'ами
+(kotlin-stdlib/reflect, kotlinx-coroutines/serialization, atomicfu), загрузчик
+разворачивает вложенные моды рекурсивно. Размер итогового jar ~8.3 МБ.
 
 ## Вендоринг (koren/kjen)
 

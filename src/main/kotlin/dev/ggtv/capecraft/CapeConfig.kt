@@ -61,10 +61,10 @@ class CapeConfig {
     var lastError: String? = null
         private set
 
-    val path: Path = FabricLoader.getInstance().configDir.resolve("capecraft.kn")
+    val path: Path = FabricLoader.getInstance().configDir.resolve(CapeConfigFiles.KN_NAME)
 
     /** Старый файл формата `.crn` — читается как fallback, если `.kn` нет. */
-    val legacyPath: Path = FabricLoader.getInstance().configDir.resolve("capecraft.crn")
+    val legacyPath: Path = FabricLoader.getInstance().configDir.resolve(CapeConfigFiles.CRN_NAME)
 
     private val rootDir: Path
         get() = FabricLoader.getInstance().gameDir
@@ -76,8 +76,8 @@ class CapeConfig {
     /** Перечитать конфиг с диска (для `/cp reload`). */
     fun reload() {
         try {
-            val active = if (!Files.exists(path) && Files.exists(legacyPath)) legacyPath else path
-            if (!Files.exists(active)) writeDefault()
+            val active = CapeConfigFiles.active(path.parent)
+            if (CapeConfigFiles.mustCreateDefault(active)) writeDefault()
             val cfg = KorenConfig.load(active)
             providers = ProviderLoader.load(cfg)
             limits = parseLimits(cfg)

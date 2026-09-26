@@ -71,7 +71,32 @@ dependencies {
 	def depType = verProps.yarn_mappings ? 'modImplementation' : 'implementation'
 	add(depType, "net.fabricmc:fabric-loader:${verProps.loader_version}")
 	add(depType, "net.fabricmc.fabric-api:fabric-api:${verProps.fabric_version}")
+
+	// fabric-language-kotlin нужен в ДВУХ видах:
+	//
+	// 1) Обычная зависимость — чтобы мод компилировался и запускался в дев-режиме
+	//    (`./gradlew runClient` / `runServer`). Loom кладёт её в dev-classpath,
+	//    и без неё входные точки мода не находятся:
+	//      "Mod 'CapeCraft' requires fabric-language-kotlin, which is missing!"
+	//
+	// 2) include (jar-in-jar) — чтобы в релизном jar лежала собственная копия
+	//    и пользователю не надо было ничего качать руками. В проде classpath
+	//    не играет роли, всё разруливает загрузчик.
+	//
+	// Проверено запуском сервера: с одним только `include` дев-запуск падает,
+	// поэтому строка на `include` не заменяет строку на `depType`, а дополняет её.
+	//
+	// Дубль mod id безопасен: загрузчик грузит ОДНУ версию мода — верхнеуровневый
+	// jar бьёт вложенный, дальше сравнивается версия. Если у игрока уже стоит
+	// свой FLK, выиграет его, а наш вложенный просто не активируется.
+	// Поэтому `depends: fabric-language-kotlin` в fabric.mod.json оставляем:
+	// вложенная копия это требование закрывает.
+	//
+	// JiJ двухуровневый: сам FLK — мод с 13 вложенными jar'ами
+	// (kotlin-stdlib/reflect, kotlinx-coroutines/serialization, atomicfu);
+	// загрузчик рекурсивно обходит вложенные моды, так что это штатно.
 	add(depType, "net.fabricmc:fabric-language-kotlin:${verProps.flk_version}")
+	add("include", "net.fabricmc:fabric-language-kotlin:${verProps.flk_version}")
 
 	testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
 	testImplementation "org.jetbrains.kotlin:kotlin-test-junit5:${project.kotlin_version}"

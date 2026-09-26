@@ -3,6 +3,7 @@ package dev.ggtv.capecraft.sync
 import net.minecraft.network.RegistryFriendlyByteBuf
 import net.minecraft.network.codec.StreamCodec
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload
+import net.minecraft.resources.Identifier
 
 /**
  * Сетевые payload'ы CapeCraft Sync (Fabric custom payload, play-канал).
@@ -28,7 +29,14 @@ object CapeSyncPayloads {
         fun toSyncState(): SyncRequest = SyncRequest(requestId)
 
         companion object {
-            val TYPE: CustomPacketPayload.Type<Request> = CustomPacketPayload.createType(SyncProtocol.REQUEST_CHANNEL)
+            // НЕ createType(): в 26.2 он подставляет неймспейс `minecraft`
+            // ко всей строке и ломает `ns:path` — см. SyncProtocol.channelParts.
+            val TYPE: CustomPacketPayload.Type<Request> = CustomPacketPayload.Type(
+                Identifier.fromNamespaceAndPath(
+                    SyncProtocol.channelNamespace(SyncProtocol.REQUEST_CHANNEL),
+                    SyncProtocol.channelPath(SyncProtocol.REQUEST_CHANNEL),
+                ),
+            )
             val CODEC: StreamCodec<RegistryFriendlyByteBuf, Request> =
                 object : StreamCodec<RegistryFriendlyByteBuf, Request> {
                     override fun encode(buf: RegistryFriendlyByteBuf, value: Request) {
@@ -54,7 +62,12 @@ object CapeSyncPayloads {
         fun toSyncState(): SyncResponse = SyncResponse(requestId, providers, truncated)
 
         companion object {
-            val TYPE: CustomPacketPayload.Type<Response> = CustomPacketPayload.createType(SyncProtocol.RESPONSE_CHANNEL)
+            val TYPE: CustomPacketPayload.Type<Response> = CustomPacketPayload.Type(
+                Identifier.fromNamespaceAndPath(
+                    SyncProtocol.channelNamespace(SyncProtocol.RESPONSE_CHANNEL),
+                    SyncProtocol.channelPath(SyncProtocol.RESPONSE_CHANNEL),
+                ),
+            )
             val CODEC: StreamCodec<RegistryFriendlyByteBuf, Response> =
                 object : StreamCodec<RegistryFriendlyByteBuf, Response> {
                     override fun encode(buf: RegistryFriendlyByteBuf, value: Response) {
