@@ -189,14 +189,22 @@ object KorenTokenizer {
 
                 '$'.code -> {
                     val raw = StringBuilder()
+                    var depth = 0
                     while (i < len) {
                         val next = peek()
-                        if (Character.isWhitespace(next) || next == ','.code || next == '{'.code ||
-                            next == '}'.code || next == '['.code || next == ']'.code ||
-                            next == '('.code || next == ')'.code || next == '#'.code ||
-                            next == '"'.code || next == '\''.code
+                        val opensSubstitution = depth == 0 && next == '{'.code &&
+                            raw.isNotEmpty() && raw[raw.length - 1] == '$'
+                        if (!opensSubstitution && depth == 0 &&
+                            (Character.isWhitespace(next) || next == ','.code || next == '{'.code ||
+                                next == '}'.code || next == '['.code || next == ']'.code ||
+                                next == '('.code || next == ')'.code || next == '#'.code ||
+                                next == '"'.code || next == '\''.code)
                         ) {
                             break
+                        }
+                        when {
+                            opensSubstitution -> depth += 1
+                            next == '}'.code -> depth -= 1
                         }
                         raw.appendCodePoint(next)
                         advance(next)

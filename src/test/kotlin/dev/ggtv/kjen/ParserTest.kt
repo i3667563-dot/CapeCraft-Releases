@@ -349,6 +349,26 @@ class ParserTest {
     }
 
     @Test
+    fun `bare substitution is a value, not a broken token`() {
+        val config = CrenConfig.fromStringWithEnv(
+            """
+            bare_braced = ${'$'}{KJEN_HOST}
+            bare_default = ${'$'}{KJEN_MISSING:-fallback}
+            bare_hyphen = ${'$'}{KJEN_MISSING-other}
+            bare_middle = ${'$'}{KJEN_HOST}/capes/${'$'}{KJEN_PORT}/a.png
+            """.trimIndent(),
+            mapOf(
+                "KJEN_HOST" to "cdn.example.com",
+                "KJEN_PORT" to "8443",
+            ),
+        )
+
+        assertEquals("cdn.example.com", config.getStr("bare_braced"))
+        assertEquals("fallback", config.getStr("bare_default"))
+        assertEquals("other", config.getStr("bare_hyphen"))
+        assertEquals("cdn.example.com/capes/8443/a.png", config.getStr("bare_middle"))
+    }
+    @Test
     fun `missing environment variable is an error`() {
         val e = assertFailsWith<CrenError.Parse> {
             CrenConfig.fromStringWithEnv("host = \"${'$'}{KJEN_MISSING}\"\n", emptyMap())

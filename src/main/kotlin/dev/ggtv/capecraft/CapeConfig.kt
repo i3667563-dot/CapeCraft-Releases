@@ -4,6 +4,7 @@ import dev.ggtv.capecraft.memory.Limits
 import dev.ggtv.capecraft.provider.ProviderLoader
 import dev.ggtv.capecraft.provider.Provider
 import dev.ggtv.capecraft.sync.ServerSyncSettings
+import dev.ggtv.kjen.CrenError
 import dev.ggtv.koren.KorenConfig
 import net.fabricmc.loader.api.FabricLoader
 import java.nio.file.Files
@@ -206,9 +207,33 @@ class CapeConfig {
         Files.writeString(path, text)
     }
 
+    /**
+     * Лимит из `.kn`, иначе дефолт.
+     *
+     * Отсутствие ключа — это нормально, берём дефолт молча. Несовпадение типа —
+     * нет: пользователь написал значение, а мод затихо заменил его своим. Раньше
+     * здесь стоял `catch (e: Exception)`, и подстановка окружения
+     * (`maxBytesTotal = "${CAPE_CACHE_BYTES}"`) давала `str` вместо `int`, после
+     * чего мод использовал дефолт и не писал в лог ничего. Подстановка всегда
+     * возвращает строку, поэтому для чисел и булевых нужен `CapeConfigEnv`
+     * (`CAPECRAFT_LIMITS_*` или `-DcapeCraft.limits.*`), и об этом сказано прямо
+     * в сообщении.
+     */
     private fun KorenConfig.getIntOr(path: String, def: Long): Long = try {
         getInt(path)
-    } catch (e: Exception) {
+    } catch (_: CrenError.NotFound) {
+        def
+    } catch (e: CrenError.TypeMismatch) {
+        CapeCraftLog.LOGGER.warn(
+            "{}: в конфиге ожидалось {}, а там строка — беру дефолт {}. " +
+                "Подстановка окружения всегда даёт строку, для числа нужно {} " +
+                "или -D{}=...",
+            path,
+            e.expected,
+            def,
+            CapeConfigEnv.variableFor(path),
+            path,
+        )
         def
     }
 }
