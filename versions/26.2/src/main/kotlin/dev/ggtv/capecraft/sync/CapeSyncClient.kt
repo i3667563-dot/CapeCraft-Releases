@@ -114,6 +114,11 @@ object CapeSyncClient {
             "Sync: ответов принято ${state.responsesAccepted}, таймаутов ${state.timedOut}, набор — " +
                 if (state.usingServerProviders) "СЕРВЕР" else "локальный конфиг",
         )
+        add(
+            "Sync: интервал ${state.currentIntervalTicks} тиков (база ${state.intervalTicks}), " +
+                "отправлено запросов ${state.requestsSent}, " +
+                "замедление ×${if (state.intervalTicks > 0) state.currentIntervalTicks.toDouble() / state.intervalTicks else 1.0}",
+        )
         add("Sync: последний requestId ${state.lastRequestId}, ошибка ${state.lastError ?: "нет"}")
         if (lastRejectReasons.isNotEmpty()) {
             add("Sync: отброшено ${lastRejectReasons.size}: " + lastRejectReasons.joinToString("; "))

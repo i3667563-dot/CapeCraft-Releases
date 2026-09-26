@@ -14,6 +14,7 @@ import dev.ggtv.koren.KorenConfig
  *         timeoutTicks     = 100    # сколько ждать ответа (5 сек)
  *         requireServer    = false  # true: без ответа сервера локальный набор НЕ используется
  *         allowFileProviders = false # разрешить серверу присылать `type = file`
+ *         backoff          = true   # замедлять опрос, пока набор не меняется
  *     }
  * }
  * ```
@@ -21,6 +22,12 @@ import dev.ggtv.koren.KorenConfig
  * Значения зажимаются в разумные пределы ([SyncProtocol]), чтобы опечатка в
  * конфиге (например `intervalTicks = 1`) не превратилась в DDoS сервера
  * или в вечное ожидание.
+ *
+ * `backoff = true` (по умолчанию) — адаптивный интервал: пока набор плащей не
+ * меняется, клиент замедляет опрос до раза в минуту вместо раза в пару секунд
+ * и возвращается к `intervalTicks`, как только набор сменился. На сервере это
+ * снимает большую часть работы (в простое — в ~30 раз меньше запросов), а на
+ * игроках заметно не сказывается. Выключайте только для отладки протокола.
  */
 data class ServerSyncSettings(
     val enabled: Boolean = true,
@@ -28,6 +35,7 @@ data class ServerSyncSettings(
     val timeoutTicks: Int = SyncProtocol.DEFAULT_TIMEOUT_TICKS,
     val requireServer: Boolean = false,
     val allowFileProviders: Boolean = false,
+    val backoff: Boolean = true,
 ) {
     /** Настройки для машины состояний [CapeSyncState] с уже зажатыми числами. */
     fun toState(): CapeSyncState = CapeSyncState(
@@ -35,6 +43,8 @@ data class ServerSyncSettings(
         intervalTicks = clamp(intervalTicks, SyncProtocol.MIN_INTERVAL_TICKS, SyncProtocol.MAX_INTERVAL_TICKS),
         timeoutTicks = clamp(timeoutTicks, SyncProtocol.MIN_TIMEOUT_TICKS, SyncProtocol.MAX_INTERVAL_TICKS),
         requireServer = requireServer,
+        maxIntervalTicks = SyncProtocol.MAX_BACKOFF_INTERVAL_TICKS,
+        backoff = backoff,
     )
 
     companion object {
@@ -53,6 +63,7 @@ data class ServerSyncSettings(
                 timeoutTicks = clamp(int(cfg, "timeoutTicks", d.timeoutTicks), SyncProtocol.MIN_TIMEOUT_TICKS, SyncProtocol.MAX_INTERVAL_TICKS),
                 requireServer = bool(cfg, "requireServer", d.requireServer),
                 allowFileProviders = bool(cfg, "allowFileProviders", d.allowFileProviders),
+                backoff = bool(cfg, "backoff", d.backoff),
             )
         }
 
@@ -74,6 +85,6 @@ data class ServerSyncSettings(
         fun describe(s: ServerSyncSettings): String =
             "enabled=${s.enabled}, интервал=${s.intervalTicks} тиков, " +
                 "таймаут=${s.timeoutTicks} тиков, requireServer=${s.requireServer}, " +
-                "allowFileProviders=${s.allowFileProviders}"
+                "allowFileProviders=${s.allowFileProviders}, backoff=${s.backoff}"
     }
 }

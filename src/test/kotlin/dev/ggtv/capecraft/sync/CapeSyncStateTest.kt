@@ -54,7 +54,9 @@ class CapeSyncStateTest {
 
     @Test
     fun `timeout releases the pending request and counts itself`() {
-        val state = CapeSyncState(intervalTicks = 20, timeoutTicks = 30)
+        // backoff = false: тест фиксирует базовую каденцию, а не замедление
+        // после таймаута (см. CapeSyncStateBackoffTest).
+        val state = CapeSyncState(intervalTicks = 20, timeoutTicks = 30, backoff = false)
         state.onJoin()
         val ids = tick(state, 40)
         assertEquals(2, ids.single())
@@ -229,7 +231,9 @@ class CapeSyncStateTest {
 
     @Test
     fun `after a timeout the retry still waits for the interval`() {
-        val state = CapeSyncState(intervalTicks = 20, timeoutTicks = 5)
+        // backoff = false: здесь важна базовая каденция повтора.
+        // С backoff=true повтор после таймаута ждал бы удвоенный интервал.
+        val state = CapeSyncState(intervalTicks = 20, timeoutTicks = 5, backoff = false)
         state.onJoin()
         // Таймаут (5 тиков) истёк раньше интервала (20): запрос рассыпался,
         // но следующий не отправляется мгновенно — иначе это цикл запросов
@@ -241,7 +245,9 @@ class CapeSyncStateTest {
 
     @Test
     fun `a timeout is counted once per request, not once per tick`() {
-        val state = CapeSyncState(intervalTicks = 20, timeoutTicks = 5)
+        // backoff = false: считаем таймауты на базовой каденции, иначе
+        // окно в 100 тиков перестаёт накрывать целое число попыток.
+        val state = CapeSyncState(intervalTicks = 20, timeoutTicks = 5, backoff = false)
         val sent = mutableListOf(state.onJoin()!!)
         val timeouts = mutableListOf<Int>()
         for (t in 1..100) {
