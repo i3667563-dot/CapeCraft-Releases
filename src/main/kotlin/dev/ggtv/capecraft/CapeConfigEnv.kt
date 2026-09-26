@@ -79,18 +79,23 @@ object CapeConfigEnv {
      *    обычно копируют из имени переменной, и это должно работать;
      * 3. `-Dcapecraft_limits_maxframes=…` — то же строчными;
      * 4. `-DcapeCraft.limits.maxFrames=…` — ключ конфига дословно;
-     * 5. `-Dcapecraft.config=…` — «голый» ключ тоже с корнем, чтобы все
-     *    опции настраивались одинаково.
+     * 5. `-Dcapecraft.limits.maxFrames=…` — то же со строчным корнем. От
+     *    предыдущей формы отличается регистром первой буквы, и это неочевидно:
+     *    молчание на `-D` выглядит как «мод не подхватил настройку» и
+     *    обнаруживается только через `/cp status`;
+     * 6. `-DcapeCraft.config=…` и `-Dcapecraft.config=…` — «голый» ключ с
+     *    корнем, чтобы все опции настраивались одинаково.
      */
     fun lookup(key: String): String? {
         val variable = variableFor(key)
+        val tail = key.removePrefix(ROOT).removePrefix(".")
         val rooted = "$ROOT.$key"
         return envSource(variable)
             ?: propertySource(variable)
             ?: propertySource(variable.lowercase())
             ?: propertySource(key)
+            ?: propertySource("${ROOT.lowercase()}.$tail")
             ?: propertySource(rooted)
-            ?: propertySource(rooted.lowercase())
     }
 
     /** Скалярная опция [key] как число; [fallback] — значение из файла. */

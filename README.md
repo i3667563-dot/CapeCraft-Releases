@@ -90,8 +90,16 @@ serverSync {
 
 ### Настройка через окружение и аргументы JVM
 
-Нужно там, где в папку игры положить файл нельзя: systemd-юнит выделенного
-сервера или поле `Env` в лаунчере. Работает и на клиенте, и на сервере.
+Нужно там, где в папку игры положить файл нельзя: выделенный сервер под
+systemd или лаунчер. Работает и на клиенте, и на сервере.
+
+В Prism/FreesmLauncher у инстанса есть и переменные окружения, и аргументы
+JVM — это поля `Env`/`OverrideEnv` и `OverrideJavaArgs` в `instance.cfg`.
+Надёжный путь — аргументы JVM: допиши в поле с ними
+`-DcapeCraft.limits.maxFrames=20` и перезапусти инстанс. Переменные
+окружения задаются списком Name/Value рядом с галочкой Override Global
+Settings; без галочки инстанс наследует только глобальный список.
+Что из этого реально подхватилось — видно в `/cp status`.
 
 **Весь конфиг целиком** — один файл вместо `config/capecraft.kn`:
 
@@ -109,7 +117,7 @@ CAPECRAFT_CONFIG=/etc/capecraft/prod.kn
 | Ключ в `.kn` | Переменная | Аргумент JVM |
 |---|---|---|
 | `capeCraft.limits.maxFrames` | `CAPECRAFT_LIMITS_MAXFRAMES` | `-DcapeCraft.limits.maxFrames=20` |
-| `capeCraft.limits.maxBytesTotal` | `CAPECRAFT_LIMITS_MAXBYTETOTAL` | `-Dcapecraft.limits.maxBytesTotal=268435456` |
+| `capeCraft.limits.maxBytesTotal` | `CAPECRAFT_LIMITS_MAXBYTESTOTAL` | `-Dcapecraft.limits.maxBytesTotal=268435456` |
 | `capeCraft.serverSync.intervalTicks` | `CAPECRAFT_SERVERSYNC_INTERVALTICKS` | `-Dcapecraft.serverSync.intervalTicks=80` |
 | `capeCraft.serverSync.enabled` | `CAPECRAFT_SERVERSYNC_ENABLED` | `-Dcapecraft.serverSync.enabled=false` |
 

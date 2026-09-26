@@ -34,6 +34,12 @@ class CapeConfigEnvTest {
         properties = pairs.toMap(),
     )
 
+    /** Оба источника разом: окружение пустое, заданы только `-D`. */
+    private fun onlyProps(vararg pairs: Pair<String, String>) = CapeConfigEnv.overrideSourcesForTest(
+        env = emptyMap(),
+        properties = pairs.toMap(),
+    )
+
     // ── имя переменной выводится механически ─────────────────────────────────
 
     @Test
@@ -216,6 +222,46 @@ class CapeConfigEnvTest {
         assertEquals(listOf("CAPECRAFT_CONFIG=$cfgFile"), CapeConfigEnv.activeOverrides())
     }
 
+
+    /**
+     * Каждая форма имени из таблицы README обязана работать. Таблица
+     * расходилась с кодом: три строки из четырёх обещали `-Dcapecraft.<путь>`,
+     * который не читался, и отличался от рабочего `-DcapeCraft.<путь>` только
+     * регистром первой буквы. Документация проверяется тестом, иначе это
+     * повторится при следующем добавлении опции.
+     */
+    @Test
+    fun `каждая форма имени из README работает`() {
+        val documented = listOf(
+            Triple("capeCraft.limits.maxFrames", "CAPECRAFT_LIMITS_MAXFRAMES", "20"),
+            Triple("capeCraft.limits.maxBytesTotal", "CAPECRAFT_LIMITS_MAXBYTESTOTAL", "268435456"),
+            Triple("capeCraft.serverSync.intervalTicks", "CAPECRAFT_SERVERSYNC_INTERVALTICKS", "80"),
+            Triple("capeCraft.serverSync.enabled", "CAPECRAFT_SERVERSYNC_ENABLED", "false"),
+        )
+        for ((key, variable, value) in documented) {
+            // форма 1: переменная окружения из второго столбца
+            env(variable to value)
+            assertEquals(value, CapeConfigEnv.lookup(key), "окружение: $variable")
+            // форма 2 и 3: то же имя заглавными и строчными как -D
+            for (prop in listOf(variable, variable.lowercase())) {
+                onlyProps(prop to value)
+                assertEquals(value, CapeConfigEnv.lookup(key), "-D$prop")
+            }
+            // форма 4: ключ конфига дословно
+            for (prop in listOf(key, key.replaceFirst("capeCraft", "capecraft"))) {
+                onlyProps(prop to value)
+                assertEquals(value, CapeConfigEnv.lookup(key), "-D$prop")
+            }
+        }
+    }
+
+    @Test
+    fun `голый ключ конфига настраивается с корнем в обоих регистрах`() {
+        for (prop in listOf("capeCraft.config", "capecraft.config")) {
+            onlyProps(prop to "/tmp/x.kn")
+            assertEquals("/tmp/x.kn", CapeConfigEnv.lookup(CapeConfigEnv.CONFIG_KEY), "-D$prop")
+        }
+    }
 
     private fun serverSync(vararg pairs: Pair<String, String>): KorenConfig {
         val body = pairs.joinToString("\n") { "    ${it.first} = ${it.second}" }
