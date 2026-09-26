@@ -1,5 +1,6 @@
 package dev.ggtv.capecraft.sync
 
+import dev.ggtv.capecraft.CapeConfigEnv
 import dev.ggtv.koren.KorenConfig
 
 /**
@@ -67,16 +68,23 @@ data class ServerSyncSettings(
             )
         }
 
-        private fun int(cfg: KorenConfig, key: String, def: Int): Int = try {
-            cfg.getInt("$ROOT.$key").toInt()
-        } catch (_: Exception) {
-            def
+        private fun int(cfg: KorenConfig, key: String, def: Int): Int {
+            val fromFile = try {
+                cfg.getInt("$ROOT.$key").toInt()
+            } catch (_: Exception) {
+                def
+            }
+            return CapeConfigEnv.longOr("$ROOT.$key", fromFile.toLong())
+                .coerceIn(Int.MIN_VALUE.toLong(), Int.MAX_VALUE.toLong()).toInt()
         }
 
-        private fun bool(cfg: KorenConfig, key: String, def: Boolean): Boolean = try {
-            cfg.getBool("$ROOT.$key")
-        } catch (_: Exception) {
-            def
+        private fun bool(cfg: KorenConfig, key: String, def: Boolean): Boolean {
+            val fromFile = try {
+                cfg.getBool("$ROOT.$key")
+            } catch (_: Exception) {
+                def
+            }
+            return CapeConfigEnv.booleanOr("$ROOT.$key", fromFile)
         }
 
         private fun clamp(value: Int, min: Int, max: Int): Int = value.coerceIn(min, max)

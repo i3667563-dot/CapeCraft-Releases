@@ -76,9 +76,20 @@ class CapeConfig {
     /** Перечитать конфиг с диска (для `/cp reload`). */
     fun reload() {
         try {
-            val active = CapeConfigFiles.active(path.parent)
-            if (CapeConfigFiles.mustCreateDefault(active)) writeDefault()
-            val cfg = KorenConfig.load(active)
+            val active = resolveConfigFile()
+            if (active != null) {
+                lastError = active.error
+                if (active.error != null) {
+                    CapeCraftLog.LOGGER.error("CapeCraft: {}", active.error)
+                    providers = emptyList()
+                    limits = Limits()
+                    serverSync = ServerSyncSettings()
+                    return
+                }
+            }
+            val file = active?.path?.let { Path.of(it) } ?: CapeConfigFiles.active(path.parent)
+            if (active == null && CapeConfigFiles.mustCreateDefault(file)) writeDefault()
+            val cfg = KorenConfig.load(file)
             providers = ProviderLoader.load(cfg)
             limits = parseLimits(cfg)
             serverSync = ServerSyncSettings.parse(cfg)
@@ -90,6 +101,13 @@ class CapeConfig {
         }
     }
 
+    /**
+     * Файл конфига из `CAPECRAFT_CONFIG`, либо `null` — читаем обычный
+     * `config/capecraft.kn`. Дефолтный файл при внешнем переопределении не
+     * создаётся: пользователь указал свой источник, лезть в его папку не нужно.
+     */
+    private fun resolveConfigFile(): CapeConfigEnv.ConfigFile? = CapeConfigEnv.configFile()
+
     /** Корень для плейсхолдера `{root}` — папка игры (для локальных файлов). */
     fun rootFor(): String = rootDir.toString()
 
@@ -98,16 +116,28 @@ class CapeConfig {
         return try {
             val base = Limits()
             Limits(
-                maxPixelsPerFrame = cfg.getIntOr("capeCraft.limits.maxPixelsPerFrame", base.maxPixelsPerFrame),
-                maxFrames = cfg.getIntOr("capeCraft.limits.maxFrames", base.maxFrames.toLong()).toInt(),
-                maxBytesPerCape = cfg.getIntOr("capeCraft.limits.maxBytesPerCape", base.maxBytesPerCape),
-                maxBytesTotal = cfg.getIntOr("capeCraft.limits.maxBytesTotal", base.maxBytesTotal),
+                maxPixelsPerFrame = limit(cfg, "maxPixelsPerFrame", base.maxPixelsPerFrame),
+                // maxFrames — единственный лимит, который нельзя выдать за
+                // 4 миллиарда кадров: здесь режем до Int, иначе опечатка в
+                // переменной окружения превратится в NegativeArraySize.
+                maxFrames = limit(cfg, "maxFrames", base.maxFrames.toLong())
+                    .coerceIn(0, Int.MAX_VALUE.toLong()).toInt(),
+                maxBytesPerCape = limit(cfg, "maxBytesPerCape", base.maxBytesPerCape),
+                maxBytesTotal = limit(cfg, "maxBytesTotal", base.maxBytesTotal),
             )
         } catch (e: Exception) {
             lastError = "лимиты: ${e.message}"
             Limits()
         }
     }
+
+    /**
+     * Лимит из файла, если он задан, иначе переопределение из окружения, иначе
+     * дефолт. Порядок именно такой: переменная лаунчера должна побеждать
+     * значение из `.kn`, но не должна затирать его, если её не задавали.
+     */
+    private fun limit(cfg: KorenConfig, key: String, def: Long): Long =
+        CapeConfigEnv.longOr("capeCraft.limits.$key", cfg.getIntOr("capeCraft.limits.$key", def))
 
     private fun writeDefault() {
         val text = """

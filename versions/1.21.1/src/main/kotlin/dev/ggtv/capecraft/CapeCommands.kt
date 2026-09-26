@@ -1,5 +1,6 @@
 package dev.ggtv.capecraft
 
+import dev.ggtv.capecraft.CapeConfigEnv
 import com.mojang.brigadier.context.CommandContext
 import dev.ggtv.capecraft.sync.CapeSyncClient
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager
@@ -105,6 +106,9 @@ object CapeCommands {
         ctx.source.sendFeedback(Text.literal("Провайдеров: ${registry.providers.size} (${sourceOf(registry)})"))
         ctx.source.sendFeedback(Text.literal("Плащей в кэше: ${registry.size}"))
         ctx.source.sendFeedback(Text.literal("Память плащей: ${registry.totalBytes} байт"))
+        for (override in CapeConfigEnv.activeOverrides()) {
+            ctx.source.sendFeedback(Text.literal("Переопределение из окружения: $override"))
+        }
         for (line in CapeSyncClient.statusLines()) {
             ctx.source.sendFeedback(Text.literal(line))
         }
