@@ -2,7 +2,11 @@ package dev.ggtv.koren
 
 import dev.ggtv.kjen.Block
 import dev.ggtv.kjen.CrenError
+import dev.ggtv.kjen.Entry
 import dev.ggtv.kjen.Path
+import dev.ggtv.kjen.Span
+import dev.ggtv.kjen.Type
+import dev.ggtv.kjen.Value
 import dev.ggtv.kjen.Value.*
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
@@ -152,7 +156,7 @@ class KorenResolverTest {
             # коммент к порту
             port = 8080 # и после
         """)
-        assertEquals("и после", c.getComment("port"))
+        assertEquals("коммент к порту\nи после", c.getComment("port"))
         assertFailsWith<CrenError.NotFound> { c.getComment("nope") }
     }
 
@@ -375,5 +379,217 @@ class KorenResolverTest {
     fun `load missing file is io error`() {
         val e = assertFailsWith<CrenError.Io> { KorenConfig.load("/nonexistent/путь/x.kn") }
         assertTrue(e.message!!.contains("не могу прочитать"))
+    }
+
+    @Test
+    fun `reference suffix does not resolve unselected siblings`() {
+        val c = cfg("""
+            source {
+                good = 1
+                bad = missing
+            }
+            alias = source
+        """)
+        assertEquals(1L, c.getInt("source.good"))
+        assertEquals(1L, c.getInt("alias.good"))
+        val e = assertFailsWith<CrenError.NotFound> { c.get("alias") }
+        assertEquals("missing", e.path)
+    }
+
+    @Test
+    fun `reference suffix skips unselected cycle`() {
+        val c = cfg("""
+            source {
+                good = 1
+                bad = source.bad
+            }
+            alias = source
+        """)
+        assertEquals(1L, c.getInt("alias.good"))
+        assertFailsWith<CrenError.Cycle> { c.get("source.bad") }
+        assertFailsWith<CrenError.Cycle> { c.get("alias.bad") }
+    }
+
+    @Test
+    fun `alias with mismatched indices does not panic`() {
+        val root = KorenParser.parse(KorenTokenizer.tokenize("source { good = 1 }\nalias = source\n"))
+        val path = Path(listOf("alias", "good"), emptyList(), true)
+        assertEquals(VInt(1), KorenResolver(root).resolve(path))
+    }
+
+    @Test
+    fun `refs inside containers and returned blocks are resolved`() {
+        val c = cfg("""
+            source = "value"
+            array = [source]
+            dict = { value: source }
+            server {
+                value = "local"
+                array = [.value]
+            }
+        """)
+        assertEquals(VArray(listOf(VStr("value"))), c.get("array"))
+        assertEquals(VDict(listOf("value" to VStr("value"))), c.get("dict"))
+        assertEquals(VArray(listOf(VStr("local"))), c.get("server.array"))
+        assertEquals(
+            VArray(listOf(VStr("local"))),
+            c.getBlock("server").get("array", 1)!!.value,
+        )
+    }
+
+    @Test
+    fun `whole config is a dynamic resolved value`() {
+        val c = KorenConfig.fromStringWithEnv(
+            """
+            host = "${'$'}{KOREN_HOST}"
+            port = 1
+            port = 2
+            count int = 3 # количество
+            server {
+                address = "https://${'$'}{KOREN_HOST}"
+                values = [1, 2]
+            }
+            server {
+                local = "second"
+                address = .local
+            }
+            client {
+                address = server2.address
+                endpoints = [server1.address, {url: server1.address}]
+            }
+            """.trimIndent(),
+            mapOf("KOREN_HOST" to "example.com"),
+        )
+        val root = (c.toValue() as VBlock).block
+        assertEquals(VStr("example.com"), root.get("host", 1)!!.value)
+        assertEquals(VInt(2), root.get("port", 2)!!.value)
+        val count = root.get("count", 1)!!
+        assertEquals(Type.INT, count.ty)
+        assertEquals("количество", count.comment)
+        assertEquals(Span(4, 1), count.span)
+        val client = root.get("client", 1)!!.value as VBlock
+        assertEquals(VStr("second"), client.block.get("address", 1)!!.value)
+        assertEquals(
+            VArray(listOf(
+                VStr("https://example.com"),
+                VDict(listOf("url" to VStr("https://example.com"))),
+            )),
+            client.block.get("endpoints", 1)!!.value,
+        )
+    }
+
+    @Test
+    fun `container ref cycles are detected`() {
+        for (input in listOf("a = [b]\nb = [a]\n", "a = {value: a}\n")) {
+            assertFailsWith<CrenError.Cycle> { cfg(input).get("a") }
+        }
+    }
+
+    @Test
+    fun `reference depth is bounded`() {
+        fun chain(last: Int): String {
+            val out = StringBuilder("v$last = \"ok\"\n")
+            for (i in last - 1 downTo 0) out.append("v$i = v${i + 1}\n")
+            return out.toString()
+        }
+        assertEquals("ok", cfg(chain(256)).getStr("v0"))
+        val e = assertFailsWith<CrenError.Parse> { cfg(chain(300)).getStr("v0") }
+        assertTrue(e.messageText.contains("глубина ссылок: максимум 256"))
+    }
+
+    @Test
+    fun `path length is bounded`() {
+        fun makeRoot(count: Int): Block {
+            var block = Block().apply {
+                entries += Entry("leaf", null, VInt(1), null, Span(1, 1))
+            }
+            for (i in count - 1 downTo 0) {
+                block = Block().apply {
+                    entries += Entry("s$i", null, VBlock(block), null, Span(1, 1))
+                }
+            }
+            return block
+        }
+
+        fun makePath(count: Int) = Path(
+            (0 until count).map { "s$it" } + "leaf",
+            List(count + 1) { null },
+            true,
+        )
+
+        assertEquals(VInt(1), KorenResolver(makeRoot(255)).resolve(makePath(255)))
+        val e = assertFailsWith<CrenError.Parse> {
+            KorenResolver(makeRoot(256)).resolve(makePath(256))
+        }
+        assertTrue(e.messageText.contains("длина пути: максимум 256"))
+    }
+
+    @Test
+    fun `exponential container expansion is bounded and resolver resets budget`() {
+        val input = buildString {
+            appendLine("v18 = 1")
+            for (i in 17 downTo 0) appendLine("v$i = [v${i + 1}, v${i + 1}]")
+        }
+        val resolver = KorenResolver(KorenParser.parse(KorenTokenizer.tokenize(input)))
+        val e = assertFailsWith<CrenError.Parse> { resolver.resolve(Path.parse("v0")) }
+        assertTrue(e.messageText.contains("превышен предел раскрытия: максимум 65536"))
+        assertEquals(VInt(1), resolver.resolve(Path.parse("v18")))
+    }
+
+    @Test
+    fun `expansion budget boundary is enforced`() {
+        fun root(size: Int) = Block().apply {
+            entries += Entry(
+                "values",
+                null,
+                VArray(List(size) { VInt(it.toLong()) }),
+                null,
+                Span(1, 1),
+            )
+        }
+
+        val path = Path.parse("values")
+        assertEquals(
+            (0 until 65_535).map { VInt(it.toLong()) },
+            (KorenResolver(root(65_535)).resolve(path) as VArray).items,
+        )
+        val e = assertFailsWith<CrenError.Parse> { KorenResolver(root(65_536)).resolve(path) }
+        assertTrue(e.messageText.contains("превышен предел раскрытия: максимум 65536"))
+    }
+
+    @Test
+    fun `manually built nested values are depth limited`() {
+        var value: Value = VInt(1)
+        repeat(300) { value = VArray(listOf(value)) }
+        val root = Block().apply {
+            entries += Entry("deep", Type.ARRAY, value, null, Span(1, 1))
+        }
+        val e = assertFailsWith<CrenError.Parse> {
+            KorenResolver(root).resolve(Path.parse("deep"))
+        }
+        assertTrue(e.messageText.contains("вложенность значений: максимум 256"))
+    }
+
+    @Test
+    fun `not found keeps requested path through a reference`() {
+        val c = cfg("a = 1\nb = a\nx = b.c\n")
+        val e = assertFailsWith<CrenError.NotFound> { c.get("x") }
+        assertEquals("b.c", e.path)
+    }
+
+    @Test
+    fun `typed function result is checked after evaluation`() {
+        val ok = cfg("value int = hash(42)\n")
+        assertEquals(cfg("value = hash(42)\n").getInt("value"), ok.getInt("value"))
+
+        val e = assertFailsWith<CrenError.TypeMismatch> { cfg("value str = hash(42)\n").get("value") }
+        assertEquals("str", e.expected)
+        assertEquals("int", e.found)
+    }
+
+    @Test
+    fun `function cannot be traversed as a block`() {
+        val c = cfg("value = hash(42)\n")
+        assertFailsWith<CrenError.NotFound> { c.get("value.field") }
     }
 }

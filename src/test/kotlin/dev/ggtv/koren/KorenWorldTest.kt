@@ -115,6 +115,18 @@ class KorenWorldTest {
     }
 
     @Test
+    fun `relative get path is not resolved from world`() {
+        val c = KorenConfig.fromString("", FakeWorld(temperature = 0.9))
+        assertFailsWith<CrenError.NotFound> { c.get(".biome.temperature") }
+    }
+
+    @Test
+    fun `indexed get path is not resolved from world`() {
+        val c = KorenConfig.fromString("", FakeWorld(temperature = 0.9))
+        assertFailsWith<CrenError.NotFound> { c.get("biome.temperature[1]") }
+    }
+
+    @Test
     fun `world without context is not found`() {
         val c = KorenConfig.fromString("a = biome.temperature\n")
         assertFailsWith<CrenError.NotFound> { c.get("a") }
@@ -150,5 +162,52 @@ class KorenWorldTest {
         val world2 = FakeWorld(condition = "storm")
         val c2 = KorenConfig.withContext(c, world2)
         assertEquals("storm", c2.getStr("a"))
+    }
+
+    @Test
+    fun `toValue re-evaluates world on every call`() {
+        val world = FakeWorld(temperature = 0.9)
+        val c = KorenConfig.fromString("a = biome.temperature\n", world)
+
+        fun temperature(): Double {
+            val root = (c.toValue() as Value.VBlock).block
+            return (root.get("a", 1)!!.value as Value.VFloat).f
+        }
+
+        assertEquals(0.9, temperature())
+        world.temperature = -1.2
+        assertEquals(-1.2, temperature())
+    }
+
+    @Test
+    fun `world values resolve inside functions and containers`() {
+        val world = FakeWorld(temperature = 2.5)
+        val c = KorenConfig.fromString(
+            "values = [clamp(biome.temperature, 0, 2), biome.temperature]\n",
+            world,
+        )
+        assertEquals(
+            listOf(Value.VFloat(2.0), Value.VFloat(2.5)),
+            c.getArray("values"),
+        )
+        val root = (c.toValue() as Value.VBlock).block
+        assertEquals(
+            c.getArray("values"),
+            (root.get("values", 1)!!.value as Value.VArray).items,
+        )
+    }
+
+    @Test
+    fun `explicit environment composes with live world context`() {
+        val world = FakeWorld(temperature = 0.9)
+        val c = KorenConfig.fromStringWithEnv(
+            "host = \"${'$'}{KOREN_HOST}\"\ntemp = biome.temperature\n",
+            mapOf("KOREN_HOST" to "localhost"),
+            world,
+        )
+        assertEquals("localhost", c.getStr("host"))
+        assertEquals(0.9, c.getFloat("temp"))
+        world.temperature = -0.5
+        assertEquals(-0.5, c.getFloat("temp"))
     }
 }

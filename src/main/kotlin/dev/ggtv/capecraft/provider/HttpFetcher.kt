@@ -40,6 +40,8 @@ class HttpFetcher(
             getBytes(capeUrl)
         }
         is Resolved.Addon -> r.source.fetch(r.values)
+        // Сетевой картинке HTTP не нужен: байты уже пришли чанками по Sync.
+        is Resolved.NetImage -> throw FetchError("http-источник не умеет сетевую картинку: ${r.hash.take(12)}")
     }
 
     private fun getBytes(url: String): ByteArray {

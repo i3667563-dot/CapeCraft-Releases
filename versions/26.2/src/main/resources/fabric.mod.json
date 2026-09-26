@@ -4,15 +4,26 @@
 	"version": "${version}",
 	"name": "CapeCraft",
 	"description": "Плащи нового поколения: PNG/APNG/GIF, схемы провайдеров, умная память. Без ограничений вроде «до 128p».",
-	"authors": ["GG_TV"],
+	"authors": [
+		"GG_TV"
+	],
 	"license": "MIT",
 	"icon": "assets/capecraft/icon.png",
-	"environment": "client",
+	"environment": "*",
 	"entrypoints": {
 		"client": [
-			{ "adapter": "kotlin", "value": "dev.ggtv.capecraft.CapeCraftClient" }
+			{
+				"adapter": "kotlin",
+				"value": "dev.ggtv.capecraft.CapeCraftClient"
+			}
 		],
-		"capecraft:addons": []
+		"capecraft:addons": [],
+		"main": [
+			{
+				"adapter": "kotlin",
+				"value": "dev.ggtv.capecraft.CapeCraftServer"
+			}
+		]
 	},
 	"mixins": [
 		"capecraft.mixins.json"

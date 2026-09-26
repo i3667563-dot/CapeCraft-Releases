@@ -10,8 +10,12 @@ import dev.ggtv.capecraft.memory.Limits
 import dev.ggtv.capecraft.memory.MemoryManager
 import dev.ggtv.capecraft.provider.CapeFetcher
 import dev.ggtv.capecraft.provider.CompositeFetcher
+import dev.ggtv.capecraft.provider.NetImageFetcher
+import dev.ggtv.capecraft.sync.NetImageStore
 import dev.ggtv.capecraft.provider.FetchError
+import dev.ggtv.capecraft.provider.Guard
 import dev.ggtv.capecraft.provider.Provider
+import dev.ggtv.capecraft.provider.Source
 import dev.ggtv.capecraft.provider.resolveCapeOrdered
 import dev.ggtv.capecraft.render.MinecraftWorldContext
 import dev.ggtv.capecraft.schema.Placeholders
@@ -50,19 +54,114 @@ import java.util.concurrent.atomic.AtomicInteger
 class CapeRegistry(
     @Volatile
     var providers: List<Provider> = emptyList(),
-    private val fetcher: CapeFetcher = CompositeFetcher(),
     limits: Limits = Limits(),
     @Volatile
     private var root: String = System.getProperty("user.dir", "."),
     @Volatile
     private var world: WorldContext = MinecraftWorldContext,
 ) {
+    /**
+     * Кэш картинок, пришедших по Sync v2, и одновременно источник для
+     * [NetImageFetcher].
+     *
+     * Одна и та же инстанция на оба: если бы кэш и фетчер были разными,
+     * ассемблер клал бы байты в один, а резолвер искал в другом — и плащ
+     * вечно считался бы «ещё не докачан».
+     */
+    val networkImages: NetImageStore = NetImageStore()
+
+    private val fetcher: CapeFetcher = CompositeFetcher(net = NetImageFetcher(networkImages))
+
     // @Volatile: reload сбрасывает эти ссылки с рендер-потока, а воркер читает их
     // в фоне — сменившийся провайдер/лимиты/root/кэш должны быть сразу видимы.
     @Volatile
     private var memory: MemoryManager = MemoryManager(limits)
     private val errors = ConcurrentHashMap<String, String>()
+
+    /**
+     * Набор функций каждого объекта в кадре, объявленный через Sync v2.
+     *
+     * Ключ — непрозрачный id из роустера. Значение — локальные [Provider],
+     * уже восстановленные с их `when` и приоритетами.
+     *
+     * Именно здесь «у этого объекта такой набор функций» превращается в то,
+     * что клиент умеет считать.
+     *
+     * Объекта нет в карте — значит он ничего не объявил. Подставлять ему
+     * тогда мой набор нельзя (см. [orderFor]): тихое надевание своего
+     * конфига на чужих выглядело бы как «мод заставляет всех носить моё».
+     */
+    private val objectFunctions = ConcurrentHashMap<String, List<Provider>>()
+
+    /**
+     * У каких объектов вообще есть условия.
+     *
+     * Нужно, чтобы не пересчитывать условия у всех подряд: без условий порядок
+     * не меняется никогда, а пересчёт стоит чтения биома. Объекты без
+     * условий в этот цикл не попадают вообще.
+     */
+    private val objectHasConditions = ConcurrentHashMap<String, Boolean>()
+
+    /**
+     * Мой собственный id.
+     *
+     * Только для меня набор функций берётся из локального конфига, если сервер
+     * ещё не ответил (гонка при входе) или синхронизации нет вовсе.
+     *
+     * Для всех остальных fallback-а на мой набор нет намеренно: иначе мой
+     * локальный `file`-плащ рисовался бы на чужих игроках, а любой молчащий
+     * клиент получал бы мой конфиг целиком. Чего сервер не сказал — того у
+     * объекта нет.
+     */
+    @Volatile
+    var localPlayerId: String? = null
+        private set
+
+    /** Сообщить реестру свой id при входе на сервер. */
+    fun setLocalPlayer(id: String) {
+        localPlayerId = id
+    }
     private val usernames = ConcurrentHashMap<String, String>()
+
+    /**
+     * Проверка источника перед скачиванием (см. [Guard]).
+     *
+     * Ставится только для локального конфига: чужой набор приходит по сети, но
+     * там нечего проверять — путь на проводе не едет (см.
+     * [dev.ggtv.capecraft.provider.Source.NetImage]), а `http`-ссылки и так
+     * ограничены схемой. Поэтому объявления других объектов guard не проходят
+     * и не должны.
+     */
+    @Volatile
+    private var guard: Guard? = null
+
+    /**
+     * Переключить реестр на локальный конфиг.
+     *
+     * В v2 чужой набор функций **не заменяет** мой: он живёт отдельно, в
+     * [objectFunctions], и применяется только к своему объекту. Метод
+     * остался только для смены собственного набора, поэтому и настройки guard
+     * тут локальные, как и раньше.
+     */
+    fun useLocalProviders(newProviders: List<Provider>, newRoot: String) {
+        if (sameAsCurrent(newProviders, newRoot) && guard == null) return
+        guard = null
+        reload(newProviders, memory.limits, newRoot)
+    }
+
+    /**
+     * Структурное сравнение текущего набора с новым.
+     *
+     * [Provider] — обычный класс (не data), поэтому `==` на списках сравнивал
+     * бы ссылки. Сравниваем всё, что реально влияет на загрузку: имя, вид
+     * источника, приоритет и наличие аддон-источника.
+     */
+    private fun sameAsCurrent(newProviders: List<Provider>, newRoot: String): Boolean =
+        root == newRoot && fingerprintOf(providers) == fingerprintOf(newProviders)
+
+    private fun fingerprintOf(list: List<Provider>): String = list.joinToString("\u0000") {
+        "${'$'}{it.name}\u0001${'$'}{it.priority}\u0001${'$'}{it.addonSource != null}\u0001${'$'}{it.source}"
+    }
 
     /** UUID, чей плащ сейчас грузится в фоне (защита от дублей). */
     private val loading = ConcurrentHashMap.newKeySet<String>()
@@ -110,20 +209,175 @@ class CapeRegistry(
             providers = newProviders
             root = newRoot
             memory = MemoryManager(newLimits)
-            errors.clear()
-            loading.clear()          // старые задачи в очереди отбросятся по поколению
-            generation.incrementAndGet()
-            pendingRefresh.addAll(usernames.keys)
-            lastConditionsFingerprint = ""
-            // Перезагрузка всех известных игроков — напрямую в очередь воркера
-            // (single-thread, FIFO): последняя задача с новым поколением победит.
-            val ordered = ProviderSelector.select(providers, world)
-            for (uuid in usernames.keys) {
-                loading.add(uuid)
-                executor.execute { loadInBackground(uuid, ordered) }
-            }
+            refreshLocked()
         }
     }
+
+    /**
+     * Полная перезагрузка по команде `/cp reload`: состояние мода с нуля.
+     *
+     * В отличие от [reload] сбрасывает ещё и GPU-часть — текстуры, их id и факт
+     * загрузки, — поэтому плащ на время загрузки исчезает и рисуется ванильный.
+     * Это осознанно: `/cp reload` означает «перезагрузить мод», а бесшовное
+     * обновление (старое висит, пока не приедет новое) остаётся у [reload].
+     *
+     * Заодно снимается авторитетность сервера: команда — это явное «возьми мой
+     * локальный конфиг», поэтому локальный набор применяется немедленно. Если
+     * сервер пришлёт свой, он применится следующим ответом.
+     */
+    fun reloadAll(newProviders: List<Provider>, newLimits: Limits, newRoot: String) {
+        synchronized(lock) {
+            guard = null
+            providers = newProviders
+            root = newRoot
+            memory = MemoryManager(newLimits)
+            textureReady.clear()
+            textureIds.clear()
+            uploadedFrame.clear()
+            pendingRefresh.clear()
+            refreshLocked()
+        }
+    }
+
+    /** Общее тело: сбросить состояние и перепланировать загрузку. */
+    private fun refreshLocked() {
+        errors.clear()
+        loading.clear()          // старые задачи в очереди отбросятся по поколению
+        generation.incrementAndGet()
+        // Мой локальный конфиг изменился — пересчитать надо только мой плащ.
+        // Чужие объекты живут по объявленным ими наборам и к моему конфигу
+        // отношения не имеют; раньше здесь перезагружались все, и `/cp reload`
+        // дёргал текстуры всего сервера.
+        val local = localPlayerId
+        if (local == null) {
+            pendingRefresh.clear()
+            lastConditionsFingerprint = ""
+            return
+        }
+        pendingRefresh.add(local)
+        lastConditionsFingerprint = ""
+        lastObjectFingerprint.remove(local)
+        val gen = (objectGeneration[local] ?: 0) + 1
+        objectGeneration[local] = gen
+        // Последняя задача с новым поколением победит.
+        val ordered = orderFor(local, world)
+        lastObjectFingerprint[local] = fingerprint(ordered)
+        if (ordered.isNotEmpty()) {
+            loading.add(local)
+            executor.execute { loadInBackground(local, ordered, gen) }
+        }
+    }
+
+    /**
+     * Порядок провайдеров для загрузки.
+     *
+     * Обычный режим — [ProviderSelector] пересчитывает `when`-условия на
+     * живом мире клиента. Режим сервера — список уже отобран и упорядочен
+     * сервером, пересчитывать нечего (и опасно: мир клиента может отличаться).
+     */
+    private fun order(): List<Provider> = ProviderSelector.select(providers, world)
+
+    /**
+     * Порядок функций для конкретного объекта в его собственном контексте.
+     *
+     * Вот ради чего объявленные наборы едут с условиями и приоритетами: сначала
+     * те функции, чьё условие совпало **у этого объекта**, по убыванию
+     * приоритета, потом функции без условия как fallback.
+     *
+     * Считаем против [context] того, кого видно, а не против своего мира —
+     * иначе объявленные условия применялись бы к миру зрителя и были бы
+     * не «его» условиями.
+     */
+    private fun orderFor(id: String, context: WorldContext): List<Provider> {
+        objectFunctions[id]?.let { return ProviderSelector.select(it, context) }
+        // Сервер про меня ничего не сказал — плаща нет. Раньше здесь был
+        // `?: providers`, и это тихо надевало мой конфиг на всех подряд.
+        if (id == localPlayerId) return ProviderSelector.select(providers, context)
+        return emptyList()
+    }
+
+    /**
+     * Принять объявленный набор функций объекта.
+     *
+     * Планирует перезагрузку плаща **только этого** объекта: чужие наборы
+     * не должны вызывать перезагрузку всем подряд.
+     *
+     * @return `true`, если набор изменился и плащ был перепланирован.
+     */
+    fun useObjectFunctions(id: String, functions: List<Provider>): Boolean {
+        val hasCond = functions.any { it.condition != null }
+        // Отпечаток именно ОБЪЯВЛЕННОГО набора: он отсекает повторы, когда
+        // сервер шлёт тот же ростер целиком (ревизия изменилась, а набор нет).
+        val declaredFp = functions.joinToString("\u0000") { describe(it) }
+        val changed = lastDeclaredFingerprint.put(id, declaredFp) != declaredFp
+        objectFunctions[id] = functions
+        objectHasConditions[id] = hasCond
+        if (!changed) return false
+
+        // Применённый отпечаток сбрасываем: следующий ensureLoading обязан
+        // пересчитать порядок под новым набором. Сверять новый набор с
+        // последним ПРИМЕНЁННЫМ нельзя — это разные списки, один до
+        // отбора по условиям, другой после, и сверка всегда расходилась бы.
+        lastObjectFingerprint.remove(id)
+
+        val gen = (objectGeneration[id] ?: 0) + 1
+        objectGeneration[id] = gen
+        synchronized(lock) {
+            // Кэш объекта выкидываем: набор функций другой, картинка может
+            // быть другой, и показывать старую нельзя.
+            memory.remove(id)
+            CapeTexture.release(id)
+        }
+        // Без снятия отсюда `ensureLoading` выйдет по `textureReady` и
+        // перезагрузка не случится — плащ навсегда остался бы от старого набора.
+        textureReady.remove(id)
+        loading.remove(id)
+        return true
+    }
+
+    /** Отпечаток последнего объявленного набора — только для отсечки повторов. */
+    private val lastDeclaredFingerprint = ConcurrentHashMap<String, String>()
+
+    /**
+     * Забыть объявление объекта.
+     *
+     * Отличие от [forget]: снимает только набор функций, но не трогает уже
+     * загруженную текстуру и учёт игроков. Вызывается, когда объекта в снимке
+     * роустера нет — то есть он вышел или ещё не объявился, и его плащ надо
+     * убрать с экрана, а сам игрок в реестре остаётся.
+     */
+    fun forgetObject(id: String) {
+        objectFunctions.remove(id)
+        objectHasConditions.remove(id)
+        lastObjectFingerprint.remove(id)
+        lastDeclaredFingerprint.remove(id)
+    }
+
+    /** id всех объектов с объявленным набором — чтобы убрать пропавшие из снимка. */
+    fun knownObjectIds(): Set<String> = objectFunctions.keys.toSet()
+
+    /**
+     * Заставить пересчитать порядок у всех объектов с условиями.
+     *
+     * После докачки картинки набор не меняется, но доступных байтов становится
+     * больше: раньше `file`-провайдер был «ещё не докачан» и уходил в fallback,
+     * а теперь отдаст картинку. Отпечаток порядка при этом прежний, поэтому
+     * без явного сброса пересчёт не запустился бы.
+     */
+    fun invalidateAppliedOrder() {
+        for (id in objectHasConditions.keys) {
+            lastObjectFingerprint.remove(id)
+            lastReevaluatedAt[id] = 0L
+        }
+        localPlayerId?.let { lastObjectFingerprint.remove(it) }
+        lastConditionsFingerprint = ""
+    }
+
+    /** Есть ли у объекта набор функций в кадре. */
+    fun hasObjectFunctions(id: String): Boolean = objectFunctions.containsKey(id)
+
+    /** Есть ли у объекта функции с условиями — их надо пересчитывать. */
+    fun objectNeedsReevaluation(id: String): Boolean = objectHasConditions[id] == true
 
     /**
      * Достать плащ по UUID, если он уже загружен. НЕ блокирует рендер-поток:
@@ -140,41 +394,126 @@ class CapeRegistry(
      * ConcurrentHashMap-проверки без lock; [lock] берётся только один раз —
      * пока плащ реально не готов.
      */
-    fun ensureLoading(uuid: String, username: String) {
+    fun ensureLoading(uuid: String, username: String, context: WorldContext = world) {
+        usernames[uuid] = username
+
+        // Проверка переоценки идёт ДО ранних выходов. Иначе объект, у которого
+        // уже готова текстура, навсегда сохранил бы плащ, выбранный в момент
+        // входа: зашёл в джунгли → вышел в пустыню → условие изменилось, а
+        // `textureReady` возвращал нас наверх и мимо пересчёта.
+        if (objectNeedsReevaluation(uuid)) reevaluateIfDue(uuid, context)
+
         if (textureReady.contains(uuid)) return // текстура уже на экране
         if (loading.contains(uuid)) return      // фон уже грузит
         val ready = synchronized(lock) { memory.contains(uuid) }
         if (ready) return                       // в CPU-кэше — текстуру создаст animate
         if (loading.add(uuid)) {
-            usernames[uuid] = username
             // Порядок провайдеров вычисляем ЗДЕСЬ (рендер-поток), где безопасно
             // читать живой мир; воркеру передаём уже готовый список.
-            val ordered = ProviderSelector.select(providers, world)
-            synchronized(lock) { lastConditionsFingerprint = ordered.joinToString("\u0000") { it.name } }
-            executor.execute { loadInBackground(uuid, ordered) }
+            val ordered = orderFor(uuid, context)
+            val fp = fingerprint(ordered)
+            lastObjectFingerprint[uuid] = fp
+            lastReevaluatedAt[uuid] = nowMs()
+            val gen = objectGeneration[uuid] ?: 0
+            executor.execute { loadInBackground(uuid, ordered, gen) }
         }
     }
 
+    /**
+     * Пересчитать условия объекта, если подошло время.
+     *
+     * Троттлинг — [RECHECK_INTERVAL_MS], чтобы миксин, зовущий
+     * [ensureLoading] каждый кадр, не читал биомы всех в кадре каждый кадр.
+     */
+    private fun reevaluateIfDue(uuid: String, context: WorldContext) {
+        val now = nowMs()
+        val last = lastReevaluatedAt[uuid] ?: 0L
+        if (now - last < RECHECK_INTERVAL_MS) return
+        // Пишем сразу: если пересчёт идёт тяжело, следующий кадр не влезет
+        // в ту же секунду и не запустит второй.
+        lastReevaluatedAt[uuid] = now
+        reevaluate(uuid, context)
+    }
+
+    /**
+     * Пересчитать набор функций объекта и, если он изменился, перезагрузить
+     * его плащ.
+     *
+     * Условия считаются против [context] — мира **этого** объекта, а не
+     * зрителя. Поэтому объект, дошедший от джунглей до пустыни, честно
+     * переключает свой плащ, а зритель этого не инициирует: он просто видит
+     * результат чужого пересчёта.
+     */
+    private fun reevaluate(uuid: String, context: WorldContext) {
+        val ordered = orderFor(uuid, context)
+        val fp = fingerprint(ordered)
+        if (fp == lastObjectFingerprint[uuid]) return // порядок тот же — не трогаем
+
+        lastObjectFingerprint[uuid] = fp
+        val gen = (objectGeneration[uuid] ?: 0) + 1
+        objectGeneration[uuid] = gen
+
+        // Старая текстура больше не соответствует набору функций: снимаем её,
+        // иначе показывалась бы картинка от удалённого провайдера.
+        synchronized(lock) {
+            memory.remove(uuid)
+            CapeTexture.release(uuid)
+        }
+        textureReady.remove(uuid)
+        loading.remove(uuid)
+
+        if (ordered.isEmpty()) return // новый набор пуст — плаща не будет
+        loading.add(uuid)
+        executor.execute { loadInBackground(uuid, ordered, gen) }
+    }
+
+    private fun fingerprint(ordered: List<Provider>): String =
+        ordered.joinToString("\u0000") { describe(it) }
+
+    /**
+     * Полное описание провайдера для отпечатка.
+     *
+     * Одного имени мало: игрок вправе поменять картинку или ссылку, оставив
+     * подпись прежней, а по имени это неотличимо от «ничего не изменилось» —
+     * и плащ остался бы со старой текстурой. Поэтому сравниваем всё, что
+     * влияет на результат: источник, приоритет, условие и наличие аддона.
+     */
+    private fun describe(p: Provider): String = buildString {
+        append(p.name).append('\u0001').append(p.priority).append('\u0001')
+        when (val s = p.source) {
+            is Source.Url -> append("url\u0001").append(s.template)
+            is Source.File -> append("file\u0001").append(s.template)
+            is Source.Json -> append("json\u0001").append(s.template).append('\u0001').append(s.extract)
+            is Source.NetImage -> append("net\u0001").append(s.hash)
+            else -> append(s::class.simpleName.orEmpty())
+        }
+        append('\u0001').append(p.condition?.toString() ?: "-")
+        append('\u0001').append(p.addonSource != null)
+    }
+
     /** Фоновая загрузка+декод+деградация. Работает НЕ на рендер-потоке. */
-    private fun loadInBackground(uuid: String, ordered: List<Provider>) {
+    private fun loadInBackground(uuid: String, ordered: List<Provider>, objectGen: Int) {
         val gen = generation.get()
         val username = usernames[uuid] ?: ""
         try {
             val ctx = Placeholders.Context(username = username, uuid = stripDashes(uuid), name = "")
-            val bytes = resolveCapeOrdered(ordered, ctx, root, fetcher).bytes
+            val bytes = resolveCapeOrdered(ordered, ctx, root, fetcher, guard).bytes
             val decoded = ImageDecoder.decode(bytes, source = username)
             // Тяжёлая деградация (area-average по всем кадрам) — на воркере,
             // до захвата lock. Под lock только быстрая вставка в кэш.
             val fit = memory.degrade(decoded)
             synchronized(lock) {
                 if (gen != generation.get()) return // устаревшая загрузка — результат скипаем
+                if (objectGen != (objectGeneration[uuid] ?: 0)) return // набор сменился, пока грузили
                 memory.putCached(uuid, fit)
                 errors.remove(uuid)
             }
             emit(CapeEvent.CapeLoaded(uuid, username, fit))
         } catch (e: FetchError) {
             synchronized(lock) {
-                if (gen == generation.get()) errors[uuid] = "загрузка: ${e.message}"
+                if (gen == generation.get() && objectGen == (objectGeneration[uuid] ?: 0)) {
+                    errors[uuid] = "загрузка: ${e.message}"
+                }
             }
             emit(CapeEvent.ProviderNotFound(uuid, username, e.message.orEmpty()))
         } catch (e: ImageDecodeException) {
@@ -194,6 +533,13 @@ class CapeRegistry(
 
     /** Удалить плащ игрока из памяти. */
     fun forget(uuid: String) {
+        if (localPlayerId == uuid) localPlayerId = null
+        objectFunctions.remove(uuid)
+        objectHasConditions.remove(uuid)
+        lastObjectFingerprint.remove(uuid)
+        lastDeclaredFingerprint.remove(uuid)
+        lastReevaluatedAt.remove(uuid)
+        objectGeneration.remove(uuid)
         synchronized(lock) {
             memory.remove(uuid)
             CapeTexture.release(uuid)
@@ -323,23 +669,75 @@ class CapeRegistry(
      * перепланирует загрузку всех известных игроков с новым порядком.
      */
     fun refreshConditions(world: WorldContext) {
-        val ordered = ProviderSelector.select(providers, world)
-        val fp = ordered.joinToString("\u0000") { it.name }
+        // Троттлинг: раньше это пересчитывалось каждый тик. Порядок меняется
+        // максимум раз в 20 тиков (смена времени суток), а `order()` дёргает
+        // биом — 20 раз в секунду на пустом месте вместо 1.
+        val now = nowMs()
+        if (now - lastLocalRecheckedAt < LOCAL_RECHECK_INTERVAL_MS) return
+        lastLocalRecheckedAt = now
+
+        // Пересчитываем ТОЛЬКО себя. Остальные объекты живут по своим наборам
+        // и своим условиям: их пересчитывает миксин через ensureLoading с
+        // EntityWorldContext(игрок). Раньше здесь перезагружались все
+        // известные игроки локальным порядком — то есть чужие плащи
+        // выбирались по моему биому, а это ровно то, что чинится.
+        val local = localPlayerId ?: return
+        val ordered = orderFor(local, world)
+        val fp = fingerprint(ordered)
+        if (fp == lastObjectFingerprint[local]) return
+        lastObjectFingerprint[local] = fp
+
+        val gen = (objectGeneration[local] ?: 0) + 1
+        objectGeneration[local] = gen
         synchronized(lock) {
-            if (fp == lastConditionsFingerprint) return
-            lastConditionsFingerprint = fp
-            loading.clear()
-            generation.incrementAndGet() // старые загрузки со старым миром отбросятся
-            pendingRefresh.addAll(usernames.keys)
-            for (uuid in usernames.keys) {
-                loading.add(uuid)
-                executor.execute { loadInBackground(uuid, ordered) }
-            }
+            memory.remove(local)
+            CapeTexture.release(local)
         }
+        textureReady.remove(local)
+        loading.remove(local)
+        if (ordered.isEmpty()) return
+        loading.add(local)
+        executor.execute { loadInBackground(local, ordered, gen) }
     }
 
     /** Отпечаток выбранного порядка провайдеров для последнего реалтайм-пересчёта. */
     private var lastConditionsFingerprint: String = ""
+
+    /** Отпечаток применённого набора функций по каждому объекту. */
+    private val lastObjectFingerprint = ConcurrentHashMap<String, String>()
+
+    /**
+     * Счётчик поколений на объект — свой, а не общий [generation].
+     *
+     * Общий счётчик пришлось бы поднимать при пересчёте одного объекта, и тогда
+     * протухали бы загрузки всех остальных: игрок сменил биом → обслуживание
+     * плащей всего сервера. Своё поколение на объект отбрасывает ровно одну
+     * устаревшую загрузку.
+     */
+    private val objectGeneration = ConcurrentHashMap<String, Int>()
+
+    /** Когда последний раз реально переоценивали условия объекта, мс. */
+    private val lastReevaluatedAt = ConcurrentHashMap<String, Long>()
+
+    /**
+     * Как часто пересчитывать условия объекта с `when`, мс.
+     *
+     * Миксин зовёт [ensureLoading] каждый кадр. Проверять биом у всех в кадре
+     * каждый кадр незачем: 20 игроков × 60 fps = 1200 чтений биома в секунду
+     * ради данных, меняющихся раз в 20 тиков. 250 мс ≈ 5 тиков — глазом
+     * незаметно, а работы в 12 раз меньше.
+     *
+     * Объекты без условий сюда не попадают вообще: их порядок измениться не
+     * может, пересчитывать нечего.
+     */
+    private val RECHECK_INTERVAL_MS = 250L
+
+    /** Частота пересчёта собственных условий локального игрока, мс. */
+    private val LOCAL_RECHECK_INTERVAL_MS = 250L
+
+    private var lastLocalRecheckedAt = 0L
+
+    private fun nowMs() = System.nanoTime() / 1_000_000L
 
     /** Безопасная отправка события в шину (не падаем, если аддон упал). */
     private fun emit(event: CapeEvent) {

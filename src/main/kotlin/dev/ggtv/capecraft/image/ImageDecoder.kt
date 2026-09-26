@@ -26,5 +26,6 @@ object ImageDecoder {
             ImageFormat.PNG -> PngDecoder.decode(data, source)
             ImageFormat.GIF -> GifDecoder.decode(data, source)
             ImageFormat.WEBP -> WebpDecoder.decode(data, source)
+            ImageFormat.STACKED_PNG -> StackedPngDecoder.decode(data, source)
         }
 }

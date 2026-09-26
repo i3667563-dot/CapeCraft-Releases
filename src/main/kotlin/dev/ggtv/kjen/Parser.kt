@@ -8,20 +8,29 @@ package dev.ggtv.kjen
  */
 object Parser {
 
+    private const val MAX_NESTING_DEPTH = 128
+
     /** Чем заканчивается блок: концом файла или `}`. */
-    private enum class Term { EOF, RBRACE }
+    private sealed interface Term {
+        data object EOF : Term
+        data class RBRACE(val openSpan: Span) : Term
+    }
 
     /** Собрать AST из токенов. Дубликаты ключей не ругаем — нумерацию даёт [Block.get]. */
-    fun parse(tokens: List<Token>): Block = parseBlockContents(Ctx(tokens), 0, Term.EOF).block
+    fun parse(tokens: List<Token>): Block = parseBlockContents(Ctx(tokens), 0, Term.EOF, 0).block
 
     private class Ctx(val tokens: List<Token>) {
         var pos = 0
 
         fun peek(): Token? = tokens.getOrNull(pos)
         fun peekKind(): TokenKind? = tokens.getOrNull(pos)?.kind
+        fun currentSpan(): Span = peek()?.span ?: tokens.lastOrNull()?.span ?: Span(1, 1)
 
         fun err(message: String): Nothing {
-            val span = peek()?.span ?: Span.ZERO
+            throw CrenError.Parse(message, currentSpan())
+        }
+
+        fun errAt(span: Span, message: String): Nothing {
             throw CrenError.Parse(message, span)
         }
     }
@@ -29,13 +38,15 @@ object Parser {
     private class ParsedBlock(val block: Block, val endPos: Int)
 
     /** Вложенный блок: текущий токен — `{`, перешагиваем его и читаем до `}`. */
-    private fun parseBlock(c: Ctx, term: Term): ParsedBlock {
+    private fun parseBlock(c: Ctx, depth: Int): ParsedBlock {
+        ensureDepth(c, depth)
+        val openSpan = c.currentSpan()
         c.pos += 1
-        return parseBlockContents(c, c.pos, term)
+        return parseBlockContents(c, c.pos, Term.RBRACE(openSpan), depth)
     }
 
     /** Содержимое блока: записи до `}` (или до конца файла). */
-    private fun parseBlockContents(c: Ctx, startPos: Int, term: Term): ParsedBlock {
+    private fun parseBlockContents(c: Ctx, startPos: Int, term: Term, depth: Int): ParsedBlock {
         c.pos = startPos
         val block = Block()
         var pendingComment: String? = null
@@ -60,13 +71,13 @@ object Parser {
             // Конец контейнера?
             when (val k = c.peekKind()) {
                 null -> {
-                    if (term == Term.RBRACE) {
-                        c.err("не закрыт блок: ожидалось «}»")
+                    if (term is Term.RBRACE) {
+                        c.errAt(term.openSpan, "не закрыт блок: ожидалось «}»")
                     }
                     return ParsedBlock(block, c.pos)
                 }
                 TokenKind.RBrace -> {
-                    if (term == Term.RBRACE) {
+                    if (term is Term.RBRACE) {
                         c.pos += 1
                         return ParsedBlock(block, c.pos)
                     }
@@ -75,15 +86,15 @@ object Parser {
                 else -> {}
             }
 
-            val entry = parseEntry(c, pendingComment)
+            val entry = parseEntry(c, pendingComment, depth)
             pendingComment = null
             block.entries += entry
         }
     }
 
     /** Запись: `key [type] = value [# коммент]` или контейнер `key { ... }` / `key [ ... ]`. */
-    private fun parseEntry(c: Ctx, leadingComment: String?): Entry {
-        val start = c.peek()?.span ?: Span.ZERO
+    private fun parseEntry(c: Ctx, leadingComment: String?, depth: Int): Entry {
+        val start = c.currentSpan()
 
         // Ключ.
         val key = when (val k = c.peekKind()) {
@@ -108,24 +119,24 @@ object Parser {
         when (val k = c.peekKind()) {
             TokenKind.Assign -> {
                 c.pos += 1
-                val value = parseValue(c)
+                val value = parseValue(c, depth)
                 // Комментарий после значения важнее комментария перед записью.
-                val comment = trailingComment(c) ?: leadingComment
+                val comment = mergeComments(leadingComment, trailingComment(c))
                 checkValueType(value, ty, start)
                 requireLineEnd(c)
                 return Entry(key, ty, value, comment, start)
             }
             TokenKind.LBrace -> {
-                val value = Value.VBlock(parseBlock(c, Term.RBRACE).block)
+                val value = Value.VBlock(parseBlock(c, depth + 1).block)
                 checkValueType(value, ty, start)
-                val comment = trailingComment(c) ?: leadingComment
+                val comment = mergeComments(leadingComment, trailingComment(c))
                 requireLineEnd(c)
                 return Entry(key, ty, value, comment, start)
             }
             TokenKind.LBracket -> {
-                val value = parseArray(c)
+                val value = parseArray(c, depth + 1)
                 checkValueType(value, ty, start)
-                val comment = trailingComment(c) ?: leadingComment
+                val comment = mergeComments(leadingComment, trailingComment(c))
                 requireLineEnd(c)
                 return Entry(key, ty, value, comment, start)
             }
@@ -134,14 +145,15 @@ object Parser {
     }
 
     /** Значение в позиции `= ...` или внутри словаря/массива. */
-    private fun parseValue(c: Ctx): Value {
+    private fun parseValue(c: Ctx, depth: Int): Value {
+        ensureDepth(c, depth)
         return when (val k = c.peekKind()) {
             is TokenKind.Str -> { c.pos += 1; Value.VStr(k.s) }
             is TokenKind.Int -> { c.pos += 1; Value.VInt(k.i) }
             is TokenKind.Float -> { c.pos += 1; Value.VFloat(k.f) }
             is TokenKind.Bool -> { c.pos += 1; Value.VBool(k.b) }
-            TokenKind.LBrace -> parseDict(c)
-            TokenKind.LBracket -> parseArray(c)
+            TokenKind.LBrace -> parseDict(c, depth + 1)
+            TokenKind.LBracket -> parseArray(c, depth + 1)
             // Слово — абсолютный путь (`server.host`); ведущая точка — относительный.
             is TokenKind.Word, TokenKind.Dot -> Value.VRef(parsePath(c))
             else -> c.err("ожидалось значение, найдено: ${k ?: "конец файла"}")
@@ -149,14 +161,15 @@ object Parser {
     }
 
     /** Словарь: `{ key: value, key: value }` — запятые обязательны. */
-    private fun parseDict(c: Ctx): Value {
+    private fun parseDict(c: Ctx, depth: Int): Value {
+        ensureDepth(c, depth)
         c.pos += 1 // LBrace
         val pairs = mutableListOf<Pair<String, Value>>()
         while (true) {
             skipNewlinesAndComments(c)
             when (val k = c.peekKind()) {
                 TokenKind.RBrace -> { c.pos += 1; return Value.VDict(pairs) }
-                TokenKind.Comma -> { c.pos += 1; continue }
+                TokenKind.Comma -> c.err("лишняя «,» в словаре")
                 is TokenKind.Word -> {
                     val key = k.w
                     c.pos += 1
@@ -164,14 +177,24 @@ object Parser {
                         TokenKind.Colon, TokenKind.Assign -> c.pos += 1
                         else -> c.err("ожидалось «:» или «=» после ключа «$key» в словаре")
                     }
-                    val value = parseValue(c)
+                    val value = parseValue(c, depth)
                     pairs += key to value
 
                     // После пары обязательна запятая или конец словаря.
                     skipNewlinesAndComments(c)
                     when (val after = c.peekKind()) {
-                        TokenKind.Comma -> c.pos += 1
-                        TokenKind.RBrace -> {}
+                        TokenKind.Comma -> {
+                            c.pos += 1
+                            skipNewlinesAndComments(c)
+                            if (c.peekKind() is TokenKind.RBrace) {
+                                c.pos += 1
+                                return Value.VDict(pairs)
+                            }
+                        }
+                        TokenKind.RBrace -> {
+                            c.pos += 1
+                            return Value.VDict(pairs)
+                        }
                         else -> c.err("ожидалась «,» или «}» после пары словаря, найдено: $after")
                     }
                 }
@@ -181,23 +204,34 @@ object Parser {
     }
 
     /** Массив: `[ значение, значение ]` — запятые обязательны. */
-    private fun parseArray(c: Ctx): Value {
+    private fun parseArray(c: Ctx, depth: Int): Value {
+        ensureDepth(c, depth)
         c.pos += 1 // LBracket
         val items = mutableListOf<Value>()
         while (true) {
             skipNewlinesAndComments(c)
             when (val k = c.peekKind()) {
                 TokenKind.RBracket -> { c.pos += 1; return Value.VArray(items) }
-                TokenKind.Comma -> { c.pos += 1; continue }
+                TokenKind.Comma -> c.err("лишняя «,» в массиве")
                 else -> {}
             }
 
-            items += parseValue(c)
+            items += parseValue(c, depth)
 
             skipNewlinesAndComments(c)
             when (val after = c.peekKind()) {
-                TokenKind.Comma -> c.pos += 1
-                TokenKind.RBracket -> {}
+                TokenKind.Comma -> {
+                    c.pos += 1
+                    skipNewlinesAndComments(c)
+                    if (c.peekKind() is TokenKind.RBracket) {
+                        c.pos += 1
+                        return Value.VArray(items)
+                    }
+                }
+                TokenKind.RBracket -> {
+                    c.pos += 1
+                    return Value.VArray(items)
+                }
                 else -> c.err("ожидалась «,» или «]» после элемента массива, найдено: $after")
             }
         }
@@ -248,6 +282,9 @@ object Parser {
                         if (c.peekKind() is TokenKind.RBracket) {
                             // Номер относится к последнему сегменту.
                             if (indices.isNotEmpty()) {
+                                if (next.i > Int.MAX_VALUE) {
+                                    c.err("номер в пути слишком велик для этой платформы")
+                                }
                                 indices[indices.lastIndex] = next.i.toInt()
                                 c.pos += 1
                                 break
@@ -286,7 +323,11 @@ object Parser {
         return null
     }
 
-    /** После записи допустимы только: конец строки, конец блока, конец файла. */
+    private fun mergeComments(leading: String?, trailing: String?): String? = when {
+        leading != null && trailing != null -> "$leading\n$trailing"
+        else -> leading ?: trailing
+    }
+
     private fun requireLineEnd(c: Ctx) {
         when (val k = c.peekKind()) {
             null, is TokenKind.Newline, is TokenKind.RBrace, is TokenKind.RBracket, is TokenKind.Comment -> {}
@@ -305,10 +346,17 @@ object Parser {
             Type.DICT -> value is Value.VDict
             Type.ARRAY -> value is Value.VArray
             Type.BLOCK -> value is Value.VBlock
-            Type.REF -> true // проверит резолвер
+            Type.REF -> value is Value.VRef
         }
         if (!matches) {
             throw CrenError.TypeMismatch(t.word, value.kind, span)
+        }
+    }
+
+    private fun ensureDepth(c: Ctx, depth: Int) {
+        if (depth > MAX_NESTING_DEPTH) {
+            val span = c.currentSpan()
+            throw CrenError.Parse("превышен предел вложенности: максимум $MAX_NESTING_DEPTH", span)
         }
     }
 }

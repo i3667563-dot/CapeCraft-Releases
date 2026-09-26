@@ -1,6 +1,8 @@
 package dev.ggtv.capecraft
 
+import dev.ggtv.capecraft.CapeConfigEnv
 import com.mojang.brigadier.context.CommandContext
+import dev.ggtv.capecraft.sync.CapeSyncClient
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback
 import net.fabricmc.fabric.api.client.command.v2.ClientCommands
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource
@@ -12,7 +14,8 @@ import net.minecraft.network.chat.Component
  *
  *  - `/cp reload` — перечитать конфиг провайдеров и сбросить кэш плащей;
  *  - `/cp list`   — показать закэшированные плащи (UUID) и объём памяти;
- *  - `/cp status` — общее состояние: число плащей, память, лимиты;
+ *  - `/cp status` — общее состояние: число плащей, память, лимиты, sync;
+ *  - `/cp sync`   — спросить у сервера активный набор плащей прямо сейчас;
  *  - `/cp clear`  — очистить кэш плащей.
  *
  * Регистрируются как клиентские команды (Fabric API) — работают в одиночке
@@ -27,19 +30,48 @@ object CapeCommands {
                     .then(ClientCommands.literal("reload").executes { reload(it, registry) })
                     .then(ClientCommands.literal("list").executes { list(it, registry) })
                     .then(ClientCommands.literal("status").executes { status(it, registry) })
+                    .then(ClientCommands.literal("sync").executes { sync(it) })
                     .then(ClientCommands.literal("clear").executes { clear(it, registry) }),
             )
         }
     }
 
     private fun reload(ctx: CommandContext<FabricClientCommandSource>, registry: CapeRegistry): Int {
-        // Перечитать конфиг и перезагрузить провайдеры/лимиты/плащи в том же
-        // реестре (бесшовно: старые текстуры висят, пока новые грузятся в фоне).
+        // Полная перезагрузка: конфиг с диска, дефолт при отсутствии, новый
+        // набор провайдеров, полный сброс кэша и GPU-текстур, авторитетность
+        // сервера снята. Бесшовного обновления здесь намеренно нет — это
+        // команда «перезагрузить мод», а не «пнуть провайдеров».
         val cfg = CapeCraftClient.config
         cfg.reload()
-        registry.reload(cfg.providers, cfg.limits, cfg.rootFor())
+        CapeSyncClient.applySettings(cfg.serverSync)
+        registry.reloadAll(cfg.providers, cfg.limits, cfg.rootFor())
+        // В v2 запроса нет: клиент сам объявляет набор. После перезагрузки
+        // конфига объявляем сразу, иначе остальные до следующего изменения
+        // видят прежний набор.
+        CapeSyncClient.announceNow()
         val msg = if (cfg.lastError != null) " с ошибкой: ${cfg.lastError}" else ""
-        ctx.source.sendFeedback(Component.literal("Конфиг перезагружен ($cfg.path). Провайдеров: ${cfg.providers.size}, перезагрузка плащей в фоне$msg"))
+        ctx.source.sendFeedback(Component.literal("CapeCraft перезагружен (${cfg.path}). Провайдеров: ${cfg.providers.size}, " +
+            "кэш плащей очищен, загрузка в фоне, набор — локальный конфиг" +
+            ", набор объявлен" +
+            "$msg"))
+        return 1
+    }
+
+    private fun sync(ctx: CommandContext<FabricClientCommandSource>): Int {
+        // В v2 «запросить набор» = «объявить свой заново».
+        CapeSyncClient.announceNow()
+        val state = CapeSyncClient.stateForStatus()
+        ctx.source.sendFeedback(
+            Component.literal(
+                if (!state.enabled) {
+                    "CapeCraft: синхронизация выключена в конфиге."
+                } else {
+                    "CapeCraft: набор объявлен, ревизия роустера ${state.revision}, " +
+                        "применено снимков ${state.rostersApplied}. " +
+                        "Сервер отвечает только роустером и чанками картинок."
+                },
+            ),
+        )
         return 1
     }
 
@@ -70,11 +102,41 @@ object CapeCommands {
         val name = Minecraft.getInstance().user.name
         ctx.source.sendFeedback(Component.literal("CapeCraft ${modVersion()}"))
         ctx.source.sendFeedback(Component.literal("Игрок: $name"))
-        ctx.source.sendFeedback(Component.literal("Провайдеров: ${registry.providers.size}"))
+        ctx.source.sendFeedback(Component.literal("Провайдеров: ${registry.providers.size} (${sourceOf(registry)})"))
         ctx.source.sendFeedback(Component.literal("Плащей в кэше: ${registry.size}"))
         ctx.source.sendFeedback(Component.literal("Память плащей: ${registry.totalBytes} байт"))
+        for (override in CapeConfigEnv.activeOverrides()) {
+            ctx.source.sendFeedback(Component.literal("Переопределение из окружения: $override"))
+        }
+        ctx.source.sendFeedback(Component.literal("Объектов с набором: ${registry.knownObjectIds().size}"))
+        ctx.source.sendFeedback(Component.literal("Картинок по сети в кэше: ${registry.networkImages.count()} " +
+            "(${registry.networkImages.totalBytes()} байт), своих: ${registry.networkImages.ownedCount()}"))
+        val state = CapeSyncClient.stateForStatus()
+        ctx.source.sendFeedback(
+            Component.literal(
+                "Sync v2: ревизия ${state.revision}, объявлений отправлено ${state.announcesSent}, " +
+                    "ростеров применено ${state.rostersApplied} (устаревших ${state.rostersStale}), " +
+                    "запрошено картинок ${state.fetchesSent}, чанков принято ${state.chunksReceived}, " +
+                    "не хватает картинок ${state.missingHashes().size}" +
+                    if (CapeSyncClient.lastTruncatedCount() > 0) {
+                        ", ПОТЕРЯНО ОБЪЕКТОВ ПРИ ОБРЕЗКЕ: ${CapeSyncClient.lastTruncatedCount()}"
+                    } else {
+                        ""
+                    } +
+                    (state.lastError?.let { ", ошибка: $it" } ?: ""),
+            ),
+        )
         return 1
     }
+
+    /**
+     * Откуда набор.
+     *
+     * Формулировка про сервер убрана намеренно: в v2 сервер не присылает мой
+     * набор, он только сообщает чужие. Свой набор всегда локальный, а чужие
+     * лежат по объектам и в этом счётчике не участвуют.
+     */
+    private fun sourceOf(registry: CapeRegistry): String = "локальный конфиг"
 
     /** Версия мода из fabric.mod.json (не захардкожена). */
     private fun modVersion(): String =
@@ -85,7 +147,7 @@ object CapeCommands {
 
     private fun clear(ctx: CommandContext<FabricClientCommandSource>, registry: CapeRegistry): Int {
         registry.clear()
-        ctx.source.sendFeedback(Component.literal("Кэш плащей очищен."))
+        ctx.source.sendFeedback(Component.literal("Кэш плащей очищен. Мод продолжает работать, плащи загрузятся заново."))
         return 1
     }
 }

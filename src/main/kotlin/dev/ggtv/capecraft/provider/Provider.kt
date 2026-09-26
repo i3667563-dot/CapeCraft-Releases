@@ -16,11 +16,26 @@ sealed interface Source {
     /** Прямая ссылка на картинку: `type = url`. */
     data class Url(val template: String) : Source
 
-    /** Локальный файл/директория: `type = file`. */
+    /** Локальный файл/диретория: `type = file`. */
     data class File(val template: String) : Source
 
     /** Извлечь URL из вложенного JSON по path-инструкции: `type = json`. */
     data class Json(val template: String, val extract: String) : Source
+
+    /**
+     * Картинка по хэшу содержимого, пришедшая из сети Sync v2.
+     *
+     * Отдельный вид от [File] принципиально: у [File] есть путь на **моём**
+     * диске, а у чужого `file`-провайдера пути нет вообще — на провод он не
+     * уезжает. Есть только хэш, по которому байты лежат в кэше картинок,
+     * накопленном из кусков, присланных владельцем. Смешивать их в один вид
+     * значило бы либо выдумать фиктивный путь, либо таскать [ImageHash] через
+     * шаблоны плейсхолдеров — и то и другое враньё.
+     *
+     * В конфиге `.kn` **невозможен**: парсер такого вида не производит, он
+     * появляется только при разборе чужого объявления из роустера.
+     */
+    data class NetImage(val hash: String) : Source
 }
 
 /**
@@ -66,6 +81,9 @@ class Provider(
                 Placeholders.render(s.template, c),
                 s.extract,
             )
+            // Хэш не шаблонизируется: он уже конкретный идентификатор,
+            // подставлять в него нечего.
+            is Source.NetImage -> Resolved.NetImage(s.hash)
         }
     }
 }
@@ -75,6 +93,14 @@ sealed interface Resolved {
     data class Url(val url: String) : Resolved
     data class File(val path: String) : Resolved
     data class Json(val url: String, val extract: String) : Resolved
+
+    /**
+     * Картинка из кэша Sync v2 по хэшу.
+     *
+     * Отдельный вид от [File] по той же причине, что и [Source.NetImage]:
+     * пути нет, есть хэш, а байты лежат в накопленном кэше.
+     */
+    data class NetImage(val hash: String) : Resolved
     /** Аддон-провайдер: fetch определён аддоном через [source]. */
     data class Addon(val source: CapeSource, val values: CapeValues, val debugUrl: String) : Resolved
 }

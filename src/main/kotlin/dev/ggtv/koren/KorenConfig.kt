@@ -34,6 +34,17 @@ class KorenConfig private constructor(
             return KorenConfig(root, context)
         }
 
+        /** Разобрать конфиг из строки с заданным окружением. */
+        fun fromStringWithEnv(
+            input: String,
+            env: Map<String, String>,
+            context: WorldContext = EmptyWorldContext,
+        ): KorenConfig {
+            val tokens = KorenTokenizer.tokenizeWithEnv(input, env)
+            val root = KorenParser.parse(tokens)
+            return KorenConfig(root, context)
+        }
+
         /** Прочитать конфиг из файла `.kn`. */
         fun load(path: JPath, context: WorldContext = EmptyWorldContext): KorenConfig {
             val text = try {
@@ -55,6 +66,9 @@ class KorenConfig private constructor(
 
     /** Получить значение по пути, раскрыв ссылки, функции и корни мира. */
     fun get(path: String): Value = KorenResolver(root, context).resolve(Path.parse(path))
+
+    /** Получить полностью раскрытое дерево конфигурации. */
+    fun toValue(): Value = KorenResolver(root, context).resolveRoot()
 
     /** Типизированный доступ: строка. */
     fun getStr(path: String): String = when (val v = get(path)) {

@@ -9,129 +9,200 @@ package dev.ggtv.kjen
  *
  * Циклы детектятся через visiting: узел, который прямо сейчас
  * в процессе раскрытия, при повторной встрече — [CrenError.Cycle].
- * Раскрытые значения кэшируются — каждая ссылка раскрывается один раз.
  */
 class Resolver(private val root: Block) {
 
-    /** Узлы, которые прямо сейчас в процессе раскрытия → детект циклов. */
     private val visiting = HashSet<Path>()
+    private var workRemaining = MAX_EXPANSION_WORK
 
-    /** Кэш: каждая ссылка раскрывается один раз. */
-    private val cache = HashMap<Path, Value>()
-
-    /** Раскрыть ссылку по пути до конкретного значения. */
     fun resolve(path: Path): Value {
-        // Пустой путь — NotFound, а не ошибка индексации.
+        workRemaining = MAX_EXPANSION_WORK
+        return resolvePath(path, 0)
+    }
+
+    fun resolveRoot(): Value {
+        workRemaining = MAX_EXPANSION_WORK
+        val basePath = emptyPath()
+        return Value.VBlock(resolveBlock(root, basePath, root, 0, 0))
+    }
+
+    private fun resolvePath(path: Path, referenceDepth: Int): Value {
         if (path.segments.isEmpty()) {
             throw CrenError.NotFound(path.toString())
         }
-
-        // 1. Кэш.
-        cache[path]?.let { return it }
-
-        // 2. Цикл: путь уже раскрывается прямо сейчас.
+        if (path.segments.size > MAX_REFERENCE_DEPTH) {
+            throw depthError("длина пути", MAX_REFERENCE_DEPTH)
+        }
+        if (referenceDepth > MAX_REFERENCE_DEPTH) {
+            throw depthError("глубина ссылок", MAX_REFERENCE_DEPTH)
+        }
         if (!visiting.add(path)) {
             throw CrenError.Cycle(path.toString())
         }
 
-        // 3. Раскрытие.
-        val result = resolveUncached(path)
-        visiting.remove(path)
-        cache[path] = result
-        return result
+        return try {
+            resolveFromBlock(root, root, path, 0, emptyPath(), referenceDepth)
+        } finally {
+            visiting.remove(path)
+        }
     }
 
-    /** Сам спуск по сегментам пути. */
-    private fun resolveUncached(path: Path): Value {
-        // Текущее значение: начинаем с корня, на каждом сегменте спускаемся.
-        // Конфиги маленькие; блоки иммутабельны после парсинга — клонируем ссылками.
-        var current: Value = Value.VBlock(root)
-        val last = path.segments.lastIndex
+    private fun resolveFromBlock(
+        rootBlock: Block,
+        block: Block,
+        path: Path,
+        next: Int,
+        basePath: Path,
+        referenceDepth: Int,
+    ): Value {
+        if (next == path.segments.size) {
+            return Value.VBlock(resolveBlock(
+                block,
+                basePath,
+                rootBlock,
+                referenceDepth,
+                0,
+            ))
+        }
 
-        // Абсолютный путь к блоку, в котором ищем текущий сегмент.
-        // Нужен для относительных ссылок: `.x` внутри блока превращается
-        // в абсолютный эквивалент «base_path.x» — кэш и детект циклов
-        // работают по нему, и разные блоки не путаются.
-        var basePath = Path(emptyList(), emptyList(), true)
+        val label = path.toString()
+        val segment = path.segments[next]
+        val index = path.indices.getOrNull(next)
+        val entry = resolveSegment(block, segment, index, label)
 
-        for ((i, seg) in path.segments.withIndex()) {
-            // Явный номер `[n]` — только на последнем сегменте (парсер гарантирует);
-            // у промежуточных сегментов индекс может прийти только суффиксом
-            // в имени (`server1`) — разбирает resolveSegment.
-            val index = path.indices.getOrNull(i)
+        return when (val value = entry.value) {
+            is Value.VBlock -> {
+                val childBase = childPath(basePath, segment, index)
+                resolveFromBlock(
+                    rootBlock,
+                    value.block,
+                    path,
+                    next + 1,
+                    childBase,
+                    referenceDepth,
+                )
+            }
+            is Value.VRef -> {
+                var absolute = absolutePath(basePath, value.path)
+                if (absolute.segments.isEmpty()) {
+                    return resolvePath(absolute, referenceDepth + 1)
+                }
 
-            val block = (current as? Value.VBlock)?.block
-                // Спускаемся в не-блок: путь ведёт в никуда.
-                ?: throw CrenError.NotFound("${path}.$seg")
-
-            val entry = resolveSegment(block, seg, index, path.toString())
-
-            when (val v = entry.value) {
-                is Value.VBlock -> {
-                    current = v
-                    // Спуск в подблок: он становится базой для относительных.
-                    basePath = Path(
-                        basePath.segments + seg,
-                        basePath.indices + index,
-                        true,
+                for (segmentIndex in next + 1 until path.segments.size) {
+                    absolute = absolute.copy(
+                        segments = absolute.segments + path.segments[segmentIndex],
+                        indices = absolute.indices + path.indices.getOrNull(segmentIndex),
                     )
                 }
-                // Ссылка в середине или в конце пути — раскрываем.
-                is Value.VRef -> {
-                    val abs = if (v.path.absolute) {
-                        v.path
-                    } else {
-                        // Относительная ссылка: от текущего блока (base_path),
-                        // сложив в абсолютный эквивалент.
-                        Path(basePath.segments + v.path.segments, basePath.indices + v.path.indices, true)
-                    }
-                    current = resolve(abs)
-                    basePath = abs
+                val result = try {
+                    resolvePath(absolute, referenceDepth + 1)
+                } catch (error: CrenError.NotFound) {
+                    if (next + 1 == path.segments.size) throw error
+                    throw CrenError.NotFound(label)
                 }
-                else -> {
-                    if (i == last) {
-                        // Последний сегмент — лист, это ответ.
-                        return v
-                    }
-                    throw CrenError.NotFound(path.toString())
+                if (next + 1 == path.segments.size) result else result
+            }
+            else -> {
+                if (next + 1 == path.segments.size) {
+                    resolveValue(value, basePath, rootBlock, referenceDepth, 0)
+                } else {
+                    throw CrenError.NotFound(label)
                 }
             }
         }
+    }
 
-        // Путь закончился на блоке — возвращаем его целиком.
-        return current
+    private fun resolveValue(
+        value: Value,
+        basePath: Path,
+        rootBlock: Block,
+        referenceDepth: Int,
+        valueDepth: Int,
+    ): Value {
+        if (valueDepth >= MAX_VALUE_DEPTH) {
+            throw depthError("вложенность значений", MAX_VALUE_DEPTH)
+        }
+        consumeExpansionWork()
+
+        return when (value) {
+            is Value.VRef -> {
+                val absolute = absolutePath(basePath, value.path)
+                resolvePath(absolute, referenceDepth + 1)
+            }
+            is Value.VArray -> Value.VArray(value.items.map {
+                resolveValue(it, basePath, rootBlock, referenceDepth, valueDepth + 1)
+            })
+            is Value.VDict -> Value.VDict(value.pairs.map { (key, item) ->
+                key to resolveValue(item, basePath, rootBlock, referenceDepth, valueDepth + 1)
+            })
+            is Value.VBlock -> Value.VBlock(resolveBlock(
+                value.block,
+                basePath,
+                rootBlock,
+                referenceDepth,
+                valueDepth,
+            ))
+            else -> value
+        }
+    }
+
+    private fun resolveBlock(
+        block: Block,
+        basePath: Path,
+        rootBlock: Block,
+        referenceDepth: Int,
+        valueDepth: Int,
+    ): Block {
+        val resolved = Block()
+        val occurrences = HashMap<String, Int>()
+
+        for (entry in block.entries) {
+            val index = occurrences.getOrDefault(entry.key, 0) + 1
+            occurrences[entry.key] = index
+            val entryBase = if (entry.value is Value.VBlock) {
+                childPath(basePath, entry.key, index)
+            } else {
+                basePath
+            }
+            resolved.entries += Entry(
+                key = entry.key,
+                ty = entry.ty,
+                value = resolveValue(
+                    entry.value,
+                    entryBase,
+                    rootBlock,
+                    referenceDepth,
+                    valueDepth + 1,
+                ),
+                comment = entry.comment,
+                span = entry.span,
+            )
+        }
+        return resolved
+    }
+
+    private fun consumeExpansionWork() {
+        if (workRemaining == 0) {
+            throw CrenError.Parse(
+                "превышен предел раскрытия: максимум $MAX_EXPANSION_WORK",
+                Span(1, 1),
+            )
+        }
+        workRemaining--
     }
 
     companion object {
-        /**
-         * Найти запись в блоке по одному сегменту пути.
-         *
-         * Правила выбора записи:
-         * - index = Some(n) — прямая n-я запись ключа;
-         * - index = None: уникальный ключ → берём; повтор → [CrenError.Ambiguous];
-         *   ключа нет, но имя заканчивается цифрами (`server1`) — суффикс-номер;
-         *   иначе — [CrenError.NotFound].
-         */
-        fun resolveSegment(block: Block, seg: String, index: Int?, pathLabel: String): Entry {
-            // Подсчёт вхождений и выбор записи делаем за один проход.
-            var count = 0
-            var first: Entry? = null
-            var numbered: Entry? = null
-            for (e in block.entries) {
-                if (e.key == seg) {
-                    count++
-                    if (first == null) first = e
-                    if (count == index) numbered = e
-                }
-            }
+        const val MAX_REFERENCE_DEPTH = 256
+        const val MAX_VALUE_DEPTH = 256
+        const val MAX_EXPANSION_WORK = 65_536
 
+        fun resolveSegment(block: Block, seg: String, index: Int?, pathLabel: String): Entry {
+            val count = block.entries.count { it.key == seg }
             if (index != null) {
-                return numbered ?: throw CrenError.NotFound(pathLabel)
+                return block.get(seg, index) ?: throw CrenError.NotFound(pathLabel)
             }
             return when (count) {
                 0 -> {
-                    // Литерального ключа нет — пробуем суффикс-номер (`server1`).
-                    // Литерал приоритетнее: он уже поймался бы веткой count>0.
                     val suffixed = splitDigitSuffix(seg)
                     if (suffixed != null) {
                         block.get(suffixed.first, suffixed.second)
@@ -140,21 +211,41 @@ class Resolver(private val root: Block) {
                         throw CrenError.NotFound(pathLabel)
                     }
                 }
-                1 -> first!!
+                1 -> block.get(seg, 1) ?: throw CrenError.NotFound(pathLabel)
                 else -> throw CrenError.Ambiguous(seg, count)
             }
         }
 
-        /** «server1» → ("server", 1); «server» → null; «123» → null (пустая база). */
         fun splitDigitSuffix(s: String): Pair<String, Int>? {
-            // ASCII-цифры, как is_ascii_digit в Rust — Unicode-цифры частью суффикса не считаются.
             var digitStart = s.length
             while (digitStart > 0 && s[digitStart - 1] in '0'..'9') digitStart--
-            if (digitStart == s.length) return null // цифр в конце нет
+            if (digitStart == s.length) return null
             val base = s.substring(0, digitStart)
             if (base.isEmpty()) return null
             val digits = s.substring(digitStart).toIntOrNull() ?: return null
             return base to digits
         }
+
+        private fun emptyPath(): Path = Path(emptyList(), emptyList(), true)
+
+        private fun absolutePath(basePath: Path, reference: Path): Path {
+            if (reference.absolute) return reference
+            return Path(
+                basePath.segments + reference.segments,
+                basePath.indices + reference.indices,
+                true,
+            )
+        }
+
+        private fun childPath(basePath: Path, key: String, index: Int?): Path = Path(
+            basePath.segments + key,
+            basePath.indices + index,
+            true,
+        )
+
+        private fun depthError(kind: String, limit: Int): CrenError.Parse = CrenError.Parse(
+            "превышен предел $kind: максимум $limit",
+            Span(1, 1),
+        )
     }
 }

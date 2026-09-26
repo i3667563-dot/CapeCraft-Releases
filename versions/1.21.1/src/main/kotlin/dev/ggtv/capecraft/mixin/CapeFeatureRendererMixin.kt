@@ -3,6 +3,7 @@ package dev.ggtv.capecraft.mixin
 import dev.ggtv.capecraft.CapeCraftClient
 import dev.ggtv.capecraft.api.CapeApiHolder
 import dev.ggtv.capecraft.api.render.CapeRenderContext
+import dev.ggtv.capecraft.render.EntityWorldContext
 import dev.ggtv.capecraft.render.MinecraftWorldContext
 import net.minecraft.client.network.AbstractClientPlayerEntity
 import net.minecraft.client.util.SkinTextures
@@ -38,7 +39,10 @@ abstract class CapeFeatureRendererMixin {
         val uuid = entity.uuidAsString
 
         val registry = CapeCraftClient.registry
-        registry.ensureLoading(uuid, entity.name.string)
+        // Условия `when` считаем против ЭТОГО игрока, а не против моего мира:
+        // объявленный набор функций принадлежит ему, и «джунглевый» плащ должен
+        // показаться только тем, кто смотрит действительно из джунглей.
+        registry.ensureLoading(uuid, entity.name.string, EntityWorldContext(entity))
 
         val defaultTexture: Identifier = registry.textureId(uuid) ?: return original
         if (defaultTexture == original.capeTexture()) return original

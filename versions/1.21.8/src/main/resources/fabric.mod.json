@@ -7,8 +7,11 @@
 	"authors": ["GG_TV"],
 	"license": "MIT",
 	"icon": "assets/capecraft/icon.png",
-	"environment": "client",
+	"environment": "*",
 	"entrypoints": {
+		"main": [
+			{ "adapter": "kotlin", "value": "dev.ggtv.capecraft.CapeCraftServer" }
+		],
 		"client": [
 			{ "adapter": "kotlin", "value": "dev.ggtv.capecraft.CapeCraftClient" }
 		],

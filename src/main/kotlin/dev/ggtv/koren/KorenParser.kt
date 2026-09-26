@@ -1,53 +1,56 @@
 package dev.ggtv.koren
 
+import dev.ggtv.kjen.Block
 import dev.ggtv.kjen.CrenError
+import dev.ggtv.kjen.Entry
+import dev.ggtv.kjen.Path
 import dev.ggtv.kjen.Span
 import dev.ggtv.kjen.Type
 import dev.ggtv.kjen.Value
-import dev.ggtv.kjen.Value.VArray
-import dev.ggtv.kjen.Value.VBlock
-import dev.ggtv.kjen.Value.VDict
-import dev.ggtv.kjen.Value.VRef
-import dev.ggtv.kjen.Block
-import dev.ggtv.kjen.Entry
-import dev.ggtv.kjen.Path
 
-/**
- * Парсер `.kn`: токены → AST.
- *
- * Тот же рекурсивный спуск, что у Kjen, плюс вызовы функций
- * `clamp(x, 0, 100)` → [Value.VRef]-подобный [VFunc].
- * Любой валидный `.crn` парсится идентично Kjen.
- */
 object KorenParser {
 
-    private enum class Term { EOF, RBRACE }
+    private const val MAX_NESTING_DEPTH = 128
 
-    /** Собрать AST из токенов. */
-    fun parse(tokens: List<KorenToken>): Block = parseBlockContents(Ctx(tokens), 0, Term.EOF).block
+    private sealed interface Term {
+        data object EOF : Term
+        data class RBrace(val openSpan: Span) : Term
+    }
+
+    fun parse(tokens: List<KorenToken>): Block =
+        parseBlockContents(Ctx(tokens), 0, Term.EOF, 0).block
 
     private class Ctx(val tokens: List<KorenToken>) {
         var pos = 0
 
         fun peek(): KorenToken? = tokens.getOrNull(pos)
-        fun peekKind(): KorenTokenKind? = tokens.getOrNull(pos)?.kind
+        fun peekKind(): KorenTokenKind? = peek()?.kind
+        fun currentSpan(): Span = peek()?.span ?: tokens.lastOrNull()?.span ?: Span(1, 1)
 
         fun err(message: String): Nothing {
-            val span = peek()?.span ?: Span.ZERO
+            throw CrenError.Parse(message, currentSpan())
+        }
+
+        fun errAt(span: Span, message: String): Nothing {
             throw CrenError.Parse(message, span)
         }
     }
 
     private class ParsedBlock(val block: Block, val endPos: Int)
 
-    /** Вложенный блок: текущий токен — `{`, перешагиваем его и читаем до `}`. */
-    private fun parseBlock(c: Ctx, term: Term): ParsedBlock {
+    private fun parseBlock(c: Ctx, depth: Int): ParsedBlock {
+        ensureDepth(c, depth)
+        val openSpan = c.currentSpan()
         c.pos += 1
-        return parseBlockContents(c, c.pos, term)
+        return parseBlockContents(c, c.pos, Term.RBrace(openSpan), depth)
     }
 
-    /** Содержимое блока: записи до `}` (или до конца файла). */
-    private fun parseBlockContents(c: Ctx, startPos: Int, term: Term): ParsedBlock {
+    private fun parseBlockContents(
+        c: Ctx,
+        startPos: Int,
+        term: Term,
+        depth: Int,
+    ): ParsedBlock {
         c.pos = startPos
         val block = Block()
         var pendingComment: String? = null
@@ -55,27 +58,27 @@ object KorenParser {
         while (true) {
             while (true) {
                 skipNewlines(c)
-                val k = c.peekKind()
-                if (k is KorenTokenKind.Comment) {
+                val kind = c.peekKind()
+                if (kind is KorenTokenKind.Comment) {
                     c.pos += 1
-                    pendingComment = when (val prev = pendingComment) {
-                        null -> k.text
-                        else -> "$prev\n${k.text}"
+                    pendingComment = when (val previous = pendingComment) {
+                        null -> kind.text
+                        else -> "$previous\n${kind.text}"
                     }
                     continue
                 }
                 break
             }
 
-            when (val k = c.peekKind()) {
+            when (c.peekKind()) {
                 null -> {
-                    if (term == Term.RBRACE) {
-                        c.err("не закрыт блок: ожидалось «}»")
+                    if (term is Term.RBrace) {
+                        c.errAt(term.openSpan, "не закрыт блок: ожидалось «}»")
                     }
                     return ParsedBlock(block, c.pos)
                 }
                 KorenTokenKind.RBrace -> {
-                    if (term == Term.RBRACE) {
+                    if (term is Term.RBrace) {
                         c.pos += 1
                         return ParsedBlock(block, c.pos)
                     }
@@ -84,196 +87,258 @@ object KorenParser {
                 else -> {}
             }
 
-            val entry = parseEntry(c, pendingComment)
+            val entry = parseEntry(c, pendingComment, depth)
             pendingComment = null
             block.entries += entry
         }
     }
 
-    /** Запись: `key [type] = value [# коммент]` или контейнер `key { ... }` / `key [ ... ]`. */
-    private fun parseEntry(c: Ctx, leadingComment: String?): Entry {
-        val start = c.peek()?.span ?: Span.ZERO
-
-        val key = when (val k = c.peekKind()) {
-            is KorenTokenKind.Word -> { c.pos += 1; k.w }
+    private fun parseEntry(c: Ctx, leadingComment: String?, depth: Int): Entry {
+        val start = c.currentSpan()
+        val key = when (val kind = c.peekKind()) {
+            is KorenTokenKind.Word -> {
+                c.pos += 1
+                kind.w
+            }
             else -> c.err("ожидался ключ")
         }
 
-        val ty = when (val k = c.peekKind()) {
+        val type = when (val kind = c.peekKind()) {
             is KorenTokenKind.Word -> {
-                val t = Type.fromWord(k.w)
-                if (t == null) {
-                    c.err("неизвестный тип «${k.w}» (доступны: str, int, float, bool, dict, array, block, ref)")
-                }
+                val parsed = Type.fromWord(kind.w)
+                    ?: c.err("неизвестный тип «${kind.w}» (доступны: str, int, float, bool, dict, array, block, ref)")
                 c.pos += 1
-                t
+                parsed
             }
             else -> null
         }
 
-        when (val k = c.peekKind()) {
+        return when (c.peekKind()) {
             KorenTokenKind.Assign -> {
                 c.pos += 1
-                val value = parseValue(c)
-                val comment = trailingComment(c) ?: leadingComment
-                checkValueType(value, ty, start)
+                val value = parseValue(c, depth)
+                checkValueType(value, type, start)
                 requireLineEnd(c)
-                return Entry(key, ty, value, comment, start)
+                Entry(
+                    key = key,
+                    ty = type,
+                    value = value,
+                    comment = mergeComments(leadingComment, trailingComment(c)),
+                    span = start,
+                )
             }
             KorenTokenKind.LBrace -> {
-                val value = VBlock(parseBlock(c, Term.RBRACE).block)
-                checkValueType(value, ty, start)
-                val comment = trailingComment(c) ?: leadingComment
+                val value = Value.VBlock(parseBlock(c, depth + 1).block)
+                checkValueType(value, type, start)
                 requireLineEnd(c)
-                return Entry(key, ty, value, comment, start)
+                Entry(
+                    key = key,
+                    ty = type,
+                    value = value,
+                    comment = mergeComments(leadingComment, trailingComment(c)),
+                    span = start,
+                )
             }
             KorenTokenKind.LBracket -> {
-                val value = parseArray(c)
-                checkValueType(value, ty, start)
-                val comment = trailingComment(c) ?: leadingComment
+                val value = parseArray(c, depth + 1)
+                checkValueType(value, type, start)
                 requireLineEnd(c)
-                return Entry(key, ty, value, comment, start)
+                Entry(
+                    key = key,
+                    ty = type,
+                    value = value,
+                    comment = mergeComments(leadingComment, trailingComment(c)),
+                    span = start,
+                )
             }
             else -> c.err("ожидалось «=», «{» или «[» после ключа")
         }
     }
 
-    /** Значение в позиции `= ...` или внутри словаря/массива. */
-    private fun parseValue(c: Ctx): Value {
-        return when (val k = c.peekKind()) {
-            is KorenTokenKind.Str -> { c.pos += 1; Value.VStr(k.s) }
-            is KorenTokenKind.Int -> { c.pos += 1; Value.VInt(k.i) }
-            is KorenTokenKind.Float -> { c.pos += 1; Value.VFloat(k.f) }
-            is KorenTokenKind.Bool -> { c.pos += 1; Value.VBool(k.b) }
-            KorenTokenKind.LBrace -> parseDict(c)
-            KorenTokenKind.LBracket -> parseArray(c)
-            // Слово: имя функции с `(` или абсолютный путь (`server.host`).
+    private fun parseValue(c: Ctx, depth: Int): Value {
+        ensureDepth(c, depth)
+        return when (val kind = c.peekKind()) {
+            is KorenTokenKind.Str -> {
+                c.pos += 1
+                Value.VStr(kind.s)
+            }
+            is KorenTokenKind.Int -> {
+                c.pos += 1
+                Value.VInt(kind.i)
+            }
+            is KorenTokenKind.Float -> {
+                c.pos += 1
+                Value.VFloat(kind.f)
+            }
+            is KorenTokenKind.Bool -> {
+                c.pos += 1
+                Value.VBool(kind.b)
+            }
+            KorenTokenKind.LBrace -> parseDict(c, depth + 1)
+            KorenTokenKind.LBracket -> parseArray(c, depth + 1)
             is KorenTokenKind.Word -> {
                 if (c.tokens.getOrNull(c.pos + 1)?.kind is KorenTokenKind.LParen) {
-                    parseFuncCall(c)
+                    parseFunction(c, depth)
                 } else {
-                    VRef(parsePath(c))
+                    Value.VRef(parsePath(c))
                 }
             }
-            // Ведущая точка — относительный путь.
-            KorenTokenKind.Dot -> VRef(parsePath(c))
-            else -> c.err("ожидалось значение, найдено: ${k ?: "конец файла"}")
+            KorenTokenKind.Dot -> Value.VRef(parsePath(c))
+            else -> c.err("ожидалось значение, найдено: ${kind ?: "конец файла"}")
         }
     }
 
-    /** Вызов функции: `name(арг, арг, ...)` → [VFunc]. */
-    private fun parseFuncCall(c: Ctx): Value {
-        val start = c.peek()?.span ?: Span.ZERO
+    private fun parseFunction(c: Ctx, depth: Int): VFunc {
+        ensureDepth(c, depth)
+        val span = c.currentSpan()
         val name = (c.peekKind() as KorenTokenKind.Word).w
-        c.pos += 1 // имя
-        c.pos += 1 // LParen
-
-        skipNewlinesAndComments(c)
+        c.pos += 2
         val args = mutableListOf<Value>()
-        if (c.peekKind() !is KorenTokenKind.RParen) {
-            while (true) {
-                args += parseValue(c)
-                skipNewlinesAndComments(c)
-                when (val after = c.peekKind()) {
-                    KorenTokenKind.Comma -> {
-                        c.pos += 1
-                        skipNewlinesAndComments(c)
-                        if (c.peekKind() is KorenTokenKind.RParen) {
-                            c.err("ожидалось значение после «,» в вызове «$name(...)»")
-                        }
-                    }
-                    KorenTokenKind.RParen -> { c.pos += 1; break }
-                    else -> c.err("ожидалась «,» или «)» в вызове «$name(...)», найдено: $after")
-                }
-            }
-        } else {
-            c.pos += 1 // RParen
-        }
-        return VFunc(name, args, start)
-    }
 
-    /** Словарь: `{ key: value, key: value }` — запятые обязательны. */
-    private fun parseDict(c: Ctx): Value {
-        c.pos += 1 // LBrace
-        val pairs = mutableListOf<Pair<String, Value>>()
         while (true) {
             skipNewlinesAndComments(c)
-            when (val k = c.peekKind()) {
-                KorenTokenKind.RBrace -> { c.pos += 1; return VDict(pairs) }
-                KorenTokenKind.Comma -> { c.pos += 1; continue }
-                is KorenTokenKind.Word -> {
-                    // parseDictKeyDot уже сдвинул позицию мимо всех сегментов ключа.
-                    val key = buildString { append(k.w); parseDictKeyDot(c, this) }
-                    when (val sep = c.peekKind()) {
-                        KorenTokenKind.Colon, KorenTokenKind.Assign -> c.pos += 1
-                        else -> c.err("ожидалось «:» или «=» после ключа «$key» в словаре")
-                    }
-                    val value = parseValue(c)
-                    pairs += key to value
-
-                    skipNewlinesAndComments(c)
-                    when (val after = c.peekKind()) {
-                        KorenTokenKind.Comma -> c.pos += 1
-                        KorenTokenKind.RBrace -> {}
-                        else -> c.err("ожидалась «,» или «}» после пары словаря, найдено: $after")
-                    }
-                }
-                else -> c.err("ожидался ключ словаря, найдено: ${k ?: "конец файла"}")
-            }
-        }
-    }
-
-    /** Дочитать хвост ключа после точки: `biome.temperature` → «biome.temperature». */
-    private fun parseDictKeyDot(c: Ctx, acc: StringBuilder): Boolean {
-        c.pos += 1 // уже прочитанные Word — счётчик на него
-        var more = false
-        while (c.peekKind() is KorenTokenKind.Dot) {
-            c.pos += 1 // Dot
-            when (val seg = c.peekKind()) {
-                is KorenTokenKind.Word -> {
-                    acc.append('.').append(seg.w)
+            when (c.peekKind()) {
+                KorenTokenKind.RParen -> {
                     c.pos += 1
-                    more = true
+                    return VFunc(name, args, span)
                 }
-                else -> c.err("ожидался сегмент пути после «.» в ключе словаря")
-            }
-        }
-        return more
-    }
-
-    /** Массив: `[ значение, значение ]` — запятые обязательны. */
-    private fun parseArray(c: Ctx): Value {
-        c.pos += 1 // LBracket
-        val items = mutableListOf<Value>()
-        while (true) {
-            skipNewlinesAndComments(c)
-            when (val k = c.peekKind()) {
-                KorenTokenKind.RBracket -> { c.pos += 1; return VArray(items) }
-                KorenTokenKind.Comma -> { c.pos += 1; continue }
+                KorenTokenKind.Comma -> c.err("лишняя «,» в аргументах функции")
                 else -> {}
             }
 
-            items += parseValue(c)
-
+            args += parseValue(c, depth)
             skipNewlinesAndComments(c)
             when (val after = c.peekKind()) {
-                KorenTokenKind.Comma -> c.pos += 1
-                KorenTokenKind.RBracket -> {}
+                KorenTokenKind.RParen -> {
+                    c.pos += 1
+                    return VFunc(name, args, span)
+                }
+                KorenTokenKind.Comma -> {
+                    c.pos += 1
+                    skipNewlinesAndComments(c)
+                    if (c.peekKind() is KorenTokenKind.RParen) {
+                        c.pos += 1
+                        return VFunc(name, args, span)
+                    }
+                    if (c.peekKind() is KorenTokenKind.Comma) {
+                        c.err("лишняя «,» в аргументах функции")
+                    }
+                }
+                else -> c.err("ожидалась «,» или «)» после аргумента функции, найдено: $after")
+            }
+        }
+    }
+
+    private fun parseDict(c: Ctx, depth: Int): Value {
+        ensureDepth(c, depth)
+        c.pos += 1
+        val pairs = mutableListOf<Pair<String, Value>>()
+
+        while (true) {
+            skipNewlinesAndComments(c)
+            when (val kind = c.peekKind()) {
+                KorenTokenKind.RBrace -> {
+                    c.pos += 1
+                    return Value.VDict(pairs)
+                }
+                KorenTokenKind.Comma -> c.err("лишняя «,» в словаре")
+                is KorenTokenKind.Word -> {
+                    c.pos += 1
+                    val key = parseDictKey(c, kind.w)
+                    when (c.peekKind()) {
+                        KorenTokenKind.Colon, KorenTokenKind.Assign -> c.pos += 1
+                        else -> c.err(
+                            "ожидалось «:» или «=» после ключа «$key» в словаре, найдено: ${c.peekKind()}",
+                        )
+                    }
+                    pairs += key to parseValue(c, depth)
+
+                    skipNewlinesAndComments(c)
+                    when (val after = c.peekKind()) {
+                        KorenTokenKind.Comma -> {
+                            c.pos += 1
+                            skipNewlinesAndComments(c)
+                            if (c.peekKind() is KorenTokenKind.RBrace) {
+                                c.pos += 1
+                                return Value.VDict(pairs)
+                            }
+                            if (c.peekKind() is KorenTokenKind.Comma) {
+                                c.err("лишняя «,» в словаре")
+                            }
+                        }
+                        KorenTokenKind.RBrace -> {
+                            c.pos += 1
+                            return Value.VDict(pairs)
+                        }
+                        else -> c.err("ожидалась «,» или «}» после пары словаря, найдено: $after")
+                    }
+                }
+                else -> c.err("ожидался ключ словаря, найдено: ${kind ?: "конец файла"}")
+            }
+        }
+    }
+
+    private fun parseDictKey(c: Ctx, first: String): String {
+        val key = StringBuilder(first)
+        while (c.peekKind() is KorenTokenKind.Dot) {
+            if (c.tokens.getOrNull(c.pos + 1)?.kind !is KorenTokenKind.Word) {
+                c.err("после «.» ожидался сегмент пути")
+            }
+            key.append('.').append((c.tokens[c.pos + 1].kind as KorenTokenKind.Word).w)
+            c.pos += 2
+        }
+        return key.toString()
+    }
+
+    private fun parseArray(c: Ctx, depth: Int): Value {
+        ensureDepth(c, depth)
+        c.pos += 1
+        val items = mutableListOf<Value>()
+
+        while (true) {
+            skipNewlinesAndComments(c)
+            when (c.peekKind()) {
+                KorenTokenKind.RBracket -> {
+                    c.pos += 1
+                    return Value.VArray(items)
+                }
+                KorenTokenKind.Comma -> c.err("лишняя «,» в массиве")
+                else -> {}
+            }
+
+            items += parseValue(c, depth)
+            skipNewlinesAndComments(c)
+            when (val after = c.peekKind()) {
+                KorenTokenKind.Comma -> {
+                    c.pos += 1
+                    skipNewlinesAndComments(c)
+                    if (c.peekKind() is KorenTokenKind.RBracket) {
+                        c.pos += 1
+                        return Value.VArray(items)
+                    }
+                    if (c.peekKind() is KorenTokenKind.Comma) {
+                        c.err("лишняя «,» в массиве")
+                    }
+                }
+                KorenTokenKind.RBracket -> {
+                    c.pos += 1
+                    return Value.VArray(items)
+                }
                 else -> c.err("ожидалась «,» или «]» после элемента массива, найдено: $after")
             }
         }
     }
 
-    /** Пропустить переводы строк и комментарии (в массивах и словарях). */
     private fun skipNewlinesAndComments(c: Ctx) {
-        while (c.peekKind() is KorenTokenKind.Newline || c.peekKind() is KorenTokenKind.Comment) c.pos += 1
+        while (c.peekKind() is KorenTokenKind.Newline || c.peekKind() is KorenTokenKind.Comment) {
+            c.pos += 1
+        }
     }
 
     private fun skipNewlines(c: Ctx) {
         while (c.peekKind() is KorenTokenKind.Newline) c.pos += 1
     }
 
-    /** Ссылка: `server.token[1]`, `server1.host`, `.shared.host`. */
     private fun parsePath(c: Ctx): Path {
         val segments = mutableListOf<String>()
         val indices = mutableListOf<Int?>()
@@ -288,9 +353,9 @@ object KorenParser {
         }
 
         while (true) {
-            when (val k = c.peekKind()) {
+            when (val kind = c.peekKind()) {
                 is KorenTokenKind.Word -> {
-                    segments += k.w
+                    segments += kind.w
                     indices += null
                     c.pos += 1
                 }
@@ -305,21 +370,24 @@ object KorenParser {
                     val next = c.tokens.getOrNull(c.pos + 1)?.kind
                     if (next is KorenTokenKind.Int && next.i > 0) {
                         c.pos += 2
-                        if (c.peekKind() is KorenTokenKind.RBracket) {
-                            if (indices.isNotEmpty()) {
-                                indices[indices.lastIndex] = next.i.toInt()
-                                c.pos += 1
-                                break
-                            }
+                        if (c.peekKind() !is KorenTokenKind.RBracket) {
+                            c.err("ожидалась «]» после номера")
+                        }
+                        if (indices.isEmpty()) {
                             c.err("номер [n] не к чему применить")
                         }
-                        c.err("ожидалась «]» после номера")
+                        if (next.i > Int.MAX_VALUE) {
+                            c.err("номер в пути слишком велик для этой платформы")
+                        }
+                        indices[indices.lastIndex] = next.i.toInt()
+                        c.pos += 1
+                        break
                     }
                     c.err("в пути ожидался номер [n] начиная с 1")
                 }
                 else -> {
                     if (segments.isEmpty()) {
-                        c.err("ожидалось слово пути, найдено: ${k ?: "конец файла"}")
+                        c.err("ожидалось слово пути, найдено: ${kind ?: "конец файла"}")
                     }
                     break
                 }
@@ -330,32 +398,38 @@ object KorenParser {
             c.err("номер [n] в середине пути: используйте форму «server1.port» (номер после имени)")
         }
         if (segments.isEmpty()) c.err("пустой путь ссылки")
-
         return Path(segments, indices, absolute)
     }
 
-    /** Комментарий сразу после значения (до конца строки). */
     private fun trailingComment(c: Ctx): String? {
-        val k = c.peekKind()
-        if (k is KorenTokenKind.Comment) {
+        val kind = c.peekKind()
+        if (kind is KorenTokenKind.Comment) {
             c.pos += 1
-            return k.text
+            return kind.text
         }
         return null
     }
 
-    /** После записи допустимы только: конец строки, конец блока, конец файла. */
+    private fun mergeComments(leading: String?, trailing: String?): String? = when {
+        leading != null && trailing != null -> "$leading\n$trailing"
+        else -> leading ?: trailing
+    }
+
     private fun requireLineEnd(c: Ctx) {
-        when (val k = c.peekKind()) {
-            null, is KorenTokenKind.Newline, is KorenTokenKind.RBrace, is KorenTokenKind.RBracket, is KorenTokenKind.Comment -> {}
-            else -> c.err("ожидался конец строки, найдено: $k")
+        when (c.peekKind()) {
+            null,
+            is KorenTokenKind.Newline,
+            is KorenTokenKind.RBrace,
+            is KorenTokenKind.RBracket,
+            is KorenTokenKind.Comment,
+            -> {}
+            else -> c.err("ожидался конец строки, найдено: ${c.peekKind()}")
         }
     }
 
-    /** Явный тип должен совпадать с фактическим значением. `ref` и функции проверяет резолвер. */
-    private fun checkValueType(value: Value, ty: Type?, span: Span) {
-        val t = ty ?: return
-        val matches = when (t) {
+    private fun checkValueType(value: Value, type: Type?, span: Span) {
+        if (value is VFunc || type == null) return
+        val matches = when (type) {
             Type.STR -> value is Value.VStr
             Type.INT -> value is Value.VInt
             Type.FLOAT -> value is Value.VFloat || value is Value.VInt
@@ -363,12 +437,19 @@ object KorenParser {
             Type.DICT -> value is Value.VDict
             Type.ARRAY -> value is Value.VArray
             Type.BLOCK -> value is Value.VBlock
-            Type.REF -> true // проверит резолвер
+            Type.REF -> value is Value.VRef
         }
-        // Функция считается совместимой с любым типом: результат проверяется в резолвере.
-        if (!matches && value is VFunc) return
         if (!matches) {
-            throw CrenError.TypeMismatch(t.word, value.kind, span)
+            throw CrenError.TypeMismatch(type.word, value.kind, span)
+        }
+    }
+
+    private fun ensureDepth(c: Ctx, depth: Int) {
+        if (depth > MAX_NESTING_DEPTH) {
+            throw CrenError.Parse(
+                "превышен предел вложенности: максимум $MAX_NESTING_DEPTH",
+                c.currentSpan(),
+            )
         }
     }
 }
