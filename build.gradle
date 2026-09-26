@@ -119,6 +119,45 @@ processResources {
 	}
 }
 
+// Публикация собранного jar в artifacts/ под стабильным именем
+// capecraft-<version>-<mc>.jar.
+//
+// Зачем: сборка писала только в build/<mc>/libs/, а artifacts/ оставался от
+// прошлого раза молча. Именно так в mods/ попал jar трёхнедельной давности
+// без StackedPngDecoder: мод запускался, показывал плащ и растягивал стек на
+// всю текстуру, а сборка при этом была «успешной». Ставить нужно артефакт
+// свежей сборки, поэтому он публикуется автоматически и не может устареть.
+def artifactDir = layout.projectDirectory.dir('artifacts')
+def artifactName = "capecraft-${project.mod_version}-${mc}.jar"
+
+tasks.register('publishArtifact') {
+	group = 'build'
+	description = "Копирует собранный jar в artifacts/${artifactName}"
+
+	doLast {
+		def libs = layout.buildDirectory.dir('libs').get().asFile
+		// Основной выход: <archives_base_name>-<version>.jar. У yarn-версий
+		// loom может добавить классификатор, поэтому берём первый же jar без
+		// -sources, но только если он один — иначе молча угадывать нельзя.
+		def sources = new File(libs, "${project.archives_base_name}-${project.version}.jar")
+		def candidates = (libs.listFiles() ?: []).findAll {
+			it.name.endsWith('.jar') && !it.name.endsWith('-sources.jar') &&
+				!it.name.endsWith('-dev.jar') && !it.name.endsWith('-javadoc.jar')
+		}
+		def src = candidates.size() == 1 ? candidates.first() : sources
+		if (src == null || !src.isFile()) {
+			throw new GradleException(
+				"Не найден jar для публикации в ${libs}. Найдено: ${candidates*.name}")
+		}
+		artifactDir.asFile.mkdirs()
+		def out = new File(artifactDir.asFile, artifactName)
+		out.bytes = src.bytes
+		logger.lifecycle("jar → artifacts/${artifactName} (из ${src.name})")
+	}
+}
+
+tasks.named('assemble') { finalizedBy('publishArtifact') }
+
 // `clean` базового плагина чистит только build/<mc> (см. buildDirectory выше).
 // cleanAll — снести выходы сразу всех версий.
 tasks.register('cleanAll', Delete) {
