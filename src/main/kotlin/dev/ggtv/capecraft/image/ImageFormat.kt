@@ -2,7 +2,7 @@ package dev.ggtv.capecraft.image
 
 /** Формат изображения, определённый по сигнатуре. */
 enum class ImageFormat {
-    PNG, GIF, WEBP;
+    PNG, GIF, WEBP, STACKED_PNG;
 
     companion object {
         private val PNG_SIG = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)
