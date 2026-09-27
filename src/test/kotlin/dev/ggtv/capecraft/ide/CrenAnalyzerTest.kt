@@ -293,6 +293,47 @@ class CrenAnalyzerTest {
     }
 
     @Test
+    fun `подсказка сразу после равно без значения даёт значения поля`() {
+        // `type = |` и `enabled = |` — самый частый момент ввода: человек
+        // набрал ключ и разделитель, а значения ещё нет. Раньше запись без
+        // значения не находилась вовсе, и подсказки уезжали в соседние ключи
+        // блока: список предлагал вставить ключ туда, где пишется значение.
+        val enum = """capeCraft { providers [ { name = "a", type = | } ] }"""
+        val atEnum = enum.indexOf('|')
+        val labels = CrenAnalyzer.complete(CrenDocument(enum), atEnum).map { it.label }
+        assertTrue(
+            labels.containsAll(listOf("url", "json", "file")),
+            "у type значения-перечисления, а не ключи провайдера: $labels",
+        )
+
+        val bool = "capeCraft { serverSync { enabled = | } }"
+        val atBool = bool.indexOf('|')
+        val boolLabels = CrenAnalyzer.complete(CrenDocument(bool), atBool).map { it.label }
+        assertEquals(
+            listOf("true", "false"),
+            boolLabels,
+            "у enabled ровно два значения, без кавычек",
+        )
+    }
+
+    @Test
+    fun `на пустой строке между записями предлагаются ключи а не значения`() {
+        // Обратная сторона: заканчивается запятой — значит запись закрыта, и
+        // курсор уже не в её значении. Здесь нужны ключи, иначе подсказка
+        // значений встанет не туда.
+        val text = "capeCraft { providers [ {\n    name = \"a\",\n    |\n} ] }"
+        val labels = CrenAnalyzer.complete(CrenDocument(text), text.indexOf('|')).map { it.label }
+        assertTrue(
+            labels.containsAll(listOf("type", "url", "path")),
+            "после запятой нужны ключи записи провайдера: $labels",
+        )
+        assertFalse(
+            labels.contains("json"),
+            "json — это значение type, а не ключ; тут он лишний: $labels",
+        )
+    }
+
+    @Test
     fun `подсказки в when дают корни условий`() {
         val text = "capeCraft { providers [ { name = \"a\", type = \"url\", when = { | } } ] }"
         val items = CrenAnalyzer.complete(CrenDocument(text), text.indexOf('|'))

@@ -675,7 +675,20 @@ object CrenAnalyzer {
         return located
             .filter { doc.offsetOf(it.entry.keyRange.end) <= limit }
             .lastOrNull { entry ->
-                doc.text.substring(doc.offsetOf(entry.entry.keyRange.end), limit).all { it.isWhitespace() }
+                val between = doc.text.substring(doc.offsetOf(entry.entry.keyRange.end), limit)
+                if (between.all { it.isWhitespace() }) return@lastOrNull true
+                // `enabled = |`: разделитель уже стоит, а значения ещё нет.
+                // Без этой ветки запись не находится вовсе, и подсказки уезжают
+                // в соседние ключи блока — то есть предлагают вставить ключ
+                // туда, где человек пишет значение.
+                if (entry.entry.value != null) return@lastOrNull false
+                // Запятая и перевод строки означают, что запись закончилась и
+                // курсор стоит уже после неё: там нужны ключи контейнера.
+                if (between.contains(',') || between.contains('\n')) return@lastOrNull false
+                when (between.trim()) {
+                    "=", ":" -> true
+                    else -> false
+                }
             }
     }
 
@@ -723,11 +736,24 @@ object CrenAnalyzer {
     private fun atValuePosition(doc: CrenDocument, offset: Int, e: CrenEntry): Boolean {
         val from = doc.offsetOf(e.keyRange.end)
         if (from > offset) return false
-        if (!doc.contains(e.range, offset)) return false
         val between = doc.text.substring(from, offset)
-        if (between.contains('=') || between.contains(':')) return true
         val v = e.value
-        return v != null && doc.offsetOf(v.range.start) <= offset
+        if (v == null) {
+            // Значения ещё нет, и запись на этом обрывается. Проверка
+            // «внутри диапазона записи» здесь не годится: у записи без
+            // значения диапазон кончается на ключе, и `type = |` уезжал в
+            // подсказки соседних ключей — то есть предлагал вставить ключ
+            // туда, где человек пишет значение.
+            //
+            // Запятая и перевод строки означают, что запись уже закончилась и
+            // курсор стоит между записями, а не внутри значения: там нужны
+            // ключи.
+            if (between.contains(',') || between.contains('\n')) return false
+            return between.contains('=') || between.contains(':')
+        }
+        if (!doc.contains(e.range, offset)) return false
+        if (between.contains('=') || between.contains(':')) return true
+        return doc.offsetOf(v.range.start) <= offset
     }
 
     /**
@@ -807,14 +833,32 @@ object CrenAnalyzer {
         val field = ConfigSchema.childrenOf(owner.path.dropLast(1))
             .firstOrNull { it.name == key }
             ?: return null
-        if (field.allowed.isEmpty()) return null
-        return field.allowed.map {
-            CrenCompletion(
-                label = it,
-                insertText = "\"$it\"",
-                kind = CompletionKind.VALUE,
-            )
+        if (field.allowed.isNotEmpty()) {
+            return field.allowed.map {
+                CrenCompletion(
+                    label = it,
+                    insertText = "\"$it\"",
+                    kind = CompletionKind.VALUE,
+                )
+            }
         }
+        // Перечисление есть не у всех полей, но у булева — по сути всегда.
+        // Без этого `enabled = |` предлагал соседние ключи блока: полезного
+        // там ничего, а `true`/`false` — ровно то, что нужно дописать.
+        if (field.type == SchemaType.BOOL) {
+            return listOf("true", "false").map {
+                CrenCompletion(
+                    label = it,
+                    detail = "флажок, без кавычек",
+                    insertText = it,
+                    kind = CompletionKind.VALUE,
+                )
+            }
+        }
+        // Остальные типы перечислить нельзя: целое, дробное и строка — это
+        // бесконечное множество. `null`, а не пустой список: список уводил бы
+        // на ключи контейнера, но хотя бы не врал, что значений нет.
+        return null
     }
 
     private fun typeCompletions(): List<CrenCompletion> = KNOWN_TYPE_WORDS.map {

@@ -67,6 +67,32 @@ class CrenDocument(val text: String) {
         return (start + character).coerceIn(start, end)
     }
 
+    /**
+     * Смещение по позиции, присланной клиентом (LSP).
+     *
+     * Отдельный метод, а не [offsetOf], потому что считает по-другому.
+     * Внутренние смещения — свои, из своих же Span, и там «колонка» это
+     * всегда кодпоинт. Клиент же считает колонку в UTF-16 code unit, как
+     * велит протокол: символ за пределами BMP (эмодзи, редкие иероглифы) там
+     * это две единицы, а здесь один. Сложив их напрямую, мы сдвинули бы
+     * курсор на символ назад — подсказка пришла бы не на тот ключ, и выглядело
+     * бы как «анализатор путает ключи».
+     */
+    fun offsetOfClientPosition(line: Int, character: Int): Int? {
+        if (line < 0 || character < 0 || line >= lineCount) return null
+        val start = lineStart(line)
+        val end = lineEnd(line)
+        val slice = text.substring(start, end)
+        var units = 0
+        var i = 0
+        while (i < slice.length && units < character) {
+            val size = Character.charCount(slice.codePointAt(i))
+            units += size
+            i += size
+        }
+        return (start + i).coerceIn(start, end)
+    }
+
     /** Смещение в 1-based [Span] — так уже считает сканер. */
     fun offsetOf(span: Span): Int = offsetOf(span.line - 1, span.col - 1)
 
