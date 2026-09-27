@@ -313,6 +313,61 @@ class ResolveCapeWorldTest {
         )
         assertEquals(listOf("https://def"), byProvider)
     }
+
+    @Test
+    fun `time alias dawn and dusk map to real periods`() {
+        // «dawn»/«dusk» — человеческие слова, а мир отдаёт sunrise/sunset.
+        // Пока алиас не переводил их, условие молча не совпадало никогда.
+        val dawn = Condition.parse(dictOf("time" to str("dawn"))).predicates.single()
+        assertEquals(Expected.Str("sunrise"), dawn.expected)
+
+        val dusk = Condition.parse(dictOf("time" to str("dusk"))).predicates.single()
+        assertEquals(Expected.Str("sunset"), dusk.expected)
+
+        assertTrue(
+            Condition.parse(dictOf("time" to str("dawn")))
+                .matches(FakeWorld(mapOf("time.period" to str("sunrise")))),
+        )
+        assertTrue(
+            Condition.parse(dictOf("time" to str("dusk")))
+                .matches(FakeWorld(mapOf("time.period" to str("sunset")))),
+        )
+    }
+
+    @Test
+    fun `live fields list what world contexts really serve`() {
+        // Этот список — документация в коде. Если в world-контексте появится
+        // новое поле, тест напомнит внести его сюда.
+        assertEquals(
+            listOf("id", "temperature", "precipitation"),
+            Condition.LIVE_FIELDS[WorldRoot.BIOME],
+        )
+        assertEquals(listOf("x", "y", "z"), Condition.LIVE_FIELDS[WorldRoot.LOCATION])
+    }
+
+    @Test
+    fun `location without field lists real fields instead of inventing one`() {
+        val e = assertThrows(IllegalArgumentException::class.java) {
+            Condition.parse(dictOf("location" to str("y")))
+        }
+        // Раньше в тексте ошибки было «location.id» — такого поля не бывает.
+        assertFalse(e.message!!.contains("location.id"))
+        assertTrue(e.message!!.contains("x, y, z"))
+    }
+
+    @Test
+    fun `biome conditions match against real fields`() {
+        val snowy = FakeWorld(
+            mapOf(
+                "biome.id" to str("minecraft:snowy_plains"),
+                "biome.precipitation" to str("snow"),
+            ),
+        )
+        assertTrue(Condition.parse(dictOf("biome" to str("snowy"))).matches(snowy))
+        assertTrue(Condition.parse(dictOf("biome" to str("snow"))).matches(snowy))
+        assertTrue(Condition.parse(dictOf("biome.id" to str("minecraft:snowy_plains"))).matches(snowy))
+        assertFalse(Condition.parse(dictOf("biome" to str("rain"))).matches(snowy))
+    }
 }
 
 /** [WorldContext], где ничего нет. */

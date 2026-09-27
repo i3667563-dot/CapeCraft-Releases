@@ -39,16 +39,98 @@
 capeCraft {
     providers [
         # Прямая ссылка на картинку
-        { name = "example", type = "url", url = "https://example.com/capes/{username}.png" }
+        { name = "example", type = "url", url = "https://example.com/capes/{username}.png" },
 
         # JSON-API: извлекаем URL из ответа по пути
-        { name = "api", type = "json", url = "https://api.example.com/cape?u={username}", extract = "$.data.cape_url" }
+        { name = "api", type = "json", url = "https://api.example.com/cape?u={username}", extract = "$.data.cape_url" },
 
         # Локальный файл
         { name = "local", type = "file", path = "{root}/capes/{uuid}.png" }
     ]
 }
 ```
+
+### Условия `when`
+
+Плащ не обязательно один. У провайдера может быть блок `when` — тогда он
+работает только в подходящих обстоятельствах, а в остальное время мод берёт
+следующий по списку.
+
+```
+capeCraft {
+    providers [
+        { name = "rain",  type = "url", url = "https://example.com/rain.png",
+          when = { weather: "rain" } },
+
+        { name = "night", type = "url", url = "https://example.com/night.png",
+          when = { time.period: "night", dimension: "overworld" } },
+
+        { name = "deep",  type = "url", url = "https://example.com/deep.png",
+          when = { location.y: ">-20" }, priority = 10 },
+
+        { name = "default", type = "url", url = "https://example.com/{username}.png" }
+    ]
+}
+```
+
+**Что доступно.** Ключ условия — `корень.поле`, значение — что ждём увидеть:
+
+| Корень | Поле | Что отдаёт | Поле по умолчанию |
+|---|---|---|---|
+| `biome` | `id` | id биома, например `minecraft:snowy_plains` | `id` |
+| `biome` | `temperature` | базовая температура, число | — |
+| `biome` | `precipitation` | `snow` / `rain` / `none` | — |
+| `weather` | `condition` | `clear` / `rain` / `thunder` | `condition` |
+| `time` | `period` | `day` / `sunset` / `night` / `sunrise` | `period` |
+| `time` | `tick` | время суток в тиках, число | — |
+| `dimension` | `type` | `overworld` / `nether` / `end` | `type` |
+| `dimension` | `id` | полный id, например `minecraft:the_nether` | — |
+| `location` | `x`, `y`, `z` | координаты, число | нет, писать обязательно |
+
+**Операторы** живут в значении:
+
+| Значение | Смысл |
+|---|---|
+| `"snowy_plains"` | равно |
+| `"!rain"` | не равно |
+| `">63"`, `">=63"`, `"<100"`, `"<=100"` | числовое сравнение |
+| `"63..80"` | диапазон включительно |
+
+**Короткая запись.** Если поле опустить, работают синонимы: `when { weather: "rain" }`
+— то же, что `weather.condition: "rain"`.
+
+| Коротко | Разворачивается в |
+|---|---|
+| `biome: "snowy"`, `"snow"`, `"frozen"` | `biome.precipitation: "snow"` |
+| `biome: "rain"`, `"rainy"` | `biome.precipitation: "rain"` |
+| `weather: "clear"`, `"fair"` | `weather.condition: "clear"` |
+| `weather: "rain"`, `"rainy"` | `weather.condition: "rain"` |
+| `weather: "thunder"`, `"storm"` | `weather.condition: "thunder"` |
+| `time: "day"` | `time.period: "day"` |
+| `time: "dawn"`, `"sunrise"` | `time.period: "sunrise"` |
+| `time: "dusk"`, `"sunset"` | `time.period: "sunset"` |
+| `time: "night"`, `"midnight"` | `time.period: "night"` |
+| `dimension: "overworld"` | `dimension.type: "overworld"` |
+| `dimension: "nether"`, `"the_nether"` | `dimension.type: "nether"` |
+| `dimension: "end"`, `"the_end"` | `dimension.type: "end"` |
+
+**Все условия внутри блока соединяются по И.** Пустой `when { }` — «всегда».
+
+**Чьи условия считаются.** Для своего плаща — по твоему миру. Для чужого — по
+миру того, кого ты видишь: объявленный набор функций принадлежит ему, поэтому
+«джунглевый» плащ показывается только тем, кто смотрит действительно из джунглей,
+а не всем подряд.
+
+**Недоступное поле — это «не подошло», а не ошибка.** Если сущности нет (плащ
+ещё не загружен) или поле временно недоступно, условие просто не выполняется.
+Опечатки, наоборот, ловятся сразу при загрузке конфига: неизвестный корень,
+слишком глубокий путь вроде `time.period.extra` или `location` без поля — понятное
+сообщение с перечнем доступного.
+
+**Кто выигрывает.** Сначала провайдеры, чьи условия выполнились, из них — с
+большим `priority` (по умолчанию `0`, при равном — порядок в списке). Потом
+провайдеры вовсе без `when`. Поэтому дефолтный провайдер с `when` не нужен:
+достаточно последнего в списке.
 
 ### Плейсхолдеры
 
@@ -109,6 +191,46 @@ serverSync {
 Сервер проверяет форму объявлений и лимиты, но не решает, кто что носит: он не
 сверяет картинку с объявлением и не хранит игроков после рестарта. Правду
 объявления проверяет каждый клиент сам — отсюда и `allowForeignUrls`.
+
+### Переменные окружения в `.kn`
+
+Любое значение можно взять из переменной окружения. Работает и в кавычках, и
+без них:
+
+```
+capeCraft {
+    providers [
+        { name = "cdn", type = "url",
+          url = "https://${CAPE_HOST:-cdn.example.com}/capes/{username}.png" },
+
+        { name = "api", type = "json",
+          url = "https://${CAPE_HOST}/cape?u={username}", extract = "$.data.url" }
+    ]
+}
+```
+
+| Запись | Поведение |
+|---|---|
+| `$NAME` | значение `NAME` |
+| `${NAME}` | то же самое, границы подстановки видны явно |
+| `${NAME:-дефолт}` | значение, а если переменной нет **или она пустая** — дефолт |
+| `${NAME-дефолт}` | дефолт только если переменной нет; пустая останется пустой |
+| `$$` | буквальный `$` |
+
+Без кавычек составное значение тоже работает, пока начинается с `$`:
+`url = ${HOST}/capes/${PORT}.png`. Если перед подстановкой есть свой текст —
+бери кавычки: `"a${HOST}b"`. Без кавычек такая запись не является значением и
+конфиг не загрузится.
+
+Незакрытая подстановка и несуществующая переменная — ошибка при загрузке
+конфига с указанием имени, а не молчаливая пустая строка.
+
+**Подстановка всегда даёт строку.** `maxFrames = "${CAPE_FRAMES}"` числом не
+станет: мод не сможет прочитать поле и напишет в лог, что ожидал число, что
+получил строку, и каким переопределением это правится. Для чисел и флагов
+нужны точечные переопределения из следующего раздела — `CAPECRAFT_LIMITS_MAXFRAMES`
+или `-DcapeCraft.limits.maxFrames=20`. Подстановка годится для строк: адресов,
+путей, имён провайдеров.
 
 ### Настройка через окружение и аргументы JVM
 

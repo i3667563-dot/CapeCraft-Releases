@@ -44,9 +44,16 @@ class ServerWorldContext(private val player: ServerPlayer) : WorldContext {
     }
 
     private fun biomeField(world: Level, field: String): Value {
-        val biome = world.biomeManager.getBiome(player.blockPosition()).value()
+        val pos = player.blockPosition()
+        val holder = world.biomeManager.getBiome(pos)
+        val biome = holder.value()
         return when (field) {
             "temperature" -> Value.VFloat(biome.getBaseTemperature().toDouble())
+            "id" -> holder.unwrapKey()
+                .map { Value.VStr(it.identifier().toString()) }
+                .orElse(Value.VStr("unknown"))
+            "precipitation" ->
+                Value.VStr(biome.getPrecipitationAt(pos, world.getSeaLevel()).name.lowercase())
             else -> Value.VStr("unknown")
         }
     }
