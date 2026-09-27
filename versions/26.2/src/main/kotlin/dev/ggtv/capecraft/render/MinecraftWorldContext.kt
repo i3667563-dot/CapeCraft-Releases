@@ -81,9 +81,15 @@ object MinecraftWorldContext : WorldContext {
 
 private fun biomeField(world: Level, entity: Entity?, field: String): Value {
     val pos = entity?.blockPosition() ?: return Value.VStr("unknown")
-    val biome = world.getBiomeManager().getBiome(pos).value()
+    val holder = world.getBiomeManager().getBiome(pos)
+    val biome = holder.value()
     return when (field) {
         "temperature" -> Value.VFloat(biome.getBaseTemperature().toDouble())
+        "id" -> holder.unwrapKey()
+            .map { Value.VStr(it.identifier().toString()) }
+            .orElse(Value.VStr("unknown"))
+        "precipitation" ->
+            Value.VStr(biome.getPrecipitationAt(pos, world.getSeaLevel()).name.lowercase())
         else -> Value.VStr("unknown")
     }
 }

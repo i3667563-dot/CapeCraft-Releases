@@ -70,9 +70,14 @@ class EntityWorldContext(private val entity: Entity?) : WorldContext {
 
 private fun biomeField(world: World, entity: Entity?, field: String): Value {
     val pos = entity?.blockPos ?: return Value.VStr("unknown")
-    val biome = world.getBiome(pos).value()
+    val holder = world.getBiome(pos)
+    val biome = holder.value()
     return when (field) {
         "temperature" -> Value.VFloat(biome.temperature.toDouble())
+        "id" -> holder.getKey()
+            .map { Value.VStr(it.value.toString()) }
+            .orElse(Value.VStr("unknown"))
+        "precipitation" -> Value.VStr(biome.getPrecipitation(pos).name.lowercase())
         else -> Value.VStr("unknown")
     }
 }

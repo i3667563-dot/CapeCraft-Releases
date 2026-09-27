@@ -28,12 +28,28 @@ data class Condition(val predicates: List<Predicate>) {
     fun matches(world: WorldContext): Boolean = predicates.all { it.matches(world) }
 
     companion object {
-        /** Поле по умолчанию для корня без точки (`when { biome: "snowy" }`). */
+        /** Поле по умолчанию для корня без точки (`when { weather: "rain" }`). */
         private val DEFAULT_FIELD = mapOf(
             WorldRoot.BIOME to "id",
             WorldRoot.WEATHER to "condition",
             WorldRoot.TIME to "period",
             WorldRoot.DIMENSION to "type",
+        )
+
+        /**
+         * Поля, которые живой мир действительно отдаёт.
+         *
+         * Держится в одном месте, потому что расходится с
+         * `DEFAULT_FIELD`: у `biome` поле по умолчанию — `id`, у `location`
+         * поля по умолчанию нет вовсе, и без этого списка ошибка советовала
+         * несуществующее `location.id`.
+         */
+        val LIVE_FIELDS = mapOf(
+            WorldRoot.BIOME to listOf("id", "temperature", "precipitation"),
+            WorldRoot.WEATHER to listOf("condition"),
+            WorldRoot.TIME to listOf("period", "tick"),
+            WorldRoot.DIMENSION to listOf("type", "id"),
+            WorldRoot.LOCATION to listOf("x", "y", "z"),
         )
 
         /** Разобрать блок `when { ... }` из словаря. Пустой словарь — пустое условие. */
@@ -51,7 +67,8 @@ data class Condition(val predicates: List<Predicate>) {
                 )
             val field = parts.getOrNull(1) ?: DEFAULT_FIELD[root]
                 ?: throw IllegalArgumentException(
-                    "условие when: для «${root.segment}» укажите поле, например «${root.segment}.id»",
+                    "условие when: для «${root.segment}» нужно указать поле — " +
+                        "доступны: ${LIVE_FIELDS.getValue(root).joinToString()}",
                 )
             if (parts.size > 2) {
                 throw IllegalArgumentException(
@@ -86,7 +103,11 @@ data class Condition(val predicates: List<Predicate>) {
                     else -> null
                 }
                 WorldRoot.TIME -> when (v) {
-                    "day", "dawn", "dusk" -> Triple("period", Op.Eq, Expected.Str(v))
+                    // Реальные периоды: day, sunset, night, sunrise. «dawn» и «dusk» —
+                    // человеческие синонимы, а не значения, которые отдаёт мир.
+                    "day" -> Triple("period", Op.Eq, Expected.Str("day"))
+                    "dawn", "sunrise" -> Triple("period", Op.Eq, Expected.Str("sunrise"))
+                    "dusk", "sunset" -> Triple("period", Op.Eq, Expected.Str("sunset"))
                     "night", "midnight" -> Triple("period", Op.Eq, Expected.Str("night"))
                     else -> null
                 }

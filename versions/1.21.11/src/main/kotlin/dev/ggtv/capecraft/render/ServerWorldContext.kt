@@ -44,9 +44,15 @@ class ServerWorldContext(private val player: ServerPlayerEntity) : WorldContext 
     }
 
     private fun biomeField(world: World, field: String): Value {
-        val biome = world.getBiome(player.blockPos).value()
+        val pos = player.blockPos
+        val holder = world.getBiome(pos)
+        val biome = holder.value()
         return when (field) {
             "temperature" -> Value.VFloat(biome.temperature.toDouble())
+            "id" -> holder.getKey()
+                .map { Value.VStr(it.value.toString()) }
+                .orElse(Value.VStr("unknown"))
+            "precipitation" -> Value.VStr(biome.getPrecipitation(pos, world.getSeaLevel()).name.lowercase())
             else -> Value.VStr("unknown")
         }
     }
