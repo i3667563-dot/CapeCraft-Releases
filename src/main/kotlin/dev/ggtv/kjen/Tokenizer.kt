@@ -29,6 +29,21 @@ object Tokenizer {
 
         while (i < len) {
             val start = Span(line, col)
+
+            /**
+             * Добавить токен, начало которого — [start], а конец — текущая
+             * позиция после сканирования.
+             *
+             * Раньше токены создавались вразнобой как `Token(kind, start)`, и
+             * позиция конца терялась: токенизатор её знает (`line`/`col` уже
+             * смотрят на следующий символ), но сохранять было некуда. Один
+             * `emit` вместо пятнадцати прямых вызовов — заодно не даёт
+             * забыть про конец в новом виде токена.
+             */
+            fun emit(kind: TokenKind) {
+                tokens += Token(kind, start, Span(line, col))
+            }
+
             val c = peek()
 
             fun advance(codePoint: Int = c) {
@@ -41,7 +56,7 @@ object Tokenizer {
 
                 '\n'.code -> {
                     advance()
-                    tokens += Token(TokenKind.Newline, start)
+                    emit(TokenKind.Newline)
                     line += 1
                     col = 1
                 }
@@ -53,7 +68,7 @@ object Tokenizer {
                         text.appendCodePoint(nextCp())
                         col += 1
                     }
-                    tokens += Token(TokenKind.Comment(text.toString().trim()), start)
+                    emit(TokenKind.Comment(text.toString().trim()))
                 }
 
                 '"'.code -> {
@@ -92,17 +107,17 @@ object Tokenizer {
                         }
                     }
                     val value = interpolateEnvironment(s.toString(), env, start)
-                    tokens += Token(TokenKind.Str(value), start)
+                    emit(TokenKind.Str(value))
                 }
 
-                '='.code -> { advance(); tokens += Token(TokenKind.Assign, start) }
-                '{'.code -> { advance(); tokens += Token(TokenKind.LBrace, start) }
-                '}'.code -> { advance(); tokens += Token(TokenKind.RBrace, start) }
-                '['.code -> { advance(); tokens += Token(TokenKind.LBracket, start) }
-                ']'.code -> { advance(); tokens += Token(TokenKind.RBracket, start) }
-                ':'.code -> { advance(); tokens += Token(TokenKind.Colon, start) }
-                ','.code -> { advance(); tokens += Token(TokenKind.Comma, start) }
-                '.'.code -> { advance(); tokens += Token(TokenKind.Dot, start) }
+                '='.code -> { advance(); emit(TokenKind.Assign) }
+                '{'.code -> { advance(); emit(TokenKind.LBrace) }
+                '}'.code -> { advance(); emit(TokenKind.RBrace) }
+                '['.code -> { advance(); emit(TokenKind.LBracket) }
+                ']'.code -> { advance(); emit(TokenKind.RBracket) }
+                ':'.code -> { advance(); emit(TokenKind.Colon) }
+                ','.code -> { advance(); emit(TokenKind.Comma) }
+                '.'.code -> { advance(); emit(TokenKind.Dot) }
 
                 '-'.code, in '0'.code..'9'.code -> {
                     val num = StringBuilder()
@@ -118,7 +133,7 @@ object Tokenizer {
                                     advance()
                                 } else break
                             }
-                            tokens += Token(TokenKind.Word(num.toString()), start)
+                            emit(TokenKind.Word(num.toString()))
                             continue
                         }
                     }
@@ -148,20 +163,20 @@ object Tokenizer {
                         if (floating) {
                             throw CrenError.Parse("после дробного числа ожидался разделитель", start)
                         }
-                        tokens += Token(TokenKind.Word(num.toString()), start)
+                        emit(TokenKind.Word(num.toString()))
                         continue
                     }
                     val text = num.toString()
-                    tokens += if (floating) {
+                    if (floating) {
                         val value = text.toDoubleOrNull()
                             ?: throw CrenError.Parse("неверное число: «$text»", start)
                         if (!value.isFinite()) {
                             throw CrenError.Parse("число вне диапазона f64: «$text»", start)
                         }
-                        Token(TokenKind.Float(value), start)
+                        emit(TokenKind.Float(value))
                     } else {
-                        Token(TokenKind.Int(text.toLongOrNull()
-                            ?: throw CrenError.Parse("неверное число: «$text»", start)), start)
+                        emit(TokenKind.Int(text.toLongOrNull()
+                            ?: throw CrenError.Parse("неверное число: «$text»", start)))
                     }
                 }
 
@@ -187,7 +202,7 @@ object Tokenizer {
                         advance(next)
                     }
                     val value = interpolateEnvironment(raw.toString(), env, start)
-                    tokens += Token(TokenKind.Str(value), start)
+                    emit(TokenKind.Str(value))
                 }
 
                 else -> {
@@ -202,7 +217,7 @@ object Tokenizer {
                             "false" -> TokenKind.Bool(false)
                             else -> TokenKind.Word(w)
                         }
-                        tokens += Token(kind, start)
+                        emit(kind)
                     } else {
                         throw CrenError.Parse("неожиданный символ: «${cpChar(c)}»", start)
                     }
@@ -341,7 +356,23 @@ sealed interface TokenKind {
     data object Newline : TokenKind
 }
 
-/** Токен с позицией в исходнике — для человеческих ошибок. */
-data class Token(val kind: TokenKind, val span: Span) {
+/**
+ * Токен с позицией в исходнике — для человеческих ошибок.
+ *
+ * @property span начало токена; ради совместимости остаётся точкой
+ * @property end позиция сразу за последним символом, без неё — [span]
+ */
+data class Token(val kind: TokenKind, val span: Span, val end: Span = span) {
+    /**
+     * Диапазон токена целиком — то, что редактору нужно для подчёркивания.
+     *
+     * У точки его нет: односимвольный токен вроде `{` даёт диапазон в один
+     * символ, а многострочная строка — от открывающей кавычки до закрывающей.
+     */
+    val range: TextRange get() = TextRange(span, end)
+
+    /** Длина токена в строках, если он многострочный. */
+    val isMultiline: Boolean get() = end.line != span.line
+
     override fun toString(): String = kind.toString()
 }

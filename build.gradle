@@ -39,6 +39,40 @@ base {
 	archivesName = project.archives_base_name
 }
 
+// Живой прогон синхронизации: сервер + два клиента с разными никами.
+//
+// Клиента нужен не один по двум причинам. Первая — каждому нужна своя папка
+// игры: `run/` общая, и два клиента в ней затирают друг другу options.txt и
+// логи, а с ними и кэш плащей. Вторая — разный ник: в дев-запуске Loom сам
+// никакого `--username` не подставляет, и без него все клиенты приходят как
+// Player, а объявление синхронизации адресуется по нику.
+//
+// Каталоги и ники задаются переменными: их удобно переопределять на запуск
+// (`-PtestServer=... -PclientAName=...`), не правя build.gradle.
+def testServerDir = providers.gradleProperty('testServer').getOrElse('run-server')
+def clientAName = providers.gradleProperty('clientAName').getOrElse('GGSHNIKK')
+def clientBName = providers.gradleProperty('clientBName').getOrElse('Eonixx')
+def testAddress = providers.gradleProperty('testAddress').getOrElse('127.0.0.1:25599')
+
+loom {
+	runs {
+		server { runDir = testServerDir }
+		client { runDir = 'run-client-a' }
+		clientB {
+			client()
+			runDir = 'run-client-b'
+		}
+	}
+}
+
+// `--quickPlayMultiplayer` вход в сервер без кликов по меню: иначе стенд
+// не запускается без рук.
+loom.runs.named('client').get().programArgs('--username', clientAName, '--quickPlayMultiplayer', testAddress)
+loom.runs.named('clientB').get().programArgs('--username', clientBName, '--quickPlayMultiplayer', testAddress)
+
+// Отдельного таска объявлять не нужно: Loom регистрирует `run<Имя>` на каждый
+// run-конфиг, поэтому второй клиент запускается `./gradlew runClientB`.
+
 // Подключить версионные исходники/ресурсы из versions/<mc>.
 sourceSets {
 	main {

@@ -77,8 +77,14 @@ object CapeSyncClient {
             // накапливаются на каждом заходе, а на следующем сервере рисуется
             // уже не то. Свой набор тоже сбрасывается — на входе он и так
             // перечитывается из конфига.
-            CapeCraftClient.registry.knownObjectIds().toList()
-                .forEach { CapeCraftClient.registry.forget(it) }
+            //
+            // Именно forgetSession, а не цикл по knownObjectIds: тот перечисляет
+            // только объявившихся, а плащи игроков без синхронизации (надетые по
+            // принудительному правилу ObjectCapePolicy) остались бы в кэше и на
+            // GPU вместе с чужим набором провайдеров — на следующем сервере
+            // игрок получил бы чужой плащ. Заодно сбрасывается свой id: при
+            // выключенной синхронизации он в knownObjectIds не попадал вовсе.
+            CapeCraftClient.registry.forgetSession()
         }
 
         ClientPlayNetworking.registerGlobalReceiver(CapeSyncPayloads.ServerMessage.TYPE) { payload, _ ->

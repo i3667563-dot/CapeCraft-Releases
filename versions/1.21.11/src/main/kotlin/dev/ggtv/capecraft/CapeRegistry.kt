@@ -12,6 +12,7 @@ import dev.ggtv.capecraft.provider.CapeFetcher
 import dev.ggtv.capecraft.provider.CompositeFetcher
 import dev.ggtv.capecraft.provider.NetImageFetcher
 import dev.ggtv.capecraft.sync.NetImageStore
+import dev.ggtv.capecraft.sync.ObjectCapePolicy
 import dev.ggtv.capecraft.provider.FetchError
 import dev.ggtv.capecraft.provider.Guard
 import dev.ggtv.capecraft.provider.Provider
@@ -87,11 +88,25 @@ class CapeRegistry(
      * Именно здесь «у этого объекта такой набор функций» превращается в то,
      * что клиент умеет считать.
      *
-     * Объекта нет в карте — значит он ничего не объявил. Подставлять ему
-     * тогда мой набор нельзя (см. [orderFor]): тихое надевание своего
-     * конфига на чужих выглядело бы как «мод заставляет всех носить моё».
+     * Объекта нет в карте — значит он ничего не объявил: у него нет мода,
+     * синхронизация выключена или сервер не CapeCraft. Такому объекту мой
+     * набор навязывается принудительно, но только спустя срок ожидания
+     * (см. [ObjectCapePolicy] и [orderFor]).
      */
     private val objectFunctions = ConcurrentHashMap<String, List<Provider>>()
+
+    /**
+     * Когда объект появился в кадре впервые, мс — отсчёт срока ожидания.
+     *
+     * Ключ — тот же id, что и у [objectFunctions], то есть UUID с дефисами
+     * (`AbstractClientPlayerEntity.uuidAsString` и профиль на сервере дают
+     * одно и то же значение). Объекты без объявления тоже попадают сюда: иначе
+     * срок не от чего было бы отсчитывать.
+     *
+     * Чистится в [forget], [forgetObject] и [forgetSession] — иначе карта росла
+     * бы на каждого вошедшего и держала память до конца сессии.
+     */
+    private val firstSeenAt = ConcurrentHashMap<String, Long>()
 
     /**
      * У каких объектов вообще есть условия.
@@ -105,13 +120,14 @@ class CapeRegistry(
     /**
      * Мой собственный id.
      *
-     * Только для меня набор функций берётся из локального конфига, если сервер
-     * ещё не ответил (гонка при входе) или синхронизации нет вовсе.
+     * Набор функций для себя берётся из локального конфига всегда, без
+     * ожидания и независимо от того, что прислал сервер: свой `file`-плащ по
+     * умолчанию наружу не уезжает, и в собственном снимке роустера его нет.
      *
-     * Для всех остальных fallback-а на мой набор нет намеренно: иначе мой
-     * локальный `file`-плащ рисовался бы на чужих игроках, а любой молчащий
-     * клиент получал бы мой конфиг целиком. Чего сервер не сказал — того у
-     * объекта нет.
+     * Остальным объектам мой набор тоже достаётся — но по сроку, а не сразу:
+     * не объявился за [ObjectCapePolicy.ANNOUNCE_GRACE_MS] — значит синхронизации
+     * у него не будет, и тогда показывать ему надо мой конфиг, а не пустоту.
+     * Решение целиком в [ObjectCapePolicy], здесь только адаптация.
      */
     @Volatile
     var localPlayerId: String? = null
@@ -244,27 +260,56 @@ class CapeRegistry(
         errors.clear()
         loading.clear()          // старые задачи в очереди отбросятся по поколению
         generation.incrementAndGet()
-        // Мой локальный конфиг изменился — пересчитать надо только мой плащ.
-        // Чужие объекты живут по объявленным ими наборам и к моему конфигу
-        // отношения не имеют; раньше здесь перезагружались все, и `/cp reload`
-        // дёргал текстуры всего сервера.
+        lastConditionsFingerprint = ""
         val local = localPlayerId
         if (local == null) {
             pendingRefresh.clear()
-            lastConditionsFingerprint = ""
-            return
+        } else {
+            pendingRefresh.add(local)
+            lastObjectFingerprint.remove(local)
+            val gen = (objectGeneration[local] ?: 0) + 1
+            objectGeneration[local] = gen
+            // Последняя задача с новым поколением победит.
+            val ordered = orderFor(local, world)
+            lastObjectFingerprint[local] = fingerprint(ordered)
+            if (ordered.isNotEmpty()) {
+                loading.add(local)
+                executor.execute { loadInBackground(local, ordered, gen) }
+            }
         }
-        pendingRefresh.add(local)
-        lastConditionsFingerprint = ""
-        lastObjectFingerprint.remove(local)
-        val gen = (objectGeneration[local] ?: 0) + 1
-        objectGeneration[local] = gen
-        // Последняя задача с новым поколением победит.
-        val ordered = orderFor(local, world)
-        lastObjectFingerprint[local] = fingerprint(ordered)
-        if (ordered.isNotEmpty()) {
-            loading.add(local)
-            executor.execute { loadInBackground(local, ordered, gen) }
+        // Мой конфиг изменился — пересчитать надо ещё и тех, кто носит его по
+        // принудительному правилу, а не по объявлению.
+        refreshLocalDependents(local)
+    }
+
+    /**
+     * Сбросить объекты, плащи которых держатся на **моём** наборе.
+     *
+     * Объявленные наборы не трогаем: они принадлежат чужим игрокам и от моего
+     * конфига не зависят (иначе `/cp reload` дёргал бы текстуры всего сервера).
+     * А вот навязанные — зависят, и без этого сброса `/cp reload` поменял бы
+     * плащ только мне, а на всех молчащих игроков в кадре молча оставил бы
+     * старый.
+     *
+     * Само перевычисление — не здесь: контекст мира у каждого объекта свой
+     * (см. [reevaluate]), а его знает только миксин. Поэтому тут только сброс,
+     * а следующий кадр рендера пересчитает объект через [ensureLoading].
+     */
+    private fun refreshLocalDependents(local: String?) {
+        for (id in firstSeenAt.keys) {
+            if (id == local) continue
+            if (objectFunctions.containsKey(id)) continue
+            synchronized(lock) {
+                memory.remove(id)
+                CapeTexture.release(id)
+            }
+            textureReady.remove(id)
+            loading.remove(id)
+            lastObjectFingerprint.remove(id)
+            lastReevaluatedAt.remove(id)
+            // Растёт поколение, а не сбрасывается: задача, уже висящая в
+            // воркере, должна отброситься, а не записать устаревший результат.
+            objectGeneration[id] = (objectGeneration[id] ?: 0) + 1
         }
     }
 
@@ -287,13 +332,26 @@ class CapeRegistry(
      * Считаем против [context] того, кого видно, а не против своего мира —
      * иначе объявленные условия применялись бы к миру зрителя и были бы
      * не «его» условиями.
+     *
+     * Кто набор получает — целиком в [ObjectCapePolicy]; здесь только учёт
+     * момента первого появления объекта. Правило простое: объявился — его
+     * набор, не объявился за [ObjectCapePolicy.ANNOUNCE_GRACE_MS] — мой, а
+     * между этим ждём.
      */
     private fun orderFor(id: String, context: WorldContext): List<Provider> {
-        objectFunctions[id]?.let { return ProviderSelector.select(it, context) }
-        // Сервер про меня ничего не сказал — плаща нет. Раньше здесь был
-        // `?: providers`, и это тихо надевало мой конфиг на всех подряд.
-        if (id == localPlayerId) return ProviderSelector.select(providers, context)
-        return emptyList()
+        val now = nowMs()
+        // putIfAbsent, а не присваивание: пересчёт `when` зовёт orderFor на
+        // каждом кадре, и счётчик ожидания обязан считаться от первого
+        // появления, а не обнуляться каждым вызовом.
+        val firstSeen = firstSeenAt.putIfAbsent(id, now) ?: now
+        return ObjectCapePolicy.resolve(
+            isSelf = id == localPlayerId,
+            declaredProviders = objectFunctions[id],
+            localProviders = providers,
+            firstSeenMs = firstSeen,
+            nowMs = now,
+            context = context,
+        ).providers
     }
 
     /**
@@ -345,16 +403,91 @@ class CapeRegistry(
      * загруженную текстуру и учёт игроков. Вызывается, когда объекта в снимке
      * роустера нет — то есть он вышел или ещё не объявился, и его плащ надо
      * убрать с экрана, а сам игрок в реестре остаётся.
+     *
+     * [firstSeenAt] тоже сбрасывается: срок ожидания отсчитывается от первого
+     * появления, и вернувшийся объект должен получить полный срок заново, а не
+     * мгновенно принудительный набор.
      */
     fun forgetObject(id: String) {
         objectFunctions.remove(id)
         objectHasConditions.remove(id)
         lastObjectFingerprint.remove(id)
         lastDeclaredFingerprint.remove(id)
+        firstSeenAt.remove(id)
     }
 
     /** id всех объектов с объявленным набором — чтобы убрать пропавшие из снимка. */
     fun knownObjectIds(): Set<String> = objectFunctions.keys.toSet()
+
+    /**
+     * Сколько объектов сейчас носят мой набор по принудительному правилу.
+     *
+     * Считается решением на текущий момент, а не «сколько не объявилось»:
+     * объект в первые [ObjectCapePolicy.ANNOUNCE_GRACE_MS] после появления ещё
+     * ждёт объявления, и звать его принудительным рано. Для `/cp status`, где
+     * видно, отработало ли правило.
+     */
+    fun forcedLocalCount(): Int {
+        val now = nowMs()
+        val local = localPlayerId
+        var forced = 0
+        for ((id, seen) in firstSeenAt) {
+            if (id == local) continue
+            val decision = ObjectCapePolicy.decide(
+                isSelf = false,
+                declared = objectFunctions.containsKey(id),
+                firstSeenMs = seen,
+                nowMs = now,
+            )
+            if (decision == ObjectCapePolicy.Decision.FORCED_LOCAL) forced++
+        }
+        return forced
+    }
+
+    /**
+     * id всех объектов, которых я видел: и объявившихся, и навязанных.
+     *
+     * Отличие от [knownObjectIds] принципиально: там только те, чей набор
+     * пришёл по сети, а плащи навязанных объектов тоже занимают память и
+     * GPU-текстуры, и на выходе с сервера их надо убрать.
+     */
+    fun seenObjectIds(): Set<String> =
+        LinkedHashSet<String>(firstSeenAt.keys).apply { addAll(objectFunctions.keys) }
+
+    /**
+     * Забыть всё, накопленное за сессию.
+     *
+     * Вызывается на выходе с сервера. Раньше тут был цикл по
+     * [knownObjectIds], а он покрывал только объявившихся: плащи игроков без
+     * синхронизации, надетые по принудительному правилу, пережили бы сессию и
+     * показались на следующем сервере — вместе с чужим набором провайдеров.
+     * Заодно сбрасывается [localPlayerId]: при выключенной синхронизации он
+     * в [knownObjectIds] не попадал вовсе и уезжал на следующий сервер.
+     */
+    fun forgetSession() {
+        for (id in seenObjectIds()) {
+            objectFunctions.remove(id)
+            objectHasConditions.remove(id)
+            lastObjectFingerprint.remove(id)
+            lastDeclaredFingerprint.remove(id)
+            lastReevaluatedAt.remove(id)
+            objectGeneration.remove(id)
+            firstSeenAt.remove(id)
+        }
+        synchronized(lock) {
+            for (key in memory.keys) CapeTexture.release(key)
+            memory.clear()
+            textureReady.clear()
+            textureIds.clear()
+            uploadedFrame.clear()
+            pendingRefresh.clear()
+            errors.clear()
+        }
+        loading.clear()
+        lastConditionsFingerprint = ""
+        localPlayerId = null
+    }
+
 
     /**
      * Заставить пересчитать порядок у всех объектов с условиями.
@@ -407,10 +540,16 @@ class CapeRegistry(
         if (loading.contains(uuid)) return      // фон уже грузит
         val ready = synchronized(lock) { memory.contains(uuid) }
         if (ready) return                       // в CPU-кэше — текстуру создаст animate
+        // Порядок провайдеров вычисляем ЗДЕСЬ (рендер-поток), где безопасно
+        // читать живой мир; воркеру передаём уже готовый список.
+        val ordered = orderFor(uuid, context)
+        // Набора нет — грузить нечего: объект ещё ждёт объявления
+        // (ObjectCapePolicy.WAIT) либо объявление пришло пустым. Раньше здесь
+        // всё равно планировалась задача, и она падала в воркере с «нет
+        // провайдеров» — по одной на каждый кадр рендера, все пять секунд
+        // ожидания, плюс ошибка в `/cp list`.
+        if (ordered.isEmpty()) return
         if (loading.add(uuid)) {
-            // Порядок провайдеров вычисляем ЗДЕСЬ (рендер-поток), где безопасно
-            // читать живой мир; воркеру передаём уже готовый список.
-            val ordered = orderFor(uuid, context)
             val fp = fingerprint(ordered)
             lastObjectFingerprint[uuid] = fp
             lastReevaluatedAt[uuid] = nowMs()
@@ -540,6 +679,7 @@ class CapeRegistry(
         lastDeclaredFingerprint.remove(uuid)
         lastReevaluatedAt.remove(uuid)
         objectGeneration.remove(uuid)
+        firstSeenAt.remove(uuid)
         synchronized(lock) {
             memory.remove(uuid)
             CapeTexture.release(uuid)
@@ -550,7 +690,14 @@ class CapeRegistry(
         }
     }
 
-    /** Очистить весь кэш плащей. */
+    /**
+     * Очистить весь кэш плащей.
+     *
+     * Карта первых появлений тоже сбрасывается: кэш чистят при сбросе
+     * (`/cp reload` с полным обнулением, смена мира), и оставшийся срок
+     * ожидания означал бы, что вернувшийся объект получит принудительный набор
+     * мгновенно, минуя ожидание.
+     */
     fun clear() {
         synchronized(lock) {
             for (k in memory.keys) CapeTexture.release(k)
@@ -563,6 +710,7 @@ class CapeRegistry(
             pendingRefresh.clear()
             uploadedFrame.clear()
         }
+        firstSeenAt.clear()
     }
 
     /** Число закэшированных плащей. */
