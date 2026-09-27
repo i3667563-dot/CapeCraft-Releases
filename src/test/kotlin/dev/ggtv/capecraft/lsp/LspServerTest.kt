@@ -99,6 +99,284 @@ class LspServerTest {
         return line to (text.lines()[line].indexOf(marker) + marker.length + after)
     }
 
+    // --- outline, сворачивание, pull-диагностика -----------------------------
+
+    /** Конфиг с блоком, словарём, массивом и вложенностью — форма разных деревьев. */
+    private val nested = """
+        capeCraft {
+            providers [
+                { name = "rain", type = "url", url = "https://example.com/a.png",
+                  when = { weather: "rain" } },
+            ]
+            limits {
+                maxFrames = 100
+            }
+        }
+    """.trimIndent()
+
+    private fun openNested(): String = note(
+        "textDocument/didOpen",
+        """{"textDocument":{"uri":"$uri","languageId":"kn","version":1,"text":${Json.render(J.JStr(nested))}}}""",
+    )
+
+    @Test
+    fun `documentSymbol отдаёт дерево с детьми`() {
+        val res = Session(
+            initializeWithSymbols(true) + openNested() + req(2, "textDocument/documentSymbol", """{"textDocument":{"uri":"$uri"}}"""),
+        ).run()
+        val symbols = res.last().arr("result").map { it as J.JObj }
+        val root = symbols.single()
+        assertEquals("capeCraft", root.str("name"))
+        assertEquals(19L, (root["kind"] as J.JNum).long(), "блок — Object (19)")
+
+        val children = (root["children"] as J.JArr).items.map { it as J.JObj }
+        assertEquals(listOf("providers", "limits"), children.map { it.str("name") })
+        assertEquals(18L, (children[0]["kind"] as J.JNum).long(), "массив — Array (18)")
+        assertEquals(19L, (children[1]["kind"] as J.JNum).long(), "словарь — Object (19)")
+
+        // Внутри limits ключ должен быть виден, а не сплющен в «что-то под limits».
+        val limitsChildren = (children[1]["children"] as J.JArr).items.map { it as J.JObj }
+        assertEquals(listOf("maxFrames"), limitsChildren.map { it.str("name") })
+        assertEquals(16L, (limitsChildren[0]["kind"] as J.JNum).long(), "число — Number (16)")
+
+        // Диапазон selectionRange обязан совпадать с реальным ключом в тексте.
+        val selection = limitsChildren[0].obj("selectionRange")!!
+        val (line, character) = at(nested, "maxFrames", -"maxFrames".length)
+        assertEquals(line.toLong(), (selection.obj("start")!!["line"] as J.JNum).long())
+        assertEquals(character.toLong(), (selection.obj("start")!!["character"] as J.JNum).long())
+    }
+
+    @Test
+    fun `documentSymbol для клиента без иерархии отдаёт плоский список`() {
+        // Старые клиенты не понимают DocumentSymbol и ждут SymbolInformation с
+        // location. Отдать им иерархию — протокольная ошибка, из-за которой
+        // outline молча пустой.
+        val res = Session(
+            initializeWithSymbols(false) + openNested() +
+                req(2, "textDocument/documentSymbol", """{"textDocument":{"uri":"$uri"}}"""),
+        ).run()
+        val symbols = res.last().arr("result").map { it as J.JObj }
+        assertTrue(symbols.isNotEmpty(), "плоский список не должен быть пустым")
+        assertTrue(symbols.none { it["children"] != null }, "в плоском ответе children нет")
+        assertTrue(symbols.all { it["location"] != null }, "SymbolInformation требует location")
+        assertTrue(
+            symbols.all { ((it["location"] as J.JObj)["uri"] as J.JStr).s == uri },
+            "location.uri обязан быть uri документа, иначе клиент не откроет символ: $symbols",
+        )
+        assertTrue(
+            symbols.none { (it["range"] != null) || (it["selectionRange"] != null) },
+            "у SymbolInformation нет range/selectionRange, только location: $symbols",
+        )
+        // Иерархии в плоском ответе нет — вложенные записи не должны теряться,
+        // иначе клиент увидит только capeCraft.
+        val names = symbols.map { it.str("name") }
+        assertTrue(
+            names.containsAll(listOf("capeCraft", "providers", "limits", "maxFrames")),
+            "плоский список должен содержать вложенные записи: $names",
+        )
+    }
+
+    @Test
+    fun `documentSymbol клиенту без capability отдаёт плоский список`() {
+        // Клиент, который ничего не объявил, может и не знать про DocumentSymbol:
+        // безопаснее отдать SymbolInformation, который понимают все.
+        val res = Session(
+            initializeWithSymbols(null) + openNested() +
+                req(2, "textDocument/documentSymbol", """{"textDocument":{"uri":"$uri"}}"""),
+        ).run()
+        val symbols = res.last().arr("result").map { it as J.JObj }
+        assertTrue(symbols.isNotEmpty())
+        assertTrue(symbols.none { it["children"] != null }, "дерево клиенту без capability не годится")
+        assertTrue(symbols.all { it["location"] != null })
+    }
+
+    @Test
+    fun `foldingRange сворачивает только многострочное`() {
+        val res = Session(openNested() + req(2, "textDocument/foldingRange", """{"textDocument":{"uri":"$uri"}}""")).run()
+        val ranges = res.last().arr("result").map { it as J.JObj }
+        assertTrue(ranges.isNotEmpty(), "многострочные блоки должны сворачиваться: $ranges")
+        assertTrue(
+            ranges.all { (it["endLine"] as J.JNum).long() > (it["startLine"] as J.JNum).long() },
+            "однострочные диапазоны клиенту бесполезны: $ranges",
+        )
+        assertTrue(ranges.all { it.str("kind") == "region" }, "всё это структурные блоки: $ranges")
+
+        // Блок providers занимает строки 1..4, capeCraft — 0..6.
+        val starts = ranges.map { (it["startLine"] as J.JNum).long() }.toSet()
+        assertTrue(starts.contains(0L) && starts.contains(1L), "ожидались блоки capeCraft и providers: $starts")
+    }
+
+    @Test
+    fun `textDocument diagnostic отдаёт полный отчёт`() {
+        val res = Session(
+            openText(configWithTypo) + req(2, "textDocument/diagnostic", """{"textDocument":{"uri":"$uri"}}"""),
+        ).run()
+        val report = res.last().obj("result")!!
+        assertEquals("full", report.str("kind"), "дельта без кэша диагностик считать нечем")
+        val items = (report["items"] as J.JArr).items.map { it as J.JObj }
+        assertEquals(1, items.size, "опечатка должна быть в pull-ответе: $items")
+        assertEquals("unknown-key", items.single().str("code"))
+    }
+
+    @Test
+    fun `pull-диагностика для неизвестного файла не падает`() {
+        val res = Session(
+            req(1, "textDocument/diagnostic", """{"textDocument":{"uri":"file:///tmp/нет.kn"}}"""),
+        ).run()
+        assertEquals(1, res.size, "ответ должен быть: $res")
+        val report = res.last().obj("result")!!
+        assertEquals("full", report.str("kind"))
+        assertTrue((report["items"] as J.JArr).items.isEmpty())
+    }
+
+    // --- кодировка позиций ---------------------------------------------------
+
+    /**
+     * `initialize` с capability символов.
+     *
+     * Сервер читает её именно здесь: в параметрах `textDocument/documentSymbol`
+     * её нет, и тест, который подсовывает её в запрос, проверяет не протокол, а
+     * собственную фантазию о нём. [null] — клиент не объявил ничего.
+     */
+    private fun initializeWithSymbols(hierarchical: Boolean?): String {
+        val caps = if (hierarchical == null) {
+            """{"textDocument":{}}"""
+        } else {
+            """{"textDocument":{"documentSymbol":{"hierarchicalDocumentSymbolSupport":$hierarchical}}}"""
+        }
+        return req(1, "initialize", """{"capabilities":$caps}""")
+    }
+
+    private fun initializeWithEncodings(vararg encodings: String): String {
+        val list = encodings.joinToString(",") { "\"$it\"" }
+        return req(1, "initialize", """{"capabilities":{"general":{"positionEncodings":[$list]}}}""")
+    }
+
+    @Test
+    fun `сервер объявляет кодировку, выбранную по предложению клиента`() {
+        for (name in listOf("utf-8", "utf-32", "utf-16")) {
+            val res = Session(initializeWithEncodings(name)).run().single()
+            val caps = res.obj("result")!!.obj("capabilities")!!
+            assertEquals(name, caps.str("positionEncoding"), "клиент предложил $name")
+        }
+    }
+
+    @Test
+    fun `без предложения кодировка utf-16`() {
+        val res = Session(req(1, "initialize", """{"capabilities":{}}""")).run().single()
+        assertEquals("utf-16", res.obj("result")!!.obj("capabilities")!!.str("positionEncoding"))
+    }
+
+    @Test
+    fun `незнакомая кодировка не ломает initialize`() {
+        val res = Session(initializeWithEncodings("klingon-1", "utf-8")).run().single()
+        assertEquals(
+            "utf-8",
+            res.obj("result")!!.obj("capabilities")!!.str("positionEncoding"),
+            "клиент может прислать своё: пропускаем и берём следующее знакомое",
+        )
+    }
+
+    @Test
+    fun `позиции в диагностике считаются в кодировке клиента`() {
+        // Эмодзи перед ошибкой делает разницу видимой: в utf-16 его 2 единицы,
+        // в utf-8 — 4, в utf-32 — одна. Если бы сервер считал в своей, клиент
+        // с utf-8 подсветил бы не то место.
+        val emoji = String(Character.toChars(0x1F600))
+        // Опечатка ключа идёт после эмодзи в той же строке: только так разница
+        // кодировок видна в её диапазоне.
+        val text = """capeCraft { providers [ { name = "$emoji", type = "url", serverSinc = 1 } ] }"""
+        val columns = mutableMapOf<String, Long>()
+        for (encoding in listOf("utf-16", "utf-32", "utf-8")) {
+            val res = Session(
+                initializeWithEncodings(encoding) +
+                    openNote(text) +
+                    req(2, "textDocument/diagnostic", """{"textDocument":{"uri":"$uri"}}"""),
+            ).run()
+            val items = (res.last().obj("result")!!["items"] as J.JArr).items
+            val unknown = items.map { it as J.JObj }
+                .firstOrNull { it.str("code") == "unknown-key" }
+            assertNotNull(unknown, "в файле с опечаткой ключа должна быть диагностика: $items")
+            val range = unknown.obj("range")!!
+            columns[encoding] = (range.obj("start")!!["character"] as J.JNum).long()
+        }
+        assertEquals(
+            columns["utf-16"]!! + 2,
+            columns["utf-8"]!!,
+            "utf-8 считает эмодзи за 4 байта против 2 code unit: $columns",
+        )
+        assertEquals(
+            columns["utf-16"]!! - 1,
+            columns["utf-32"]!!,
+            "utf-32 считает эмодзи за один кодпоинт, а не за пару: $columns",
+        )
+    }
+
+    private fun openNote(text: String): String = note(
+        "textDocument/didOpen",
+        """{"textDocument":{"uri":"$uri","languageId":"kn","version":1,"text":${Json.render(J.JStr(text))}}}""",
+    )
+
+    // --- инкрементальные didChange -------------------------------------------
+
+    @Test
+    fun `didChange с диапазоном применяет правку а не подменяет документ`() {
+        // Клиент с включённой инкрементальной синхронизацией присылает кусок.
+        // Взять его text за весь документ — тихая порча: дальше позиции едут,
+        // и никакой диагностики об этом не скажет.
+        val start = "capeCraft {\n}\n"
+        val res = Session(
+            initializeWithSymbols(true) +
+                openNote(start) +
+                note(
+                    "textDocument/didChange",
+                    """{"textDocument":{"uri":"$uri","version":2},"contentChanges":[
+                        {"range":{"start":${position(1, 0)},"end":${position(1, 0)}},"text":"    providers [\n    ]\n"}
+                    ]}""",
+                ) +
+                req(2, "textDocument/documentSymbol", """{"textDocument":{"uri":"$uri"}}"""),
+        ).run()
+        val root = res.last().arr("result").first() as J.JObj
+        val children = (root["children"] as J.JArr).items.map { (it as J.JObj).str("name") }
+        assertEquals(
+            listOf("providers"),
+            children,
+            "правка должна была вставить запись в документ, а не вырезать его",
+        )
+    }
+
+    @Test
+    fun `didChange с неверным диапазоном оставляет документ как был`() {
+        val text = "capeCraft {\n    providers [\n    ]\n}"
+        val res = Session(
+            initializeWithSymbols(true) +
+                openNote(text) +
+                note(
+                    "textDocument/didChange",
+                    """{"textDocument":{"uri":"$uri","version":2},"contentChanges":[
+                        {"range":{"start":${position(9, 0)},"end":${position(9, 4)}},"text":" мусор"}
+                    ]}""",
+                ) +
+                req(2, "textDocument/documentSymbol", """{"textDocument":{"uri":"$uri"}}"""),
+        ).run()
+        val root = res.last().arr("result").single() as J.JObj
+        val children = (root["children"] as J.JArr).items.map { (it as J.JObj).str("name") }
+        assertEquals(listOf("providers"), children, "документ не должен был измениться: $children")
+    }
+
+    @Test
+    fun `didChange без диапазона по-прежнему заменяет текст целиком`() {
+        val res = Session(
+            openText(configWithTypo) +
+                note(
+                    "textDocument/didChange",
+                    """{"textDocument":{"uri":"$uri","version":2},"contentChanges":[{"text":"capeCraft { }"}]}""",
+                ),
+        ).run()
+        val diags = res.last().obj("params")!!.arr("diagnostics")
+        assertTrue(diags.isEmpty(), "после полной замены ошибок быть не должно: $diags")
+    }
+
     // --- жизненный цикл ----------------------------------------------------
 
     @Test

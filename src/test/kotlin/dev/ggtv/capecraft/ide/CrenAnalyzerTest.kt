@@ -120,6 +120,42 @@ class CrenAnalyzerTest {
         assertTrue(d.any { it.code == CrenAnalyzer.CODE_UNKNOWN_KEY }, "пропущено: ${d.map { it.code }}")
     }
 
+    @Test
+    fun `when блоком без знака в словаре провайдера`() {
+        // `when { ... }` внутри словаря — самая частая форма, которую пишут по
+        // привычке от верхнего `capeCraft { ... }`. Терпимый разбор её берёт,
+        // а мод — нет: KorenParser требует «:» или «=» после ключа в словаре.
+        // Без этой проверки человек узнаёт о своём файле только из лога игры.
+        val d = diags(
+            """capeCraft { providers [ { name = "a", type = "url", when { location.y: "<= -20" } } ] }""",
+        )
+        val err = d.single { it.code == CrenAnalyzer.CODE_NO_SEPARATOR }
+        assertTrue(err.severity == CrenSeverity.ERROR, err.message)
+        assertTrue(err.message.contains("="), err.message)
+    }
+
+    @Test
+    fun `пустой when блоком тоже ругается`() {
+        val d = diags(
+            """capeCraft { providers [ { name = "a", type = "url", when { } } ] }""",
+        )
+        assertTrue(
+            d.any { it.code == CrenAnalyzer.CODE_NO_SEPARATOR },
+            "пустой `when { }` мод тоже не прочитает: ${d.map { it.code }}",
+        )
+    }
+
+    @Test
+    fun `тот же when со знаком не ругается`() {
+        val d = diags(
+            """capeCraft { providers [ { name = "a", type = "url", when = { location.y: "<= -20" } } ] }""",
+        )
+        assertTrue(
+            d.none { it.severity == CrenSeverity.ERROR },
+            "правильная форма не должна ругаться: ${d.map { it.message }}",
+        )
+    }
+
     // ---------------------------------------------------------------- when
 
     @Test

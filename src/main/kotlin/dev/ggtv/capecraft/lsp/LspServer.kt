@@ -3,6 +3,8 @@ package dev.ggtv.capecraft.lsp
 import dev.ggtv.capecraft.ide.CrenAnalyzer
 import dev.ggtv.capecraft.ide.CrenDiagnostic
 import dev.ggtv.capecraft.ide.CrenDocument
+import dev.ggtv.capecraft.ide.CrenParser
+import dev.ggtv.capecraft.ide.PositionEncoding
 import dev.ggtv.capecraft.schema.J
 import java.io.InputStream
 import java.io.OutputStream
@@ -34,6 +36,25 @@ class LspServer(
 
     /** Тексты открытых документов: uri -> текст. */
     private val docs = LinkedHashMap<String, String>()
+
+    /**
+     * Кодировка колонок, о которой договорились в `initialize`.
+     *
+     * Хранится в сессии, а не в документе: договор один на всё соединение, и
+     * он известен только после `initialize`. До него — UTF-16, как велит
+     * спецификация по умолчанию.
+     */
+    private var encoding: PositionEncoding = PositionEncoding.UTF16
+
+    /**
+     * Иерархические символы или плоский список — договор из `initialize`.
+     *
+     * Как и кодировка, это свойство соединения, а не запроса: клиент шлёт
+     * capability один раз, и в параметрах `documentSymbol` её уже нет.
+     * Значение по умолчанию — плоский список, потому что `SymbolInformation`
+     * понимает любой клиент, а `DocumentSymbol` не понимает никто из старых.
+     */
+    private var hierarchicalSymbols = false
 
     private var shutdownRequested = false
 
@@ -106,6 +127,9 @@ class LspServer(
             "textDocument/completion" -> onCompletion(message)
             "textDocument/hover" -> onHover(message)
             "textDocument/codeAction" -> onCodeAction(message)
+            "textDocument/documentSymbol" -> onDocumentSymbol(message)
+            "textDocument/foldingRange" -> onFoldingRange(message)
+            "textDocument/diagnostic" -> onPullDiagnostics(message)
 
             // Методы, на которые сервер не подписан, должны давать MethodNotFound.
             // Молчаливый ответ на неизвестное ломает отладку не хуже краша, но
@@ -118,6 +142,8 @@ class LspServer(
 
     private fun onInitialize(message: J.JObj) {
         val id = field(message, "id")
+        encoding = negotiateEncoding(message)
+        hierarchicalSymbols = negotiateHierarchicalSymbols(message)
         reply(
             id,
             J.JObj(
@@ -128,6 +154,12 @@ class LspServer(
                             // целиком, а инкрементальные правки для него
                             // дороже, чем разбор файла в 200 строк.
                             "textDocumentSync" to J.JNum(1.0, true, 1L),
+                            // Объявленный формат, а не тот, что выбрал клиент:
+                            // сервер обязан назвать кодировку, в которой он
+                            // действительно считает колонки. Иначе клиент,
+                            // выбравший utf-8, получил бы наши utf-16
+                            // координаты и подсветил бы не то место.
+                            "positionEncoding" to J.JStr(encoding.protocolName),
                             "completionProvider" to J.JObj(
                                 listOf(
                                     "resolveProvider" to J.JBool(false),
@@ -152,6 +184,20 @@ class LspServer(
                             // клиент их только показывает — true вместо
                             // списка видов, потому что других не планируется.
                             "codeActionProvider" to J.JBool(true),
+                            // Outline: без него в редакторе нечем обойти
+                            // конфиг, кроме как поиском по тексту.
+                            "documentSymbolProvider" to J.JBool(true),
+                            "foldingRangeProvider" to J.JBool(true),
+                            // Pull-диагностика. Push тоже шлём: клиенты без
+                            // pull (старые версии neovim, часть плагинов) не
+                            // спросят, а лишний повторный ответ им не мешает.
+                            "diagnosticProvider" to J.JObj(
+                                listOf(
+                                    "identifier" to J.JStr("capecraft"),
+                                    "interFileDependencies" to J.JBool(false),
+                                    "workspaceDiagnostics" to J.JBool(false),
+                                ),
+                            ),
                         ),
                     ),
                     "serverInfo" to J.JObj(
@@ -163,6 +209,46 @@ class LspServer(
                 ),
             ),
         )
+    }
+
+    /**
+     * Кодировка колонок по предложению клиента.
+     *
+     * Список `general.positionEncodings` — предпочтения в порядке убывания, и
+     * сервер берёт первую свою. Поддерживаем все три, поэтому выбор выпадает
+     * на первый узнаваемый; незнакомые (клиент может придумать свой) пропускаем,
+     * а когда не узнан ни один — UTF-16 по умолчанию из спецификации.
+     */
+    private fun negotiateEncoding(message: J.JObj): PositionEncoding {
+        val params = field(message, "params") as? J.JObj ?: return PositionEncoding.UTF16
+        val general = params["capabilities"]?.let { it as? J.JObj }?.get("general") as? J.JObj
+        val offered = (general?.get("positionEncodings") as? J.JArr)?.items.orEmpty()
+        for (item in offered) {
+            val name = (item as? J.JStr)?.s ?: continue
+            PositionEncoding.of(name)?.let { return it }
+        }
+        return PositionEncoding.UTF16
+    }
+
+    /**
+     * Умеет ли клиент иерархию символов.
+     *
+     * Capability приходит один раз в `initialize` — в параметрах самого
+     * `textDocument/documentSymbol` её нет. Читать её оттуда нельзя: сервер
+     * решит, что клиент иерархию поддерживает, отдаст `DocumentSymbol` с
+     * `children`, а старый клиент такой ответ не поймёт и покажет пустой
+     * outline.
+     *
+     * Значение по умолчанию — `false`: клиент, который ничего не объявил,
+     * может не знать про `DocumentSymbol` вовсе, а `SymbolInformation`
+     * понимают все.
+     */
+    private fun negotiateHierarchicalSymbols(message: J.JObj): Boolean {
+        val params = field(message, "params") as? J.JObj ?: return false
+        val capabilities = params["capabilities"] as? J.JObj ?: return false
+        val textDocument = capabilities["textDocument"] as? J.JObj ?: return false
+        val documentSymbol = textDocument["documentSymbol"] as? J.JObj ?: return false
+        return (documentSymbol["hierarchicalDocumentSymbolSupport"] as? J.JBool)?.b ?: false
     }
 
     private fun onShutdown(message: J.JObj) {
@@ -186,14 +272,40 @@ class LspServer(
         val td = field(message, "params") as? J.JObj ?: return
         val item = td["textDocument"] as? J.JObj ?: return
         val uri = (item["uri"] as? J.JStr)?.s ?: return
+        val current = docs[uri] ?: return
+        val changes = (td["contentChanges"] as? J.JArr)?.items ?: return
+
         // textDocumentSync = 1 (полный текст), поэтому в changes лежит ровно
-        // один элемент с whole text. Берём последний: клиент может дослать
-        // несколько, и правильна самая свежая.
-        val changes = td["contentChanges"] as? J.JArr
-        val text = changes?.items?.lastOrNull()
-            ?.let { (it as? J.JObj)?.get("text") }
-            ?.let { (it as? J.JStr)?.s }
-            ?: return
+        // один элемент с whole text. Но клиент — не мод: при включённой
+        // инкрементальной синхронизации в его настройках (или у другого
+        // сервера в том же канале) прилетит кусок с `range`. Взять его `text`
+        // как весь документ — тихая порча: дальше все позиции едут, а
+        // диагностика не показывает ничего. Поэтому куски применяем, а если
+        // диапазон не сошёлся с текстом — оставляем документ как был.
+        var text = current
+        for (change in changes) {
+            val obj = change as? J.JObj ?: return
+            val replacement = (obj["text"] as? J.JStr)?.s ?: return
+            val range = obj["range"] as? J.JObj
+            if (range == null) {
+                text = replacement
+                continue
+            }
+            val from = range["start"] as? J.JObj ?: return
+            val to = range["end"] as? J.JObj ?: return
+            val startLine = (from["line"] as? J.JNum)?.i?.toInt() ?: return
+            val startChar = (from["character"] as? J.JNum)?.i?.toInt() ?: return
+            val endLine = (to["line"] as? J.JNum)?.i?.toInt() ?: return
+            val endChar = (to["character"] as? J.JNum)?.i?.toInt() ?: return
+            val patched = CrenDocument(text).replaceClientRange(
+                startLine, startChar, endLine, endChar, replacement, encoding,
+            )
+            if (patched == null) {
+                log("didChange с неверным range у ${uri.substringAfterLast('/')}: документ оставлен как был")
+                return
+            }
+            text = patched
+        }
         docs[uri] = text
         publish(uri)
     }
@@ -259,7 +371,7 @@ class LspServer(
                     it.fixes.isNotEmpty() &&
                         doc.offsetOf(it.range.start) <= to && from <= doc.endOffsetOf(it.range)
                 }
-                .flatMap { Lsp.codeAction(doc, uri, it).items }
+                .flatMap { Lsp.codeAction(doc, uri, it, encoding).items }
         } catch (e: Exception) {
             // Меню исправлений — необязательная роскошь: лучше пустое меню,
             // чем обрыв сессии из-за одной неразобранной строки.
@@ -267,6 +379,73 @@ class LspServer(
             emptyList()
         }
         reply(id, J.JArr(actions))
+    }
+
+    /**
+     * Дерево символов для outline.
+     *
+     * Ответ всегда массив, даже для пустого файла: `null` клиенты не любят и
+     * показывают ошибку вместо пустого outline. Разбор терпимый и бросить не
+     * может, но на всякий случай ошибка превращается в пустой список — как и
+     * во всех остальных запросах.
+     */
+    private fun onDocumentSymbol(message: J.JObj) {
+        val id = field(message, "id")
+        val uri = uriOf(message)
+        val doc = uri?.let { document(it) }
+        if (uri == null || doc == null) {
+            reply(id, J.JArr(emptyList()))
+            return
+        }
+        reply(
+            id,
+            try {
+                Lsp.documentSymbol(doc, CrenParser.parse(doc).root, uri, encoding, flat = !hierarchicalSymbols)
+            } catch (e: Exception) {
+                log("documentSymbol не удался: $e")
+                J.JArr(emptyList())
+            },
+        )
+    }
+
+    private fun onFoldingRange(message: J.JObj) {
+        val id = field(message, "id")
+        val doc = uriOf(message)?.let { document(it) }
+        if (doc == null) {
+            reply(id, J.JArr(emptyList()))
+            return
+        }
+        reply(
+            id,
+            try {
+                Lsp.foldingRange(doc, CrenParser.parse(doc).root, encoding)
+            } catch (e: Exception) {
+                log("foldingRange не удался: $e")
+                J.JArr(emptyList())
+            },
+        )
+    }
+
+    /**
+     * Pull-диагностика: клиент спросил, мы пересчитали и отдали.
+     *
+     * Тот же [Lsp.analyze], что и для push, — два пути к одному разбору, а не
+     * две реализации: разойтись им нечем, кроме как по счастливой случайности.
+     */
+    private fun onPullDiagnostics(message: J.JObj) {
+        val id = field(message, "id")
+        val doc = uriOf(message)?.let { document(it) }
+        if (doc == null) {
+            reply(id, Lsp.pullDiagnostics(CrenDocument(""), emptyList(), encoding))
+            return
+        }
+        val diagnostics = try {
+            Lsp.analyze(doc)
+        } catch (e: Exception) {
+            log("анализ для pull не удался: $e")
+            emptyList<CrenDiagnostic>()
+        }
+        reply(id, Lsp.pullDiagnostics(doc, diagnostics, encoding))
     }
 
     /**
@@ -283,7 +462,7 @@ class LspServer(
         val point = range[edge] as? J.JObj ?: return null
         val line = (point["line"] as? J.JNum)?.i ?: return null
         val character = (point["character"] as? J.JNum)?.i ?: return null
-        return doc.offsetOfClientPosition(line.toInt(), character.toInt())
+        return doc.offsetOfClientPosition(line.toInt(), character.toInt(), encoding)
     }
 
     // --- helpers ------------------------------------------------------------
@@ -308,7 +487,7 @@ class LspServer(
         val line = (pos["line"] as? J.JNum)?.i?.toInt() ?: return null
         val character = (pos["character"] as? J.JNum)?.i?.toInt() ?: return null
         val text = docs[uri] ?: return null
-        return CrenDocument(text).offsetOfClientPosition(line, character)
+        return CrenDocument(text).offsetOfClientPosition(line, character, encoding)
     }
 
     private fun publish(uri: String) {
@@ -327,7 +506,7 @@ class LspServer(
             J.JObj(
                 listOf(
                     "uri" to J.JStr(uri),
-                    "diagnostics" to Lsp.diagnostics(doc, diagnostics),
+                    "diagnostics" to Lsp.diagnostics(doc, diagnostics, encoding),
                 ),
             ),
         )

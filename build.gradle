@@ -143,6 +143,11 @@ test {
 		events "failed", "skipped"
 		exceptionFormat "full"
 	}
+	// READMEExamplesTest читает README с диска, поэтому правка документации
+	// обязана перезапускать тесты. Без этого Gradle считает задачу
+	// up-to-date, и проверка примеров молча ничего не проверяет: именно так
+	// в документации и жил неразбираемый `when { ... }`.
+	inputs.file(file('README.md')).withPropertyName('readmeUnderTest')
 }
 
 // --- Сервер LSP для конфигов .kn ------------------------------------------
