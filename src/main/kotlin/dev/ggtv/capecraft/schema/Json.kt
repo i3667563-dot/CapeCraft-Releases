@@ -155,4 +155,65 @@ object Json {
             return if (!isFloat && intVal != null) J.JNum(d, true, intVal) else J.JNum(d, false, 0)
         }
     }
+
+    /**
+     * Обратное действие: дерево в текст JSON.
+     *
+     * Нужно редактору: LSP — это JSON-RPC поверх stdin/stdout, то есть
+     * наружу уходит только текст, и собрать его можно лишь сериализатором.
+     * Симметрия с [parse] заодно даёт бесплатный тест: `parse(render(x))` обязан
+     * вернуть `x`.
+     *
+     * Без отступов и без экранирования `/`: ответы LSP короткие, а читать их
+     * приходится в отладчике, и лишние пробелы только мешают.
+     */
+    fun render(value: J): String = StringBuilder().also { render(value, it) }.toString()
+
+    private fun render(value: J, sb: StringBuilder) {
+        when (value) {
+            is J.JNull -> sb.append("null")
+            is J.JBool -> sb.append(if (value.b) "true" else "false")
+            // Целое печатается как Long, иначе 3 превратится в 3.0, а JSON-RPC
+            // ждёт целые там, где стоит int (например номера диагностик нет,
+            // но длины и позиции — да).
+            is J.JNum -> if (value.isInt) sb.append(value.i) else sb.append(value.d)
+            is J.JStr -> renderString(value.s, sb)
+            is J.JArr -> {
+                sb.append('[')
+                value.items.forEachIndexed { i, item ->
+                    if (i > 0) sb.append(',')
+                    render(item, sb)
+                }
+                sb.append(']')
+            }
+            is J.JObj -> {
+                sb.append('{')
+                value.fields.forEachIndexed { i, (key, v) ->
+                    if (i > 0) sb.append(',')
+                    renderString(key, sb)
+                    sb.append(':')
+                    render(v, sb)
+                }
+                sb.append('}')
+            }
+        }
+    }
+
+    private fun renderString(s: String, sb: StringBuilder) {
+        sb.append('"')
+        for (c in s) {
+            when {
+                c == '"' -> sb.append("\\\"")
+                c == '\\' -> sb.append("\\\\")
+                c == '\n' -> sb.append("\\n")
+                c == '\r' -> sb.append("\\r")
+                c == '\t' -> sb.append("\\t")
+                // Остальные управляющие обязаны уходить как \u00XX: сырой
+                // символ в JSON недопустим, и это молча ломает кадр у клиента.
+                c < ' ' || c == '\u007F' -> sb.append("\\u%04x".format(c.code))
+                else -> sb.append(c)
+            }
+        }
+        sb.append('"')
+    }
 }
