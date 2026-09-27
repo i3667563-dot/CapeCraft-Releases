@@ -1,5 +1,7 @@
 package dev.ggtv.capecraft.api.event
 
+import dev.ggtv.capecraft.CapeCraftLog
+
 /**
  * Шина событий жизненного цикла плаща для аддонов.
  *
@@ -29,7 +31,7 @@ class CapeEventBus {
             try {
                 l(event)
             } catch (e: Exception) {
-                dev.ggtv.capecraft.CapeCraftClient.LOGGER.warn(
+                CapeCraftLog.LOGGER.warn(
                     "CapeCraft: аддон-слушатель ${event.type} упал: ${e.message}", e,
                 )
             }

@@ -1,6 +1,5 @@
 package dev.ggtv.capecraft.api.provider
 
-import dev.ggtv.capecraft.CapeCraftClient
 import dev.ggtv.capecraft.api.CAPE_RUNTIME_API_VERSION
 import dev.ggtv.capecraft.api.CapeSourceType
 

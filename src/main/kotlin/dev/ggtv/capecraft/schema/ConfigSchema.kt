@@ -2,7 +2,7 @@ package dev.ggtv.capecraft.schema
 
 import dev.ggtv.capecraft.condition.Condition
 import dev.ggtv.capecraft.memory.Limits
-import dev.ggtv.capecraft.provider.ProviderLoader
+import dev.ggtv.capecraft.provider.ProviderNames
 import dev.ggtv.capecraft.sync.ServerSyncSettings
 import dev.ggtv.koren.WorldRoot
 
@@ -26,8 +26,8 @@ import dev.ggtv.koren.WorldRoot
  *
  * ## Почему строки берутся из кода, а не из констант здесь
  *
- * Имена ключей и корни `when` не продублированы строкой: [ProviderLoader.Keys],
- * [ProviderLoader.Types], [WorldRoot] и [Condition.LIVE_FIELDS] — источник
+ * Имена ключей и корни `when` не продублированы строкой: [ProviderNames.Keys],
+ * [ProviderNames.Types], [WorldRoot] и [Condition.LIVE_FIELDS] — источник
  * истины. Разъехаться с модом схема не может: переименовали константу в
  * `ProviderLoader` — переименуется и здесь, а не развалится молча.
  *
@@ -111,9 +111,9 @@ data class Field(
 
     private companion object {
         val BUILTIN_TYPES = setOf(
-            ProviderLoader.Types.URL,
-            ProviderLoader.Types.FILE,
-            ProviderLoader.Types.JSON,
+            ProviderNames.Types.URL,
+            ProviderNames.Types.FILE,
+            ProviderNames.Types.JSON,
         )
     }
 }
@@ -251,56 +251,56 @@ object ConfigSchema {
      */
     fun providerFields(): List<Field> = listOf(
         Field(
-            name = ProviderLoader.Keys.NAME,
+            name = ProviderNames.Keys.NAME,
             type = SchemaType.STR,
             doc = "Имя провайдера. Идёт только в сообщения и `/cp status`, " +
                 "на выбор плаща не влияет.",
             def = "provider-<type>",
         ),
         Field(
-            name = ProviderLoader.Keys.TYPE,
+            name = ProviderNames.Keys.TYPE,
             type = SchemaType.STR,
             doc = "Как получать плащ: `url` — прямая ссылка, `json` — достать " +
                 "ссылку из JSON, `file` — файл в папке игры. Тип от аддона " +
                 "тоже подходит.",
             required = true,
-            allowed = listOf(ProviderLoader.Types.URL, ProviderLoader.Types.JSON, ProviderLoader.Types.FILE),
+            allowed = listOf(ProviderNames.Types.URL, ProviderNames.Types.JSON, ProviderNames.Types.FILE),
             open = true,
         ),
         Field(
-            name = ProviderLoader.Keys.PRIORITY,
+            name = ProviderNames.Keys.PRIORITY,
             type = SchemaType.INT,
             doc = "Чем больше, тем раньше проверяется провайдер. При равном " +
                 "приоритете — порядок в списке, затем те, у кого есть условие.",
             def = "0",
         ),
         Field(
-            name = ProviderLoader.Keys.WHEN,
+            name = ProviderNames.Keys.WHEN,
             type = SchemaType.DICT,
             doc = "Условия проверки по миру того, кто смотрит. Пустое условие " +
                 "совпадает всегда.",
         ),
         Field(
-            name = ProviderLoader.Keys.URL,
+            name = ProviderNames.Keys.URL,
             type = SchemaType.STR,
             doc = "Адрес плаща. Внутри понимает `{username}`, `{uuid}` и `{root}`.",
             required = true,
-            appliesTo = setOf(ProviderLoader.Types.URL, ProviderLoader.Types.JSON),
+            appliesTo = setOf(ProviderNames.Types.URL, ProviderNames.Types.JSON),
         ),
         Field(
-            name = ProviderLoader.Keys.PATH,
+            name = ProviderNames.Keys.PATH,
             type = SchemaType.STR,
             doc = "Файл плаща в папке игры. Внутри понимает `{username}`, " +
                 "`{uuid}` и `{root}`.",
             required = true,
-            appliesTo = setOf(ProviderLoader.Types.FILE),
+            appliesTo = setOf(ProviderNames.Types.FILE),
         ),
         Field(
-            name = ProviderLoader.Keys.EXTRACT,
+            name = ProviderNames.Keys.EXTRACT,
             type = SchemaType.STR,
             doc = "Путь к ссылке внутри JSON-ответа, например `$.data.cape_url`.",
             required = true,
-            appliesTo = setOf(ProviderLoader.Types.JSON),
+            appliesTo = setOf(ProviderNames.Types.JSON),
         ),
     )
 
