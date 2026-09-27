@@ -24,10 +24,14 @@ class CapeEventBus {
     }
 
     /** Разослать событие всем подписчикам [type]. Вызывается только модом. */
-    @Synchronized
     fun emit(event: CapeEvent) {
-        val list = listeners[event.type] ?: return
-        for (l in list.toList()) {
+        // Снимок под монитором, вызовы — вне. Иначе один долгий слушатель
+        // (сеть, диск) держал бы на этом мониторе и подписку с другого потока:
+        // emit ждал бы сам себя, а аддон не смог бы ни отписаться, ни
+        // подписаться. Реентрантность Java-монитора от самоблокировки не
+        // спасает — мешает именно чужая работа под локом.
+        val snapshot = synchronized(this) { listeners[event.type]?.toList() } ?: return
+        for (l in snapshot) {
             try {
                 l(event)
             } catch (e: Exception) {

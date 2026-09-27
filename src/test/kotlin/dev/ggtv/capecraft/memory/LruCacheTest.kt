@@ -83,4 +83,30 @@ class LruCacheTest {
         assertTrue(c.count == 1)
         assertEquals(6L, c.size)
     }
+
+    @Test
+    fun `contains не поднимает ключ в LRU — это запрос, а не использование`() {
+        val c = cache(2)
+        c.put(1, "a")
+        c.put(2, "b")
+
+        assertTrue(c.contains(1))
+        // Порядок не изменился: 1 всё ещё самый старый, и вытеснится первым.
+        assertEquals(listOf(1, 2), c.keys.toList())
+        c.put(3, "c")
+        assertNull(c.get(1), "contains не должен был спасти ключ 1 от вытеснения")
+        assertEquals("c", c.get(3))
+    }
+
+    @Test
+    fun `get после contains поднимает ключ, contains — нет`() {
+        val c = cache(2)
+        c.put(1, "a")
+        c.put(2, "b")
+        c.contains(1)   // без эффекта
+        c.get(1)        // а вот это уже использование
+        c.put(3, "c")   // вытеснит 2, а не 1
+        assertNull(c.get(2))
+        assertEquals("a", c.get(1))
+    }
 }
