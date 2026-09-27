@@ -27,6 +27,40 @@
 не той версии — мод запустится, но поведёт себя не так, как собран (см.
 `AGENTS.md`, раздел «artifacts/ — ставить ТОЛЬКО отсюда»).
 
+## Редактор: LSP для `.kn`
+
+Для конфигов есть Language Server: подсказки ключей и значений, проверка
+ошибок, документация по наведению и быстрые правки опечаток. Работает
+поверх того же анализатора, что и мод, — подсказки не могут разойтись с
+реальной схемой.
+
+```bash
+./gradlew lspJar        # -> artifacts/capecraft-lsp.jar
+```
+
+Нужен только JRE (Java 17+), Minecraft и Fabric не требуются: в jar нет ни
+одного класса от них. Подключение к Neovim:
+
+```lua
+vim.filetype.add({ extension = { kn = "kn", crn = "kn" } })
+
+vim.lsp.config("capecraft", {
+  cmd = { "java", "-jar", "/путь/к/CapeCraft/artifacts/capecraft-lsp.jar" },
+  filetypes = { "kn" },
+  root_dir = function(bufnr, on_dir)
+    -- Именно on_dir: в vim.lsp.config результат return игнорируется.
+    on_dir(vim.fs.dirname(vim.api.nvim_buf_get_name(bufnr)))
+  end,
+})
+vim.lsp.enable("capecraft")
+```
+
+Умеет: `initialize`, полная синхронизация документа (`didOpen`/`didChange`/
+`didSave`/`didClose`), `completion` (в том числе сниппеты, достраивающие
+блоки), `hover`, `codeAction` с готовой правкой, `shutdown`/`exit`.
+Позиции считаются в UTF-16 code units, как требует протокол, поэтому
+эмодзи и другие символы вне BMP не сдвигают курсор.
+
 ## Конфигурация
 
 При первом запуске создаётся `config/capecraft.kn`. Формат — [KoreN](https://github.com/i3667563-dot/koren) (Minecraft-aware `.kn`), поверх [Kjen](https://github.com/i3667563-dot/kjen) — Kotlin-порта формата Cren. Минималистично и читаемо: вложенность обозначается отступами, списки — квадратными скобками.
