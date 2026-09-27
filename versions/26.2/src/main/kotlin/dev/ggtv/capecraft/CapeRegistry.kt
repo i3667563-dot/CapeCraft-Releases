@@ -519,6 +519,23 @@ class CapeRegistry(
     fun get(uuid: String): AnimatedImage? = synchronized(lock) { memory.get(uuid) }
 
     /**
+     * Совместимость с аддонами, собранными против CapeCraft, где у метода
+     * не было параметра контекста.
+     *
+     * Тонкость, из-за которой это нельзя было сделать значением по
+     * умолчанию: у `ensureLoading(uuid, username, context = world)` есть
+     * только дескриптор `(String, String, WorldContext)` плюс синтетический
+     * мост для Kotlin-вызовов. Настоящей `(String, String)V` в байткоде нет.
+     * Kotlin-вызов этого не замечает, а вот аддон — замечает:
+     * `capecraft-bedwars` звал ровно `ensureLoading(String, String)` и на
+     * CapeCraft 1.1.1 падал с `NoSuchMethodError` в тике, то есть игра
+     * рушилась в первом же матче. Поэтому перегрузка настоящая, а не
+     * значение по умолчанию, и синтетический мост трёхаргументной версии
+     * остаётся на месте — старые Kotlin-вызовы продолжают работать.
+     */
+    fun ensureLoading(uuid: String, username: String) = ensureLoading(uuid, username, world)
+
+    /**
      * Гарантировать, что плащ загружается (идемпотентно). Планирует фоновую
      * загрузку, если плаща ещё нет и он не грузится. Возвращается сразу,
      * без декода на вызывающем потоке.
