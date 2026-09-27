@@ -2,6 +2,7 @@ package dev.ggtv.koren
 
 import dev.ggtv.kjen.CrenError
 import dev.ggtv.kjen.Span
+import dev.ggtv.kjen.TextRange
 
 /**
  * Токенизатор `.kn`. Строка — слово, точка, скобка или функция; всё остальное
@@ -30,6 +31,20 @@ object KorenTokenizer {
 
         while (i < len) {
             val start = Span(line, col)
+
+            /**
+             * Добавить токен, начало которого — [start], а конец — текущая
+             * позиция после сканирования.
+             *
+             * Позиция конца тут терялась годами: токенизатор её знает, но
+             * сохранять было некуда, и редактор получал только точку. Один
+             * `emit` вместо прямых вызовов заодно не даёт забыть про конец
+             * в новом виде токена.
+             */
+            fun emit(kind: KorenTokenKind) {
+                tokens += KorenToken(kind, start, Span(line, col))
+            }
+
             val c = peek()
 
             fun advance(codePoint: Int = c) {
@@ -42,7 +57,7 @@ object KorenTokenizer {
 
                 '\n'.code -> {
                     advance()
-                    tokens += KorenToken(KorenTokenKind.Newline, start)
+                    emit(KorenTokenKind.Newline)
                     line += 1
                     col = 1
                 }
@@ -54,7 +69,7 @@ object KorenTokenizer {
                         text.appendCodePoint(nextCp())
                         col += 1
                     }
-                    tokens += KorenToken(KorenTokenKind.Comment(text.toString().trim()), start)
+                    emit(KorenTokenKind.Comment(text.toString().trim()))
                 }
 
                 '"'.code -> {
@@ -98,23 +113,22 @@ object KorenTokenizer {
                             }
                         }
                     }
-                    tokens += KorenToken(
-                        KorenTokenKind.Str(interpolateEnvironment(value.toString(), env, start)),
-                        start,
+                    emit(
+                        KorenTokenKind.Str(interpolateEnvironment(value.toString(), env, start))
                     )
                 }
 
-                '='.code -> { advance(); tokens += KorenToken(KorenTokenKind.Assign, start) }
-                '{'.code -> { advance(); tokens += KorenToken(KorenTokenKind.LBrace, start) }
-                '}'.code -> { advance(); tokens += KorenToken(KorenTokenKind.RBrace, start) }
-                '['.code -> { advance(); tokens += KorenToken(KorenTokenKind.LBracket, start) }
-                ']'.code -> { advance(); tokens += KorenToken(KorenTokenKind.RBracket, start) }
-                ':'.code -> { advance(); tokens += KorenToken(KorenTokenKind.Colon, start) }
-                ','.code -> { advance(); tokens += KorenToken(KorenTokenKind.Comma, start) }
+                '='.code -> { advance(); emit(KorenTokenKind.Assign) }
+                '{'.code -> { advance(); emit(KorenTokenKind.LBrace) }
+                '}'.code -> { advance(); emit(KorenTokenKind.RBrace) }
+                '['.code -> { advance(); emit(KorenTokenKind.LBracket) }
+                ']'.code -> { advance(); emit(KorenTokenKind.RBracket) }
+                ':'.code -> { advance(); emit(KorenTokenKind.Colon) }
+                ','.code -> { advance(); emit(KorenTokenKind.Comma) }
 
-                '.'.code -> { advance(); tokens += KorenToken(KorenTokenKind.Dot, start) }
-                '('.code -> { advance(); tokens += KorenToken(KorenTokenKind.LParen, start) }
-                ')'.code -> { advance(); tokens += KorenToken(KorenTokenKind.RParen, start) }
+                '.'.code -> { advance(); emit(KorenTokenKind.Dot) }
+                '('.code -> { advance(); emit(KorenTokenKind.LParen) }
+                ')'.code -> { advance(); emit(KorenTokenKind.RParen) }
 
                 '-'.code, in '0'.code..'9'.code -> {
                     val number = StringBuilder()
@@ -131,7 +145,7 @@ object KorenTokenizer {
                                     break
                                 }
                             }
-                            tokens += KorenToken(KorenTokenKind.Word(number.toString()), start)
+                            emit(KorenTokenKind.Word(number.toString()))
                             continue
                         }
                     }
@@ -164,25 +178,24 @@ object KorenTokenizer {
                         if (floating) {
                             throw CrenError.Parse("после дробного числа ожидался разделитель", start)
                         }
-                        tokens += KorenToken(KorenTokenKind.Word(number.toString()), start)
+                        emit(KorenTokenKind.Word(number.toString()))
                         continue
                     }
 
                     val text = number.toString()
-                    tokens += if (floating) {
+                    if (floating) {
                         val value = text.toDoubleOrNull()
                             ?: throw CrenError.Parse("неверное число: «$text»", start)
                         if (!value.isFinite()) {
                             throw CrenError.Parse("число вне диапазона f64: «$text»", start)
                         }
-                        KorenToken(KorenTokenKind.Float(value), start)
+                        emit(KorenTokenKind.Float(value))
                     } else {
-                        KorenToken(
+                        emit(
                             KorenTokenKind.Int(
                                 text.toLongOrNull()
                                     ?: throw CrenError.Parse("неверное число: «$text»", start),
                             ),
-                            start,
                         )
                     }
                 }
@@ -209,9 +222,8 @@ object KorenTokenizer {
                         raw.appendCodePoint(next)
                         advance(next)
                     }
-                    tokens += KorenToken(
-                        KorenTokenKind.Str(interpolateEnvironment(raw.toString(), env, start)),
-                        start,
+                    emit(
+                        KorenTokenKind.Str(interpolateEnvironment(raw.toString(), env, start))
                     )
                 }
 
@@ -228,7 +240,7 @@ object KorenTokenizer {
                             "false" -> KorenTokenKind.Bool(false)
                             else -> KorenTokenKind.Word(text)
                         }
-                        tokens += KorenToken(kind, start)
+                        emit(kind)
                     } else {
                         throw CrenError.Parse("неожиданный символ: «${cpChar(c)}»", start)
                     }
@@ -367,6 +379,23 @@ sealed interface KorenTokenKind {
     data object Newline : KorenTokenKind
 }
 
-data class KorenToken(val kind: KorenTokenKind, val span: Span) {
+/**
+ * Токен с позицией в исходнике — для человеческих ошибок.
+ *
+ * @property span начало токена; ради совместимости остаётся точкой
+ * @property end позиция сразу за последним символом, без неё — [span]
+ */
+data class KorenToken(val kind: KorenTokenKind, val span: Span, val end: Span = span) {
+    /**
+     * Диапазон токена целиком — то, что редактору нужно для подчёркивания.
+     *
+     * У точки его нет: односимвольный токен вроде `{` даёт диапазон в один
+     * символ, а многострочная строка — от открывающей кавычки до закрывающей.
+     */
+    val range: TextRange get() = TextRange(span, end)
+
+    /** Токен занял больше одной строки. */
+    val isMultiline: Boolean get() = end.line != span.line
+
     override fun toString(): String = kind.toString()
 }

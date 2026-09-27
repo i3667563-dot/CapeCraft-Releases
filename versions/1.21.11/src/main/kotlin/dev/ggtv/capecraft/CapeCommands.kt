@@ -109,6 +109,11 @@ object CapeCommands {
             ctx.source.sendFeedback(Text.literal("Переопределение из окружения: $override"))
         }
         ctx.source.sendFeedback(Text.literal("Объектов с набором: ${registry.knownObjectIds().size}"))
+        // Сколько объектов носит мой набор принудительно: без мода, с
+        // выключенной синхронизацией или на сервере не-CapeCraft. Пока их
+        // нет, правило либо ещё не сработало (срок ожидания), либо все
+        // объекты объявились.
+        ctx.source.sendFeedback(Text.literal("Мой набор принудительно: ${registry.forcedLocalCount()}"))
         ctx.source.sendFeedback(Text.literal("Картинок по сети в кэше: ${registry.networkImages.count()} " +
             "(${registry.networkImages.totalBytes()} байт), своих: ${registry.networkImages.ownedCount()}"))
         val state = CapeSyncClient.stateForStatus()

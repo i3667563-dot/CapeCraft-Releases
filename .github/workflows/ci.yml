@@ -77,27 +77,22 @@ jobs:
           find artifacts -name 'capecraft-*.jar' -exec cp {} release/ \;
           ls -la release/
 
+      - name: Check release notes exist
+        run: |
+          notes="release-notes/${{ steps.meta.outputs.version }}.md"
+          # Без этой проверки релиз выходит с пустым описанием, и заметки
+          # про синхронизацию молча теряются.
+          test -s "$notes" || { echo "::error::нет заметок релиза: $notes"; exit 1; }
+          echo "заметки релиза: $notes"
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           name: "CapeCraft ${{ steps.meta.outputs.version }}"
           tag_name: ${{ github.ref_name }}
-          body: |
-            ## CapeCraft ${{ steps.meta.outputs.version }}
-
-            Кастомные анимированные плащи для Minecraft 1.21.1 / 1.21.4 / 1.21.8 / 1.21.10 / 1.21.11 / 26.2 (Fabric).
-
-            ### Установка
-            1. Установи [Fabric Loader](https://fabricmc.net/) для своей версии Minecraft
-            2. Скопируй нужный `capecraft-${{ steps.meta.outputs.version }}-<версия>.jar` в папку `mods/`
-            3. Запусти игру
-
-            ### Поддерживаемые форматы
-            PNG • APNG • GIF • WebP (lossless)
-
-            ### Конфигурация
-            `config/capecraft.kn` — создаётся автоматически при первом запуске.
-            См. [README](https://github.com/${{ github.repository }}/blob/main/README.md) для подробностей.
+          # Тело релиза берётся из файла, а не из этого workflow:
+          # зашитый текст всегда расходился с реальным составом версий.
+          body_path: release-notes/${{ steps.meta.outputs.version }}.md
           files: release/*.jar
           draft: false
           prerelease: false
