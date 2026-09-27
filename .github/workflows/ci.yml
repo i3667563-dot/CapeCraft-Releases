@@ -42,16 +42,16 @@ jobs:
       - name: Build (${{ matrix.mc }})
         run: ./gradlew build -Pmc=${{ matrix.mc }}
 
-      - name: Rename artifact with MC version
-        run: |
-          version=$(grep '^mod_version=' gradle.properties | cut -d= -f2)
-          mv build/libs/capecraft-${version}.jar build/libs/capecraft-${version}-${{ matrix.mc }}.jar
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: capecraft-${{ matrix.mc }}
-          path: build/libs/capecraft-*-${{ matrix.mc }}.jar
+          # Ничего переименовывать не нужно: assemble уже finalizedBy
+          # publishArtifact, и jar лежит в artifacts/capecraft-<version>-<mc>.jar.
+          # Раньше здесь стоял `mv build/libs/capecraft-<version>.jar`, но сборка
+          # пишет в build/<mc>/libs/ — пути не существовало, и CI падал после
+          # успешной сборки (так сломался и прогон 1.1.0).
+          path: artifacts/capecraft-*-*.jar
           retention-days: 14
 
   release:
