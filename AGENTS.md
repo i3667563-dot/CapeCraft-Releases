@@ -660,6 +660,40 @@ version-free, и это ломало попытку собрать LSP отде�
   сервер добавляется в `opts.servers` плагина `nvim-lspconfig` (импортера
   каталога `lua/lsp/` в этой версии LazyVim нет).
 
+### Пропадающий `blink.cmp`: незавершённая загрузка нативной библиотеки
+
+- **Симптом:** `require("blink.cmp").is_active()` и `is_visible()` всегда
+  `false`, меню не появляется ни в одном filetype (в том числе в `.lua`),
+  список пунктов пуст, **в `:messages` нет ни ошибки, ни внятного варнинга**.
+  Первое подозрение обычно падает на «испорченный конфиг» — он тут ни при
+  чём.
+- **Причина:** `cmp.setup()` ждёт `fuzzy.download.ensure_downloaded`, а тот
+  грузит `libblink_cmp_fuzzy.so` в
+  `~/.local/share/nvim/lazy/blink.cmp/target/release/`. Прерванная загрузка
+  (закрытый nvim, убитый по timeout) оставляет рядом полный
+  `libblink_cmp_fuzzy.so.tmp`, но **не делает финальное переименование** —
+  `setup` не доходит до конца, и blink не регистрирует меню. Путь
+  вычисляется в `lua/blink/cmp/fuzzy/download/files.lua`, а не в
+  `~/.local/share/nvim/blink`: отсутствие последнего каталога ничего не
+  значит.
+- **Диагностика:** сравнить `sha256sum libblink_cmp_fuzzy.so.tmp` с
+  `libblink_cmp_fuzzy.so.sha256`. Совпало — файл цел, достаточно
+  `mv libblink_cmp_fuzzy.so.tmp libblink_cmp_fuzzy.so`. Не совпало или
+  `.tmp` нет — дать blink допкачать библиотеку, не убивая сессию.
+- **Обход без нативного кода:** `fuzzy = { implementation = "lua" }` в
+  spec-плагине. Медленнее fuzzy, зато не зависит от загрузки бинарника.
+- **Проверять blink только в tmux.** `nvim -c 'luafile ...'` не эмулирует
+  ввод: `feedkeys(..., "x")` вводит символ, но восстанавливает режим как
+  `:normal` (и `cmp.accept()` становится no-op), а `feedkeys(..., "t")` внутри
+  синхронного скрипта не вводит ничего, потому что не крутится main loop.
+  Рабочий вариант — `tmux send-keys` в живой сессии.
+- **Итоговый конфиг** лежит в `__index`-прокси модуля
+  `blink.cmp.config`, а не в возвращаемой таблице функций. `autotrigger` в
+  blink 1.10 больше нет: это `completion.trigger.show_on_keyword`.
+- **Кавычки вставляет сервер, а не blink:** подсказки значений несут
+  `insertText = "\"...\""` (`CrenAnalyzer`), поэтому `type = |` после принятия
+  даёт `type = "url"`.
+
 ## Портирование 26.2 (Mojang) → Yarn-версии
 
 1.21.x версии между собой различаются только API, поэтому Semantic Sync v2
