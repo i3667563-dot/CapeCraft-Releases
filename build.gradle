@@ -197,7 +197,7 @@ tasks.register('lspJar', Jar) {
 	manifest.attributes(
 		'Main-Class': 'dev.ggtv.capecraft.lsp.MainKt',
 		'Implementation-Title': 'CapeCraft LSP',
-		'Implementation-Version': project.mod_version,
+		'Implementation-Version': project.lsp_version,
 	)
 	from(sourceSets.main.output)
 	from({

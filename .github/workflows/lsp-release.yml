@@ -1,0 +1,53 @@
+name: LSP Release
+
+on:
+  push:
+    tags: ['lsp-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 26
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build LSP jar
+        run: ./gradlew lspJar
+
+      - name: Get version from tag
+        id: meta
+        run: echo "version=${GITHUB_REF#refs/tags/lsp-v}" >> "$GITHUB_OUTPUT"
+
+      - name: Check release notes exist
+        run: |
+          notes="release-notes/lsp/${{ steps.meta.outputs.version }}.md"
+          test -s "$notes" || { echo "::error::нет заметок релиза: $notes"; exit 1; }
+          echo "заметки релиза: $notes"
+
+      - name: Check manifest version matches tag
+        run: |
+          manifest_ver=$(unzip -p artifacts/capecraft-lsp.jar META-INF/MANIFEST.MF | grep -i '^Implementation-Version:' | tr -d '\r' | awk '{print $2}')
+          echo "мой тег: ${{ steps.meta.outputs.version }}, в манифесте: $manifest_ver"
+          test "$manifest_ver" = "${{ steps.meta.outputs.version }}" \
+            || { echo "::error::версия в манифесте ($manifest_ver) не совпадает с тегом (${{ steps.meta.outputs.version }}). Обнови lsp_version в gradle.properties."; exit 1; }
+
+      - name: Create LSP release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "capecraft-lsp ${{ steps.meta.outputs.version }}"
+          tag_name: ${{ github.ref_name }}
+          body_path: release-notes/lsp/${{ steps.meta.outputs.version }}.md
+          files: artifacts/capecraft-lsp.jar
+          draft: false
+          # Тег с дефисом (lsp-v0.1-beta) — пре-релиз; без дефиса — стабильный.
+          prerelease: ${{ contains(github.ref_name, '-') }}

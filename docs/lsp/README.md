@@ -1,5 +1,9 @@
 # capecraft-lsp
 
+> **Статус: бета (0.1-beta).** Сервер под тегами `lsp-v*`,
+> релизы — в GitHub-релизах репозитория. Обновления частые; как поставить —
+> см. «Релиз».
+
 Language Server для `.kn`/`.crn` — конфигов CapeCraft на языке
 [KoreN](https://github.com/i3667563-dot/koren) (Minecraft-aware `.kn`) поверх
 [Kjen](https://github.com/i3667563-dot/kjen) — Kotlin-порта формата Cren.
@@ -43,6 +47,28 @@ Language Server для `.kn`/`.crn` — конфигов CapeCraft на язык
 Имя jar'а не содержит версию — путь к серверу живёт в конфиге редактора, и
 версия в имени заставила бы править его на каждом релизе.
 
+## Релиз
+
+LSP-сервер — отдельный артефакт в этом же репозитории, со **своей** версией
+(`lsp_version` в `gradle.properties`), независимой от `mod_version`. Код
+остаётся в дереве мода намеренно: сервер строит только поверх того же
+анализатора, что и игра (см. «Единый источник правды» ниже). Привязка кода к
+репозиторию не привязывает релиз к релизу мода — они выпускаются раздельно.
+
+Процедура:
+
+1. Поднять `lsp_version` в `gradle.properties` (например `0.1-beta` → `0.1.1-beta`).
+2. Написать заметки релиза в `release-notes/lsp/<версия>.md` — без этого файла
+   workflow упадёт намеренно, список изменений не должен теряться.
+3. `git tag lsp-v<версия>` и `git push origin lsp-v<версия>`.
+4. Workflow `.github/workflows/lsp-release.yml` соберёт `lspJar`, сверит версию
+   в манифесте с тегом (ошибка, если `lsp_version` забыли поднять), прикрепит
+   `capecraft-lsp.jar` к GitHub-релизу `capecraft-lsp <версия>`.
+
+Обновление у клиента — через переменные окружения в подключении к серверу
+(см. «Подключение к редактору»): `CAPECRAFT_LSP_JAR` указывает на скачанный
+из релиза jar, при желании `CAPECRAFT_JAVA` — на свой JDK.
+
 ## Запуск
 
 ```bash
@@ -85,7 +111,15 @@ Zed не умеет регистрировать новый язык через 
 
 Скрипт собирает WASI-компонент под `wasm32-wasip2`, кладёт его в
 `~/.local/share/zed/extensions/installed/koren/` и добавляет запись в
-`~/.local/share/zed/extensions/index.json`. В `settings.json` остаётся:
+`~/.local/share/zed/extensions/index.json`. Пути к java и jar расширение
+берёт из переменных окружения, по умолчанию — из машин разработчика:
+
+```bash
+export CAPECRAFT_LSP_JAR="$HOME/.local/share/capecraft/capecraft-lsp.jar"   # скачанный из релиза
+export CAPECRAFT_JAVA=/usr/lib/jvm/java-26-openjdk/bin/java                  # по желанию
+```
+
+В `settings.json` остаётся:
 
 ```json
 "languages": {
@@ -186,7 +220,7 @@ capeCraft {
 ```bash
 ./gradlew test                          # версия по умолчанию (26.2)
 ./gradlew test -Pmc=1.21.1              # конкретная версия Minecraft
-./gradlew test --tests 'dev.ggtv.capecraft.lsp.*'   # только сервер: 60 тестов
+./gradlew test --tests 'dev.ggtv.capecraft.lsp.*'   # только сервер: 76 тестов
 ```
 
 Тесты сервера (`lsp/LspServerTest.kt`) идут через настоящий `RpcTransport`:
