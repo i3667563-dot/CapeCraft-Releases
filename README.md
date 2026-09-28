@@ -77,6 +77,33 @@ vim.lsp.enable("capecraft")
 включается автоматически (начиная с 0.12), но группы `@lsp.type.*` нужно
 назвать: имя у них с хвостом filetype, а темы заводят без него.
 
+### Zed
+
+В Zed настройками settings.json не обойтись: там можно переопределить
+свойства уже известного языка, но не завести новый. Нужно расширение на
+WASI-компонент, которое и регистрирует язык KoreN для `.kn`/`.crn`, и
+поднимает сервер:
+
+```bash
+./tools/zed-koren/install.sh
+```
+
+Скрипт собирает `wasm32-wasip2`, кладёт расширение в
+`~/.local/share/zed/extensions/installed/koren/` и добавляет запись в
+`index.json`. После перезапуска Zed в `settings.json` нужно оставить:
+
+```json
+"languages": {
+  "KoreN": {
+    "semantic_tokens": "full",
+    "language_servers": ["capecraft"]
+  }
+}
+```
+
+`full`, а не `combined`: tree-sitter-грамматики у KoreN нет, и всё
+цветовое оформление приходит из semantic tokens сервера.
+
 ## Конфигурация
 
 При первом запуске создаётся `config/capecraft.kn`. Формат — [KoreN](https://github.com/i3667563-dot/koren) (Minecraft-aware `.kn`), поверх [Kjen](https://github.com/i3667563-dot/kjen) — Kotlin-порта формата Cren. Минималистично и читаемо: вложенность обозначается отступами, списки — квадратными скобками.

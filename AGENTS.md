@@ -766,6 +766,42 @@ version-free, и это ломало попытку собрать LSP отде�
   сервер добавляется в `opts.servers` плагина `nvim-lspconfig` (импортера
   каталога `lua/lsp/` в этой версии LazyVim нет).
 
+### Zed 1.21: подключение KoreN
+
+- **Настройками новый язык не завести.** `settings.json` умеет только
+  переопределять свойства уже известного языка. Блок `languages.KoreN` с
+  `extensions`/`language_servers` грузится без ошибок, но сервер не
+  стартует: имя языка никто не регистрировал. Нужно расширение
+  (`tools/zed-koren`, ставится `./tools/zed-koren/install.sh`).
+- **Расширение — это WASI-компонент, а не core-модуль.** Сборка под
+  `wasm32-wasip1` даёт `failed to compile wasm component: ... attempted to
+  parse a wasm module with a component parser`. Нужен
+  `--target wasm32-wasip2`.
+- **Просто скопировать `extension.wasm` в каталог мало.** Расширение должно
+  лежать в `~/.local/share/zed/extensions/installed/<id>/` **и** быть
+  описано в `~/.local/share/zed/extensions/index.json` (запись в
+  `extensions` + в `languages` с `matcher.path_suffixes`). `work/<id>/`
+  используется для dev-расширений, но Zed 1.21 всё равно читает из
+  `installed/`. `index.json` Zed перезаписывает сам, поэтому после
+  ручной правки он должен быть валидным JSON целиком.
+- **Путь к `java` должен быть абсолютным.** `language_server_command`
+  возвращает `Command { command: "java" }`, и Zed ищет `java` в рабочем
+  каталоге расширения (`extensions/work/koren/java`) → `failed to spawn`.
+  Работает `/usr/lib/jvm/java-26-openjdk/bin/java` (то, что даёт
+  `readlink -f $(which java)`).
+- **Ошибки расширения видны только в логе** Zed
+  (`~/.local/share/zed/logs/Zed.log`, искать `[extension_host]` и
+  `[language::language_registry]`); в UI их нет. Сам `Zed.log` —
+  append-файл за все сессии, так что грепнуть надо по свежему времени, а не
+  по `tail`: последние строки могут оказаться сильно старше.
+- **`semantic_tokens: "full"`** обязателен: tree-sitter-грамматики у KoreN
+  нет, при `combined` Zed не знает, что красить без неё.
+- Проверка сквозного протокола: временная замена команды запуска на
+  python-прокси, который переписывает кадры LSP в файл (учесть заголовок
+  `Content-Length` — `readline()` по json без завершающего перевода строки
+  встанет). Так видно, что Zed шлёт `textDocument/semanticTokens/full`,
+  `textDocument/diagnostic`, `hover`.
+
 ### Пропадающий `blink.cmp`: незавершённая загрузка нативной библиотеки
 
 - **Симптом:** `require("blink.cmp").is_active()` и `is_visible()` всегда
