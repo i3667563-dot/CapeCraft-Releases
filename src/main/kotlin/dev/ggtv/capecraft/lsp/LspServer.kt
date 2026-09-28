@@ -5,6 +5,7 @@ import dev.ggtv.capecraft.ide.CrenDiagnostic
 import dev.ggtv.capecraft.ide.CrenDocument
 import dev.ggtv.capecraft.ide.CrenParser
 import dev.ggtv.capecraft.ide.PositionEncoding
+import dev.ggtv.capecraft.ide.SchemaMode
 import dev.ggtv.capecraft.schema.J
 import java.io.InputStream
 import java.io.OutputStream
@@ -36,6 +37,14 @@ class LspServer(
 
     /** Тексты открытых документов: uri -> текст. */
     private val docs = LinkedHashMap<String, String>()
+
+    /**
+     * Блок `capeCraft` в начале строки — признак конфига CapeCraft.
+     *
+     * Объявлен один раз: [schemaOf] дёргается на каждое нажатие, и собирать
+     * регулярку заново на каждый `publish` незачем.
+     */
+    private val ROOT_BLOCK = Regex("""(?m)^[ \t]*capeCraft[ \t]*[{=:]""")
 
     /**
      * Кодировка колонок, о которой договорились в `initialize`.
@@ -383,7 +392,7 @@ class LspServer(
         val offset = offsetOf(message, uri) ?: return reply(field(message, "id"), J.JArr(emptyList()))
         val doc = document(uri) ?: return reply(field(message, "id"), J.JArr(emptyList()))
 
-        val items = CrenAnalyzer.complete(doc, offset.coerceIn(0, doc.text.length))
+        val items = CrenAnalyzer.complete(doc, offset.coerceIn(0, doc.text.length), schemaOf(uri))
             .map { Lsp.completionItem(doc, it) }
         reply(field(message, "id"), J.JArr(items))
     }
@@ -397,7 +406,7 @@ class LspServer(
             reply(id, J.JNull)
             return
         }
-        val hover = CrenAnalyzer.hover(doc, offset.coerceIn(0, doc.text.length))
+        val hover = CrenAnalyzer.hover(doc, offset.coerceIn(0, doc.text.length), schemaOf(uri))
         reply(id, if (hover == null) J.JNull else Lsp.hover(hover.text))
     }
 
@@ -415,7 +424,7 @@ class LspServer(
         val from = clientPosition(doc, range, "start") ?: return noActions()
         val to = clientPosition(doc, range, "end") ?: return noActions()
         val actions = try {
-            CrenAnalyzer.diagnostics(doc)
+            CrenAnalyzer.diagnostics(doc, schemaOf(uri))
                 .filter {
                     it.fixes.isNotEmpty() &&
                         doc.offsetOf(it.range.start) <= to && from <= doc.endOffsetOf(it.range)
@@ -509,13 +518,14 @@ class LspServer(
      */
     private fun onPullDiagnostics(message: J.JObj) {
         val id = field(message, "id")
-        val doc = uriOf(message)?.let { document(it) }
+        val uri = uriOf(message)
+        val doc = uri?.let { document(it) }
         if (doc == null) {
             reply(id, Lsp.pullDiagnostics(CrenDocument(""), emptyList(), encoding))
             return
         }
         val diagnostics = try {
-            Lsp.analyze(doc)
+            Lsp.analyze(doc, schemaOf(uri))
         } catch (e: Exception) {
             log("анализ для pull не удался: $e")
             emptyList<CrenDiagnostic>()
@@ -544,6 +554,28 @@ class LspServer(
 
     private fun document(uri: String): CrenDocument? = docs[uri]?.let { CrenDocument(it) }
 
+    /**
+     * Конфиг CapeCraft это этот файл или чужой `.kn`/`.crn`?
+     *
+     * Формат `.crn` общий (см. `koren/SPEC.md`): конфиг CapeCraft — лишь
+     * один файл среди `.crn`/`.kn`, и проверять по его схеме каждый файл
+     * нельзя, иначе в любом чужом `.crn` каждая строка становится
+     * «неизвестным ключом». Решение принимается по двум признакам:
+     *
+     * - имя файла — `capecraft.kn`/`capecraft.crn` (ровно те, что читает мод,
+     *   см. `CapeConfigFiles`); даже пустой такой файл проверяем, ведь
+     *   отсутствие блока `capeCraft` в нём — настоящая ошибка;
+     * - либо в тексте уже есть блок `capeCraft` — тогда проверяем копию
+     *   конфига под другим именем и любой файл, который человек пишет
+     *   с нуля: пока блок не напечатан, схема ещё не знает, чего ждать.
+     */
+    private fun schemaOf(uri: String): SchemaMode {
+        val name = uri.substringAfterLast('/').substringBeforeLast('.')
+        if (name.equals("capecraft", ignoreCase = true)) return SchemaMode.CAPECRAFT
+        val text = docs[uri] ?: return SchemaMode.LANGUAGE_ONLY
+        return if (ROOT_BLOCK.containsMatchIn(text)) SchemaMode.CAPECRAFT else SchemaMode.LANGUAGE_ONLY
+    }
+
     private fun uriOf(message: J.JObj): String? =
         (field(message, "params") as? J.JObj)
             ?.get("textDocument")
@@ -569,7 +601,7 @@ class LspServer(
         val text = docs[uri] ?: return
         val doc = CrenDocument(text)
         val diagnostics = try {
-            Lsp.analyze(doc)
+            Lsp.analyze(doc, schemaOf(uri))
         } catch (e: Exception) {
             // Анализатор на терпимом разборе бросать не должен, но если
             // выкинет — лучше пустой список ошибок, чем обрыв сессии.

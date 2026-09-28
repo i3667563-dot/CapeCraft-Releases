@@ -16,6 +16,7 @@ import dev.ggtv.capecraft.ide.CrenSeverity
 import dev.ggtv.capecraft.ide.CrenValue
 import dev.ggtv.capecraft.ide.EntryForm
 import dev.ggtv.capecraft.ide.PositionEncoding
+import dev.ggtv.capecraft.ide.SchemaMode
 import dev.ggtv.capecraft.schema.J
 import dev.ggtv.kjen.TextRange
 
@@ -40,7 +41,10 @@ object Lsp {
         CompletionKind.VALUE -> 12
         CompletionKind.TYPE -> 7
         CompletionKind.WHEN_ROOT -> 17 // Keyword
+        CompletionKind.WHEN_FIELD -> 5 // Field
         CompletionKind.OPERATOR -> 13 // Enum
+        CompletionKind.RANGE -> 13 // Enum
+        CompletionKind.SNIPPET -> 15 // Snippet
     }
 
     fun position(line: Int, character: Int): J.JObj = J.JObj(
@@ -119,16 +123,46 @@ object Lsp {
             "sortText" to J.JStr(c.sortText),
         )
         c.detail?.let { fields += "detail" to J.JStr(it) }
-        // Сниппет важнее insertText: у корня `when` он достраивает фигурные
-        // скобки и ставит курсор внутрь. insertText без скобок оставил бы
-        // `biome: ` без тела — и ошибка была бы уже в конфиге, а не в списке
-        // подсказок.
-        val text = c.snippet ?: c.insertText
+        // Сниппет — это **хвост** записи, а не замена ей: у ключа `name` это
+        // `: ""`, у корня `biome` — ` {\n\t$0\n}`. Отправлять только хвост
+        // нельзя: редактор заменит набранное слово на `": ""` и получится
+        // `{ : "" }`. Поэтому вставляемое слово собирается целиком.
+        var text = c.insertText + (c.snippet ?: "")
+        // Вставлять прямо в скобки нельзя: выйдет `{url: ""}` или
+        // `{weather {…}`. Пробел добавляется, только если человек его не
+        // напечатал, — и только когда ничего не заменяется: при вставке
+        // поверх `location.` такие пробелы не нужны.
+        val replace = c.replace
+        if (replace != null) {
+            val from = doc.offsetOf(replace.start)
+            val until = doc.offsetOf(replace.end)
+            if (from == until) {
+                val prev = doc.text.getOrNull(from - 1)
+                if (prev != null && !prev.isWhitespace()) text = " $text"
+                val next = doc.text.getOrNull(from)
+                if (next != null && !next.isWhitespace() && !text.endsWith(" ") &&
+                    !text.endsWith("\\n")
+                ) {
+                    text += " "
+                }
+            }
+        }
         fields += "insertText" to J.JStr(text)
         if (c.snippet != null) {
             // 2 = Snippet. Без этой метки клиент вставит `{\n\t$0\n}` как есть,
             // с долларом и номером, и файл станет невалидным.
             fields += "insertTextFormat" to J.JNum(2.0, true, 2L)
+        }
+        // Свой диапазон замены обязателен: клиент сам выбирает, что считать
+        // словом, и в `when { location.| }` часть из них заменяет `location`
+        // целиком. С диапазоном результат одинаков в любом редакторе.
+        c.replace?.let { replace ->
+            fields += "textEdit" to J.JObj(
+                listOf(
+                    "range" to range(doc, replace),
+                    "newText" to J.JStr(text),
+                ),
+            )
         }
         return J.JObj(fields)
     }
@@ -193,7 +227,10 @@ object Lsp {
         ),
     )
 
-    fun analyze(doc: CrenDocument): List<CrenDiagnostic> = CrenAnalyzer.diagnostics(doc)
+    fun analyze(
+        doc: CrenDocument,
+        schema: SchemaMode = SchemaMode.CAPECRAFT,
+    ): List<CrenDiagnostic> = CrenAnalyzer.diagnostics(doc, schema)
 
     // --- outline, сворачивание, pull-диагностика ---------------------------------
 

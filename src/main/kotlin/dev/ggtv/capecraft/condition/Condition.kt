@@ -29,7 +29,7 @@ data class Condition(val predicates: List<Predicate>) {
 
     companion object {
         /** Поле по умолчанию для корня без точки (`when { weather: "rain" }`). */
-        private val DEFAULT_FIELD = mapOf(
+        val DEFAULT_FIELDS = mapOf(
             WorldRoot.BIOME to "id",
             WorldRoot.WEATHER to "condition",
             WorldRoot.TIME to "period",
@@ -40,7 +40,7 @@ data class Condition(val predicates: List<Predicate>) {
          * Поля, которые живой мир действительно отдаёт.
          *
          * Держится в одном месте, потому что расходится с
-         * `DEFAULT_FIELD`: у `biome` поле по умолчанию — `id`, у `location`
+         * `DEFAULT_FIELDS`: у `biome` поле по умолчанию — `id`, у `location`
          * поля по умолчанию нет вовсе, и без этого списка ошибка советовала
          * несуществующее `location.id`.
          */
@@ -65,7 +65,7 @@ data class Condition(val predicates: List<Predicate>) {
                     "условие when: неизвестный корень мира «${parts.firstOrNull()}» " +
                         "(доступны: ${WorldRoot.entries.joinToString { it.segment }})",
                 )
-            val field = parts.getOrNull(1) ?: DEFAULT_FIELD[root]
+            val field = parts.getOrNull(1) ?: DEFAULT_FIELDS[root]
                 ?: throw IllegalArgumentException(
                     "условие when: для «${root.segment}» нужно указать поле — " +
                         "доступны: ${LIVE_FIELDS.getValue(root).joinToString()}",

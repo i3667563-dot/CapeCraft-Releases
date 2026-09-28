@@ -69,12 +69,39 @@ class LspServerTest {
         }
     """.trimIndent()
 
-    private fun openText(text: String): String {
+    private fun openText(text: String, uri: String = this.uri): String {
         val escaped = Json.render(J.JStr(text))
         return note(
             "textDocument/didOpen",
             """{"textDocument":{"uri":"$uri","languageId":"kn","version":1,"text":$escaped}}""",
         )
+    }
+
+    /** Метки подсказок в позиции `|` из [raw], для документа под [uri]. */
+    private fun completeAt(raw: String, uri: String): List<String> {
+        val at = raw.indexOf('|')
+        require(at >= 0 && raw.indexOf('|', at + 1) < 0) { "в фикстуре должен быть ровно один |: $raw" }
+        val text = raw.removeRange(at, at + 1)
+        val line = text.substring(0, at).count { it == '\n' }
+        val col = at - (text.lastIndexOf('\n', at - 1) + 1)
+        val res = Session(
+            openText(text, uri) +
+                req(
+                    1, "textDocument/completion",
+                    """{"textDocument":{"uri":"$uri"},"position":${position(line, col)}}""",
+                ),
+        ).run()
+        return res.last().arr("result").map { (it as J.JObj).str("label")!! }
+    }
+
+    /** Диагностики документа, открытого под своим [uri]. */
+    private fun diagnosticsOf(text: String, uri: String): List<String> {
+        val res = Session(
+            openText(text, uri) +
+                req(2, "textDocument/diagnostic", """{"textDocument":{"uri":"$uri"}}"""),
+        ).run()
+        val report = res.last { (it["id"] as? J.JNum)?.i == 2L }.obj("result")!!
+        return report.arr("items").map { (it as J.JObj).str("message")!! }
     }
 
     private fun position(line: Int, character: Int): String =
@@ -891,7 +918,11 @@ class LspServerTest {
         val items = res.last().arr("result")
         val root = items.map { it as J.JObj }.firstOrNull { it["insertTextFormat"] != null }
         assertNotNull(root, "корень when должен приходить сниппетом: ${items.map { (it as J.JObj).str("label") }}")
-        assertEquals(" {\n\t$0\n}", root.str("insertText"))
+        // Вставляется **слово целиком**: хвост ` {\n\t$0\n}` без `biome`
+        // заменил бы ключ на пустые скобки. Ведущий пробел — часть того же
+        // текста: клиент вставит ровно `insertText`, и без него блок
+        // склеился бы с `{` (`when: {biome {`).
+        assertEquals(" biome {\n\t$0\n}", root.str("insertText"))
     }
 
     @Test
@@ -1020,7 +1051,10 @@ class LspServerTest {
         ).run()
         // Диагностика при didOpen плюс ответ на подсказку.
         assertEquals(2, res.size, "диагностика и ответ: $res")
-        assertTrue(res.last().arr("result").isNotEmpty(), "подсказки в ключах serverSync: ${res.last()}")
+        // Именно `enabled`, а не «хоть что-то»: на строке с эмодзи ключей
+        // нет вовсе, и пустой список означал бы, что курсор увели на строку.
+        val labels = res.last().arr("result").map { (it as J.JObj)["label"]?.let { l -> (l as J.JStr).s } }
+        assertTrue(labels.contains("enabled"), "подсказки в ключах serverSync: $labels")
     }
 
     @Test
@@ -1054,5 +1088,198 @@ class LspServerTest {
     fun `закрытый stdin это штатное завершение`() {
         val code = LspServer(ByteArrayInputStream(ByteArray(0)), ByteArrayOutputStream()).run()
         assertEquals(0, code, "клиент закрыл канал — не ошибка")
+    }
+
+    /**
+     * Вставка подсказки ровно так, как её сделает редактор.
+     *
+     * Проверять, что сервер «прислал хорошие значения», мало: подсказка
+     * бесполезна, если после принятия в файле получается мусор. Здесь берётся
+     * настоящий ответ `textDocument/completion`, к его `textEdit` (либо
+     * `insertText`, если диапазона нет) прибавляется смещение — ровно то, что
+     * делает клиент, — и результат сравнивается с ожидаемым файлом.
+     */
+    private fun acceptAt(raw: String, label: String): String {
+        val at = raw.indexOf('|')
+        require(at >= 0 && raw.indexOf('|', at + 1) < 0) { "в фикстуре должен быть ровно один |: $raw" }
+        val text = raw.removeRange(at, at + 1)
+        val line = text.substring(0, at).count { it == '\n' }
+        val col = at - (text.lastIndexOf('\n', at - 1) + 1)
+        val res = Session(
+            openText(text) +
+                req(
+                    1, "textDocument/completion",
+                    """{"textDocument":{"uri":"$uri"},"position":${position(line, col)}}""",
+                ),
+        ).run()
+        val item = res.last().arr("result").map { it as J.JObj }
+            .firstOrNull { it.str("label") == label }
+            ?: error("подсказки $label нет: ${res.last().arr("result").map { (it as J.JObj).str("label") }}")
+
+        val edit = item.obj("textEdit")
+        val newText = edit?.str("newText") ?: item.str("insertText")!!
+        val lines = text.split("\n")
+        fun shift(p: J.JObj): Int {
+            val l = (p["line"] as J.JNum).i.toInt()
+            val c = (p["character"] as J.JNum).i.toInt()
+            return lines.take(l).sumOf { it.length + 1 } + c
+        }
+        val r = edit?.obj("range")
+        val start = r?.let { shift(it.obj("start")!!) } ?: col
+        val end = r?.let { shift(it.obj("end")!!) } ?: col
+        return text.substring(0, start) + newText + text.substring(end)
+    }
+
+    // ------------------------------------------- вставка подсказки в файл
+
+    @Test
+    fun `подсказка ключа вставляется вместе со своим значением`() {
+        // Проверяется не текст ответа, а итоговый файл: `insertText` без
+        // `snippet` дал бы `{ : "" }` — такой конфиг мод не прочитает.
+        assertEquals(
+            "capeCraft {\n    providers [\n        { name = \"a\", url: \"\" }\n    ]\n}\n",
+            acceptAt("capeCraft {\n    providers [\n        { name = \"a\",| }\n    ]\n}\n", "url"),
+        )
+    }
+
+    @Test
+    fun `пробел после запятой не удваивается`() {
+        // Пробел уже напечатан: сервер не должен добавлять второй.
+        assertEquals(
+            "capeCraft {\n    providers [\n        { name = \"a\", url: \"\" }\n    ]\n}\n",
+            acceptAt("capeCraft {\n    providers [\n        { name = \"a\", |}\n    ]\n}\n", "url"),
+        )
+    }
+
+    @Test
+    fun `пробел после запятой добавляется если его нет`() {
+        assertEquals(
+            "capeCraft {\n    providers [\n        { name = \"a\", url: \"\" }\n    ]\n}\n",
+            acceptAt("capeCraft {\n    providers [\n        { name = \"a\",| }\n    ]\n}\n", "url"),
+        )
+    }
+
+    @Test
+    fun `подсказка поля после точки не съедает корень`() {
+        assertEquals(
+            "capeCraft {\n    providers [\n        { name = \"a\", when = { location.y: 0 } }\n    ]\n}\n",
+            acceptAt("capeCraft {\n    providers [\n        { name = \"a\", when = { location.| } }\n    ]\n}\n", "location.y"),
+        )
+    }
+
+    @Test
+    fun `подсказка значения условия вставляется внутрь кавычек`() {
+        // Кавычки в ответе уже есть, поэтому заменяется строка целиком: если
+        // только содержимое, получилось бы `""sunset""`.
+        assertEquals(
+            "capeCraft {\n    providers [\n        { name = \"a\", when = { time.period: \"sunset\" } }\n    ]\n}\n",
+            acceptAt("capeCraft {\n    providers [\n        { name = \"a\", when = { time.period: \"|\" } }\n    ]\n}\n", "sunset"),
+        )
+    }
+
+    @Test
+    fun `подсказка ключа в when дописывает рабочее значение`() {
+        assertEquals(
+            "capeCraft {\n    providers [\n        { name = \"a\", when = { time.period: \"day\" } }\n    ]\n}\n",
+            acceptAt("capeCraft {\n    providers [\n        { name = \"a\", when = {| } }\n    ]\n}\n", "time.period"),
+        )
+    }
+
+    @Test
+    fun `корень условия вставляется вместе со скобками`() {
+        assertEquals(
+            "capeCraft {\n    providers [\n        { name = \"a\", when = { weather {\n\t$0\n} } }\n    ]\n}\n",
+            acceptAt("capeCraft {\n    providers [\n        { name = \"a\", when = {| } }\n    ]\n}\n", "weather"),
+        )
+    }
+
+    @Test
+    fun `пустой providers после подсказки остаётся рабочим конфигом`() {
+        val after = acceptAt("capeCraft {\n    providers [| ]\n}\n", "провайдер")
+        assertEquals(
+            "capeCraft {\n    providers [ { name = \"example\", type = \"url\", url = \"\" } ]\n}\n",
+            after,
+        )
+        // Главное: результат должен читаться модом без единой ошибки.
+        val reported = Session(openText(after)).run().flatMap { it.arr("diagnostics") }
+        assertEquals(0, reported.size, "подсказанный конфиг должен быть чистым: $reported")
+    }
+
+    @Test
+    fun `числовой оператор вставляется в кавычки значения`() {
+        assertEquals(
+            "capeCraft {\n    providers [\n        { name = \"a\", when = { location.y: \">0\" } }\n    ]\n}\n",
+            acceptAt("capeCraft {\n    providers [\n        { name = \"a\", when = { location.y: \"|\" } }\n    ]\n}\n", ">…"),
+        )
+    }
+
+    // --- .kn/`.crn` это общий формат, а конфиг CapeCraft — один файл -------
+
+    /**
+     * Регрессия: в `.crn`, который не конфиг CapeCraft, каждая строка
+     * приходила «неизвестным ключом» со списком `providers, limits,
+     * serverSync`. Формат `.crn` общий (koren/SPEC.md) — конфиг CapeCraft
+     * лишь один файл среди `.crn`/`.kn`, и схема его применима не ко всем.
+     */
+    @Test
+    fun `чужой crn-файл не проверяется по схеме конфига`() {
+        assertEquals(
+            emptyList(),
+            diagnosticsOf("lfg = \"g\"\n", "file:///home/user/test.crn"),
+            "у файла данных нет блока capeCraft, и это не ошибка",
+        )
+    }
+
+    @Test
+    fun `в чужом crn-файле остаётся проверка синтаксиса`() {
+        val msgs = diagnosticsOf("a = \"не закрыта\n", "file:///home/user/test.crn")
+        assertEquals(1, msgs.size, "синтаксис проверяется всегда: $msgs")
+        assertTrue(msgs.single().contains("не закрыта"), "сообщение: ${msgs.single()}")
+    }
+
+    @Test
+    fun `capecraft crn проверяется по схеме даже если блока нет`() {
+        // Имя файла решает: `capecraft.crn` — это тот самый legacy-конфиг,
+        // который мод читает, и пустой он быть не должен.
+        val msgs = diagnosticsOf("lfg = \"g\"\n", "file:///home/user/.minecraft/config/capecraft.crn")
+        assertTrue(
+            msgs.any { it.contains("неизвестный ключ «lfg»") },
+            "в файле конфига ключ сверяется со схемой: $msgs",
+        )
+    }
+
+    @Test
+    fun `копия конфига под другим именем проверяется по схеме`() {
+        val msgs = diagnosticsOf(
+            "capeCraft {\n  providers [ { name = \"a\", url = \"u\" } ]\n}\n",
+            "file:///home/user/my-caps.kn",
+        )
+        assertTrue(
+            msgs.any { it.contains("«type» обязателен") },
+            "блок capeCraft на месте — схема применяется: $msgs",
+        )
+    }
+
+    @Test
+    fun `в чужом crn-файле не предлагаются ключи конфига`() {
+        // Имя `limits` совпадает с разделом конфига CapeCraft, и чужой файл
+        // вполне может иметь свой `limits`. Ключи CapeCraft там предлагать
+        // нельзя: у человека в этом файле своя схема.
+        val labels = completeAt("limits {\n  |\n}\n", "file:///home/user/test.crn")
+        assertEquals(emptyList<String>(), labels, "у чужих ключей нет подсказок CapeCraft")
+    }
+
+    @Test
+    fun `в чужом crn-файле не предлагается заготовка провайдера`() {
+        val labels = completeAt("providers [ | ]\n", "file:///home/user/test.crn")
+        assertEquals(emptyList<String>(), labels, "список providers в чужом файле — не CapeCraft")
+    }
+
+    @Test
+    fun `в чужом crn-файле корни when остаются доступны`() {
+        // Корни мира — часть языка, а не схемы конфига: они нужны в любом
+        // `.kn`/`.crn`, который ими пользуется.
+        val labels = completeAt("gate = { when = { | } }\n", "file:///home/user/test.crn")
+        assertTrue(labels.contains("weather"), "корни мира остаются: $labels")
     }
 }

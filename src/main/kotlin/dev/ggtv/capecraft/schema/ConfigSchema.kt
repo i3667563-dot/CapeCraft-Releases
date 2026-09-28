@@ -139,6 +139,49 @@ object WhenSchema {
     const val RANGE_SEPARATOR = ".."
 
     /**
+     * Поля, где значение приходит числом.
+     *
+     * Только у них осмысленны `>`, `<`, `..` — [dev.ggtv.capecraft.condition.Op]
+     * для строк просто возвращает `false`, и подсказка «`>`» у
+     * `weather.condition` была бы враньём.
+     */
+    val NUMERIC_FIELDS: Map<WorldRoot, List<String>> = mapOf(
+        WorldRoot.BIOME to listOf("temperature"),
+        WorldRoot.TIME to listOf("tick"),
+        WorldRoot.LOCATION to listOf("x", "y", "z"),
+    )
+
+    /**
+     * Поля со списком значений: всё, что мир отдаёт, — и больше ничего.
+     *
+     * Список — ровно то, что возвращает живой мир, а не «вроде бы подходит».
+     * Проверяется тестом `WorldContextAgreementTest` по исходникам всех
+     * версий: `MinecraftWorldContext` отдаёт эти строки литералами, и разойтись
+     * с ним здесь можно только молча.
+     *
+     * Поля, которых тут нет, — свободные (`biome.id`, `dimension.id`) или
+     * числа ([NUMERIC_FIELDS]); перечислять их нельзя.
+     */
+    val VALUES: Map<WorldRoot, Map<String, List<String>>> = mapOf(
+        WorldRoot.BIOME to mapOf("precipitation" to listOf("none", "rain", "snow")),
+        WorldRoot.WEATHER to mapOf("condition" to listOf("clear", "rain", "thunder")),
+        // Порядок — как в `timeField`: сначала то, что человек ищет чаще.
+        WorldRoot.TIME to mapOf("period" to listOf("day", "sunrise", "sunset", "night")),
+        WorldRoot.DIMENSION to mapOf("type" to listOf("overworld", "nether", "end")),
+    )
+
+    /** Поле по умолчанию для корня без точки — из рантайма, не второй раз. */
+    fun defaultFieldOf(root: WorldRoot): String? = Condition.DEFAULT_FIELDS[root]
+
+    /** Значения поля: пустой список, если поле свободное или числовое. */
+    fun valuesOf(root: WorldRoot, field: String): List<String> =
+        VALUES[root]?.get(field).orEmpty()
+
+    /** Принимает ли поле числа, а значит ли [OPERATORS]. */
+    fun isNumeric(root: WorldRoot, field: String): Boolean =
+        NUMERIC_FIELDS[root]?.contains(field) == true
+
+    /**
      * Короткие записи корня без поля, разобранные в нормализованный вид.
      *
      * Ключ — синоним, как его пишет человек; значение — во что он превращается.
@@ -191,29 +234,35 @@ object WhenSchema {
     /** Короткие записи корня; у [WorldRoot.LOCATION] их нет. */
     fun aliasesOf(root: WorldRoot): List<String> = ALIASES[root]?.keys?.toList().orEmpty()
 
-    /** Человеческое описание поля — для подсказки. */
+    /**
+     * Человеческое описание поля — для подсказки.
+     *
+     * Перечисление значений не пишется руками: оно собирается из [VALUES], иначе
+     * подсказка «`snowy_plains`» и подсказка со списком значений разъедутся
+     * при первом же изменении списка — и разъедутся молча.
+     */
     fun docFor(root: WorldRoot, field: String): String? {
         val described = when (root) {
             WorldRoot.BIOME -> when (field) {
                 "id" -> "Идентификатор биома, как в реестре: `plains`, `snowy_plains`."
                 "temperature" -> "Температура биома, как отдаёт мир: ниже 0 — холодно."
-                "precipitation" -> "Осадки биома: `none`, `rain` или `snow`."
+                "precipitation" -> withValues(root, field, "Осадки биома")
                 else -> return null
             }
 
             WorldRoot.WEATHER -> when (field) {
-                "condition" -> "Погода: `clear`, `rain` или `thunder`."
+                "condition" -> withValues(root, field, "Погода")
                 else -> return null
             }
 
             WorldRoot.TIME -> when (field) {
-                "period" -> "Период суток: `day`, `sunrise`, `sunset` или `night`."
+                "period" -> withValues(root, field, "Период суток")
                 "tick" -> "Тик времени суток как число: 0 — полдень, `0..24000` — цикл."
                 else -> return null
             }
 
             WorldRoot.DIMENSION -> when (field) {
-                "type" -> "Тип измерения: `overworld`, `nether` или `end`."
+                "type" -> withValues(root, field, "Тип измерения")
                 "id" -> "Идентификатор измерения, как в реестре."
                 else -> return null
             }
@@ -226,6 +275,19 @@ object WhenSchema {
             }
         }
         return described
+    }
+
+    /**
+     * Описание с перечислением из [VALUES].
+     *
+     * Значения не выдумываются: если поля в [VALUES] нет, подпись остаётся
+     * голой. Дописывать «например» своими словами нельзя — человек вставит
+     * их в конфиг и будет ждать, что условие сработает.
+     */
+    private fun withValues(root: WorldRoot, field: String, caption: String): String {
+        val values = valuesOf(root, field)
+        if (values.isEmpty()) return caption
+        return values.joinToString(", ", "$caption: ", ".")
     }
 }
 

@@ -62,8 +62,17 @@ enum class CompletionKind {
     /** Корень условия `when`. */
     WHEN_ROOT,
 
+    /** Поле условия `when` — `location.y`, `dimension.type`. */
+    WHEN_FIELD,
+
     /** Оператор сравнения. */
     OPERATOR,
+
+    /** Диапазон `от..до`. */
+    RANGE,
+
+    /** Готовая запись целиком: пустой провайдер, `when { }`. */
+    SNIPPET,
 }
 
 /** Вариант в списке подсказок. */
@@ -76,10 +85,37 @@ data class CrenCompletion(
     val snippet: String? = null,
     val kind: CompletionKind = CompletionKind.KEY,
     val sortText: String = label,
+    /**
+     * Что именно заменить в файле, в кодировке документа.
+     *
+     * Без него редактор сам решает, что считать словом, и результат зависит
+     * от клиента: в `when { location.| }` часть клиентов считает словом
+     * `location` и заменяет его целиком, часть — только `location.`. Первое
+     * даёт `y: 0` на месте `location`, второе — то, что нужно. Диапазон
+     * снимает вопрос: заменяем ровно набранный префикс ключа.
+     */
+    val replace: TextRange? = null,
 )
 
 /** Что показать при наведении. */
 data class CrenHover(val range: TextRange, val text: String)
+
+/**
+ * Что проверять в документе: только язык или ещё и схему конфига CapeCraft.
+ *
+ * `.kn`/`.crn` — общий формат данных (см. `koren/SPEC.md`), а конфиг CapeCraft
+ * лишь один файл среди них. Схема конфига применима к `config/capecraft.kn`,
+ * но не к любому `.crn` подряд: у чужого файла нет блока `capeCraft`, и
+ * проверка превращалась в «неизвестный ключ» на каждой строке. Синтаксис,
+ * подсветка и корни мира при этом нужны везде.
+ */
+enum class SchemaMode {
+    /** Проверяем и язык, и схему конфига CapeCraft. */
+    CAPECRAFT,
+
+    /** Только язык: синтаксис, корни мира, подстановки. Схемы конфига нет. */
+    LANGUAGE_ONLY,
+}
 
 /** Вид контейнера в разобранном дереве. */
 enum class ContainerKind {
@@ -174,7 +210,10 @@ object CrenAnalyzer {
      * Бросить не может: это единственный метод, который редактор зовёт на
      * каждое изменение, и падение означало бы «подсветка пропала».
      */
-    fun diagnostics(doc: CrenDocument): List<CrenDiagnostic> {
+    fun diagnostics(
+        doc: CrenDocument,
+        schema: SchemaMode = SchemaMode.CAPECRAFT,
+    ): List<CrenDiagnostic> {
         val tree = CrenParser.parse(doc)
         val out = ArrayList<CrenDiagnostic>()
 
@@ -190,8 +229,13 @@ object CrenAnalyzer {
             )
         }
 
-        for (e in locate(tree)) out += checkEntry(doc, e)
-        for (c in containersOf(tree)) out += checkMissingKeys(c)
+        // Ключи и обязательные поля конфига в чужом `.crn`/`.kn` — не ошибки:
+        // там просто другая схема, и проверка по CapeCraft выдаёт поток
+        // «неизвестный ключ» на каждой строке.
+        if (schema == SchemaMode.CAPECRAFT) {
+            for (e in locate(tree)) out += checkEntry(doc, e)
+            for (c in containersOf(tree)) out += checkMissingKeys(c)
+        }
         return out.sortedWith(compareBy({ it.range.start.line }, { it.range.start.col }, { it.code }))
     }
 
@@ -550,7 +594,11 @@ object CrenAnalyzer {
      * Возвращает пустой список там, где подсказывать нечего: выдуманные
      * ключи вредят больше, чем отсутствие подсказок.
      */
-    fun complete(doc: CrenDocument, offset: Int): List<CrenCompletion> {
+    fun complete(
+        doc: CrenDocument,
+        offset: Int,
+        schema: SchemaMode = SchemaMode.CAPECRAFT,
+    ): List<CrenCompletion> {
         val tree = CrenParser.parse(doc)
         val located = locate(tree)
         // Курсор в разрыве после ключа проверяем первым: в `{ name | }`
@@ -561,25 +609,71 @@ object CrenAnalyzer {
 
         if (entry != null) {
             val e = entry.entry
-            if (atValuePosition(doc, offset, e)) {
-                valuesFor(entry)?.let { return it }
+            // Курсор в конце уже набранного ключа — человек ещё дописывает
+            // ключ (`when { location.| }`), а не пишет значение. Без этой
+            // проверки [atTypePosition] считал бы `location.` записью без
+            // значения и предлагал вместо полей типы значений.
+            if (!inKeyText(doc, offset, e)) {
+                if (atValuePosition(doc, offset, e)) {
+                    valuesFor(entry, valueRange(doc, e))?.let { return it }
+                }
+                // Внутри `when` условие пишется как `ключ: значение`, знак `=`
+                // там невозможен: предлагать типы после `location. ` — значит
+                // подсовывать заведомо неверную запись.
+                val inWhen = entry.container.path.lastOrNull() == "when"
+                if (!inWhen && atTypePosition(doc, offset, e)) return typeCompletions()
             }
-            if (atTypePosition(doc, offset, e)) return typeCompletions()
         }
 
         val container = containerAt(containersOf(tree), doc, offset) ?: return emptyList()
-        return keysFor(container)
+        // Ключ под курсором человек, скорее всего, переименовывает, а не
+        // добавляет: пока он лежит в [keysFor] в `used`, подсказать его же
+        // нельзя, и правка ключа упирается в пустой список.
+        val editing = entry?.entry?.keyText?.takeIf { inKeyText(doc, offset, entry.entry) }
+        // Набор ключей зависит от того, что человек уже напечатал: `location`
+        // и `location.y` — это один и тот же ключ, но подсказать надо разное.
+        val typed = keyPrefixAt(doc, offset)
+        val prefix = doc.text.substring(doc.offsetOf(typed.start), doc.offsetOf(typed.end))
+        // Ключи провайдеров и заготовка элемента списка — это схема конфига
+        // CapeCraft. Корни мира (`when`) относятся к самому языку и остаются
+        // доступны в любом `.kn`/`.crn`.
+        if (container.kind == ContainerKind.ARRAY && schema == SchemaMode.CAPECRAFT) {
+            return itemCompletionsFor(container, typed)
+        }
+        if (container.path.lastOrNull() == "when") {
+            return whenKeyCompletions(container, prefix, typed, editing)
+        }
+        if (schema != SchemaMode.CAPECRAFT) return emptyList()
+        return keysFor(container, prefix, typed, editing)
+    }
+
+    /**
+     * Диапазон строкового значения, которое предлагается заменить целиком.
+     *
+     * Подсказка приходит с кавычками (`"day"`), а в файле уже стоят свои —
+     * и если заменить только содержимое до курсора, получится `""day""`.
+     * Поэтому заменяется **вся строка вместе с кавычками**: человек выбирает
+     * готовое значение, а не дописывает кусок.
+     */
+    private fun valueRange(doc: CrenDocument, e: CrenEntry): TextRange? {
+        val v = e.value as? CrenLeaf ?: return null
+        if (v.lexeme.kind != CrenLexKind.STR) return null
+        return v.range
     }
 
     /** Что показать при наведении. */
-    fun hover(doc: CrenDocument, offset: Int): CrenHover? {
+    fun hover(
+        doc: CrenDocument,
+        offset: Int,
+        schema: SchemaMode = SchemaMode.CAPECRAFT,
+    ): CrenHover? {
         val tree = CrenParser.parse(doc)
         val all = locate(tree)
         val entry = entryAt(all, doc, offset) ?: return null
         val e = entry.entry
         val key = e.keyText
 
-        if (key == "when" && e.value is CrenDict) {
+        if (key == "when" && e.value is CrenDict && schema == SchemaMode.CAPECRAFT) {
             return CrenHover(
                 e.keyRange,
                 "Условия, при которых провайдер работает. " +
@@ -587,9 +681,11 @@ object CrenAnalyzer {
             )
         }
 
-        ConfigSchema.childrenOf(entry.path.dropLast(1))
-            .firstOrNull { it.name == key }
-            ?.let { return CrenHover(e.keyRange, describe(it)) }
+        if (schema == SchemaMode.CAPECRAFT) {
+            ConfigSchema.childrenOf(entry.path.dropLast(1))
+                .firstOrNull { it.name == key }
+                ?.let { return CrenHover(e.keyRange, describe(it)) }
+        }
 
         val dot = key.indexOf('.')
         if (dot > 0) {
@@ -692,6 +788,39 @@ object CrenAnalyzer {
             }
     }
 
+    /**
+     * Начало ключа прямо перед курсором.
+     *
+     * Читается из текста, а не из дерева: недописанный ключ в дереве —
+     * это уже запись, и «поле которого ещё нет» там не отличить от опечатки.
+     *
+     * Возвращает и голое слово, и `root.поле` — символы взяты те же, что
+     * считает [CrenLexer] словом, иначе после точки префикс обрывался бы и
+     * подсказка по полю не появлялась.
+     */
+    /**
+     * Набранный перед курсором кусок ключа вместе с границами.
+     *
+     * Читается из текста, а не из дерева: недописанный ключ в дереве — это
+     * уже запись, и «поле которого ещё нет» там не отличить от опечатки.
+     *
+     * Возвращает и голое слово, и `root.поле` — символы взяты те же, что
+     * считает [CrenLexer] словом, иначе после точки префикс обрывался бы и
+     * подсказка по полю не появлялась. Пробелы перед курсором пропускаются:
+     * человек ставит курсор в конец строки, а не точно в конец ключа.
+     */
+    private fun keyPrefixAt(doc: CrenDocument, offset: Int): TextRange {
+        val end = offset.coerceIn(0, doc.text.length)
+        var start = end
+        while (start > 0 && doc.text[start - 1].isWhitespace()) start -= 1
+        val wordEnd = start
+        while (start > 0 && isKeyChar(doc.text[start - 1])) start -= 1
+        return TextRange(doc.spanOf(start), doc.spanOf(wordEnd))
+    }
+
+    private fun isKeyChar(c: Char): Boolean =
+        c.isLetterOrDigit() || c == '_' || c == '-' || c == '.' || c == '/'
+
     /** Самый глубокий контейнер, накрывающий курсор. */
     private fun containerAt(
         containers: List<LocatedContainer>,
@@ -772,6 +901,20 @@ object CrenAnalyzer {
      * печатается имя, а не позиция после него: `{ |name` должен предлагать
      * ключи, а не типы.
      */
+    /**
+     * Курсор стоит на набираемом ключе: после его первого символа и не дальше
+     * его конца.
+     *
+     * Отличие от [atTypePosition] в одном пробеле: `{ name | }` — пробел
+     * после ключа, и дальше человек пишет значение; `{ location.| }` — конец
+     * самого ключа, и дописывать надо ключ.
+     */
+    private fun inKeyText(doc: CrenDocument, offset: Int, e: CrenEntry): Boolean {
+        val start = doc.offsetOf(e.keyRange.start)
+        val end = doc.offsetOf(e.keyRange.end)
+        return offset > start && offset <= end
+    }
+
     private fun atTypePosition(doc: CrenDocument, offset: Int, e: CrenEntry): Boolean {
         val keyEnd = doc.offsetOf(e.keyRange.end)
         if (offset < keyEnd) return false
@@ -783,18 +926,24 @@ object CrenAnalyzer {
     // ------------------------------------------------- содержимое подсказок
 
     /** Ключи, которые можно написать в этом контейнере. */
-    private fun keysFor(c: LocatedContainer): List<CrenCompletion> {
+    private fun keysFor(
+        c: LocatedContainer,
+        prefix: String = "",
+        typed: TextRange? = null,
+        editing: String? = null,
+    ): List<CrenCompletion> {
         if (c.kind == ContainerKind.ARRAY) return emptyList()
-        if (c.path.lastOrNull() == "when") return whenRootCompletions()
+        if (c.path.lastOrNull() == "when") return whenKeyCompletions(c, prefix, typed, editing)
 
         val known = ConfigSchema.childrenOf(c.path)
         if (known.isEmpty()) return emptyList()
-        val used = c.entries.map { it.keyText }.toSet()
+        val used = usedKeys(c, editing)
         val type = c.entries.firstOrNull { it.keyText == "type" }?.let { leafText(it) }
 
         return known
             .filter { it.offeredFor(type) }
             .filter { it.name !in used }
+            .filter { it.name.startsWith(prefix) }
             .map { f ->
                 CrenCompletion(
                     label = f.name,
@@ -802,10 +951,151 @@ object CrenAnalyzer {
                     insertText = f.name,
                     snippet = snippetFor(f),
                     kind = CompletionKind.KEY,
+                    replace = typed,
                     // Обязательные вперёд: без них файл не заработает.
                     sortText = if (f.required) "0" + f.name else "1" + f.name,
                 )
             }
+    }
+
+    /**
+     * Ключи внутри `when { }`.
+     *
+     * Тут два разных вопроса, и путать их нельзя:
+     *
+     * - `when { | }` — ещё ничего не выбрано, предлагаем корни **и** поля
+     *   (`location.y`), потому что человек не обязан знать, что у координат
+     *   поля по умолчанию нет вовсе и что `time` без точки — это `period`;
+     * - `when { location.| }` — корень уже написан, и осталось дописать поле.
+     *   Тогда подсказываем **само поле** (`x`, `y`, `z`): вставляется оно
+     *   прямо после точки, и получается `location.y`.
+     */
+    private fun whenKeyCompletions(
+        c: LocatedContainer,
+        prefix: String,
+        typed: TextRange?,
+        editing: String?,
+    ): List<CrenCompletion> {
+        val dot = prefix.indexOf('.')
+        if (dot >= 0) {
+            val root = WorldRoot.bySegment(prefix.substring(0, dot))
+                ?: return whenRootCompletions(c, prefix, typed, editing)
+            val tail = prefix.substring(dot + 1)
+            val used = usedKeys(c, editing)
+            return WhenSchema.fieldsOf(root)
+                .filter { it.startsWith(tail) }
+                .filter { "${root.segment}.$it" !in used }
+                .map { field ->
+                    // Ключ вставляется целиком — `location.y`, а не `y`:
+                    // диапазон замены покрывает `location.`, и вставка одного
+                    // только `y` оставила бы файл без корня. Короткая метка
+                    // тут же обманула бы фильтр клиента: перед курсором
+                    // стоит `location`, а не `y`.
+                    val key = "${root.segment}.$field"
+                    CrenCompletion(
+                        label = key,
+                        detail = WhenSchema.docFor(root, field),
+                        insertText = key,
+                        snippet = conditionValueSnippet(root, field),
+                        kind = CompletionKind.WHEN_FIELD,
+                        replace = typed,
+                    )
+                }
+        }
+        return whenRootCompletions(c, prefix, typed, editing)
+    }
+
+    /**
+     * Ключи, уже занятые в контейнере.
+     *
+     * Ключ под курсором из списка убирается: человек не добавляет его
+     * повторно, а переименовывает, и повторное предложение того же ключа —
+     * единственная подсказка, которая в этом случае полезна.
+     */
+    private fun usedKeys(c: LocatedContainer, editing: String?): Set<String> =
+        c.entries.mapTo(mutableSetOf()) { it.keyText }.apply { editing?.let { remove(it) } }
+
+    private fun whenRootCompletions(
+        c: LocatedContainer,
+        prefix: String = "",
+        typed: TextRange? = null,
+        editing: String? = null,
+    ): List<CrenCompletion> {
+        val used = usedKeys(c, editing)
+        val out = ArrayList<CrenCompletion>()
+        for (root in WhenSchema.roots()) {
+            if (root.segment in used || !root.segment.startsWith(prefix)) continue
+            out += CrenCompletion(
+                label = root.segment,
+                detail = rootDetail(root),
+                insertText = root.segment,
+                snippet = when {
+                    // У координат нет поля по умолчанию, писать после корня
+                    // нечего — оставляем только ключ.
+                    WhenSchema.defaultFieldOf(root) != null -> " {\n\t$0\n}"
+                    else -> null
+                },
+                kind = CompletionKind.WHEN_ROOT,
+                sortText = "0" + root.segment,
+                replace = typed,
+            )
+        }
+        // Поля нужны и без точки: `time` — это `period`, а про `location.y`
+        // из одного только `location` не догадаться.
+        for (root in WhenSchema.roots()) {
+            for (field in WhenSchema.fieldsOf(root)) {
+                val key = "${root.segment}.$field"
+                if (key in used || !key.startsWith(prefix)) continue
+                out += CrenCompletion(
+                    label = key,
+                    detail = WhenSchema.docFor(root, field)?.substringBefore('.'),
+                    insertText = key,
+                    snippet = conditionValueSnippet(root, field),
+                    kind = CompletionKind.WHEN_FIELD,
+                    sortText = "1$key",
+                    replace = typed,
+                )
+            }
+        }
+        return out
+    }
+
+    /** Чем закончить запись условия, чтобы она сразу была осмысленной. */
+    private fun conditionValueSnippet(root: WorldRoot, field: String): String {
+        val values = WhenSchema.valuesOf(root, field)
+        if (values.isNotEmpty()) return ": \"${values.first()}\""
+        return if (WhenSchema.isNumeric(root, field)) ": 0" else ": \"\""
+    }
+
+    private fun rootDetail(root: WorldRoot): String {
+        val fields = WhenSchema.fieldsOf(root)
+        val sb = StringBuilder("условие ${root.segment}: ")
+        sb.append(fields.joinToString(", "))
+        // Поле по умолчанию — самая частая запись, её стоит назвать прямо.
+        WhenSchema.defaultFieldOf(root)?.let { sb.append("; без точки — это поле ").append(it) }
+        return sb.toString()
+    }
+
+    /**
+     * Что предложить между элементами массива.
+     *
+     * Пустой `providers [ ]` с незаполненными скобками — тупик: человек не
+     * знает, с чего начать, и дописывает `{}`, в котором потом ищет ключи.
+     * Готовая запись закрывает вопрос сразу.
+     */
+    private fun itemCompletionsFor(c: LocatedContainer, typed: TextRange?): List<CrenCompletion> {
+        if (c.path.lastOrNull() != ConfigSchema.PROVIDERS) return emptyList()
+        if (c.items.isNotEmpty()) return emptyList()
+        return listOf(
+            CrenCompletion(
+                label = "провайдер",
+                detail = "новая запись в providers",
+                insertText = "{ name = \"example\", type = \"url\", url = \"\" }",
+                kind = CompletionKind.SNIPPET,
+                sortText = "0",
+                replace = typed,
+            ),
+        )
     }
 
     /** Что вставить после ключа, чтобы запись была готова. */
@@ -820,7 +1110,7 @@ object CrenAnalyzer {
     }
 
     /** Подсказки значений для конкретного ключа. */
-    private fun valuesFor(owner: LocatedEntry): List<CrenCompletion>? {
+    private fun valuesFor(owner: LocatedEntry, replace: TextRange? = null): List<CrenCompletion>? {
         val e = owner.entry
         val key = e.keyText
 
@@ -828,7 +1118,7 @@ object CrenAnalyzer {
         // получать корни условий, а не пустой список. `null` вместо `emptyList`
         // заставляет complete() спуститься к ключам контейнера.
         if (key == "when") return null
-        if (owner.container.path.lastOrNull() == "when") return whenValueCompletions(key)
+        if (owner.container.path.lastOrNull() == "when") return whenValueCompletions(key, replace)
 
         val field = ConfigSchema.childrenOf(owner.path.dropLast(1))
             .firstOrNull { it.name == key }
@@ -839,6 +1129,7 @@ object CrenAnalyzer {
                     label = it,
                     insertText = "\"$it\"",
                     kind = CompletionKind.VALUE,
+                    replace = replace,
                 )
             }
         }
@@ -852,6 +1143,7 @@ object CrenAnalyzer {
                     detail = "флажок, без кавычек",
                     insertText = it,
                     kind = CompletionKind.VALUE,
+                    replace = replace,
                 )
             }
         }
@@ -870,38 +1162,82 @@ object CrenAnalyzer {
         )
     }
 
-    private fun whenRootCompletions(): List<CrenCompletion> = WhenSchema.roots().map { root ->
-        CrenCompletion(
-            label = root.segment,
-            detail = "условие ${root.segment}: ${WhenSchema.fieldsOf(root).joinToString(", ")}",
-            insertText = root.name,
-            snippet = " {\n\t$0\n}",
-            kind = CompletionKind.WHEN_ROOT,
-        )
-    }
-
-    /** Значения условия: синонимы корня и операторы сравнения. */
-    private fun whenValueCompletions(key: String): List<CrenCompletion> {
+    /**
+     * Значения условия: сначала то, что мир действительно отдаёт, потом
+     * синонимы и операторы.
+     *
+     * Порядок не декоративный. Первым человек выбирает **рабочее** значение —
+     * `period: "day"`, а не `dawn`; синоним удобен, но в файле выглядит как
+     * опечатка, и его место — после настоящих.
+     *
+     * Операторы тоже по делу: `>` у строкового поля бессмыслен
+     * ([dev.ggtv.capecraft.condition.Op] для строки вернёт `false`), поэтому
+     * числовые предлагаются только числовым полям, а у числовых вдобавок
+     * предлагается диапазон.
+     */
+    private fun whenValueCompletions(key: String, replace: TextRange? = null): List<CrenCompletion> {
         val dot = key.indexOf('.')
         val rootName = if (dot < 0) key else key.substring(0, dot)
         val root = WorldRoot.bySegment(rootName) ?: return emptyList()
+        val field = if (dot < 0) WhenSchema.defaultFieldOf(root) else key.substring(dot + 1)
+        val numeric = field != null && WhenSchema.isNumeric(root, field)
         val out = ArrayList<CrenCompletion>()
-        for (a in WhenSchema.aliasesOf(root)) {
-            out += CrenCompletion(
-                label = a,
-                detail = "короткая запись",
-                insertText = "\"$a\"",
-                kind = CompletionKind.VALUE,
-                sortText = "0$a",
-            )
+
+        if (field != null) {
+            for (v in WhenSchema.valuesOf(root, field)) {
+                out += CrenCompletion(
+                    label = v,
+                    detail = WhenSchema.docFor(root, field)?.substringBefore('.'),
+                    insertText = "\"$v\"",
+                    kind = CompletionKind.VALUE,
+                    sortText = "0$v",
+                    replace = replace,
+                )
+            }
+        }
+        // Синонимы осмысленны только для корня без поля: `when { weather: "fair" }`
+        // разворачивается в `condition = clear`, а `weather.condition: "fair"`
+        // не развернётся никогда.
+        if (dot < 0) {
+            for (a in WhenSchema.aliasesOf(root)) {
+                if (a in WhenSchema.valuesOf(root, field ?: "")) continue
+                out += CrenCompletion(
+                    label = a,
+                    detail = "короткая запись",
+                    insertText = "\"$a\"",
+                    kind = CompletionKind.VALUE,
+                    sortText = "1$a",
+                    replace = replace,
+                )
+            }
         }
         for (op in WhenSchema.OPERATORS) {
+            val comparison = op.first() == '>' || op.first() == '<'
+            if (comparison && !numeric) continue
+            // Числовое сравнение вставляется сразу с числом: `location.y: ">"`
+            // — это условие, которое не сработает никогда, и выглядит оно при
+            // этом как готовое. У строкового поля числа нет, поэтому там
+            // вставляется только знак — дописывать значение человек будет сам.
             out += CrenCompletion(
                 label = "$op…",
                 detail = operatorDoc(op),
-                insertText = "\"$op\"",
+                insertText = if (comparison) "\"${op}0\"" else "\"$op\"",
                 kind = CompletionKind.OPERATOR,
-                sortText = "2$op",
+                sortText = if (comparison) "2$op" else if (op == "!") "2$op" else "3$op",
+                replace = replace,
+            )
+        }
+        if (numeric) {
+            // Диапазон вставляется заполненным: одна кавычка оставила бы
+            // строку незакрытой, и до её дописывания мод не прочитал бы файл
+            // целиком. `0..0` — заведомо заготовка, её видно сразу.
+            out += CrenCompletion(
+                label = "от..до",
+                detail = "диапазон включительно, например \"0..24000\"",
+                insertText = "\"0..0\"",
+                kind = CompletionKind.RANGE,
+                sortText = "4",
+                replace = replace,
             )
         }
         return out
