@@ -42,7 +42,7 @@
 ./gradlew lspJar        # -> artifacts/capecraft-lsp.jar
 ```
 
-Нужен только JRE (Java 17+), Minecraft и Fabric не требуются: в jar нет ни
+Нужен только JRE (Java 21+), Minecraft и Fabric не требуются: в jar нет ни
 одного класса от них. Подключение к Neovim:
 
 ```lua
@@ -103,6 +103,8 @@ WASI-компонент, которое и регистрирует язык Kor
 
 `full`, а не `combined`: tree-sitter-грамматики у KoreN нет, и всё
 цветовое оформление приходит из semantic tokens сервера.
+
+Подробное описание сервера — `docs/lsp/README.md`.
 
 ## Конфигурация
 
