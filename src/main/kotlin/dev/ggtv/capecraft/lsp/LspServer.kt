@@ -129,6 +129,7 @@ class LspServer(
             "textDocument/codeAction" -> onCodeAction(message)
             "textDocument/documentSymbol" -> onDocumentSymbol(message)
             "textDocument/foldingRange" -> onFoldingRange(message)
+            "textDocument/semanticTokens/full" -> onSemanticTokens(message)
             "textDocument/diagnostic" -> onPullDiagnostics(message)
 
             // Методы, на которые сервер не подписан, должны давать MethodNotFound.
@@ -144,62 +145,84 @@ class LspServer(
         val id = field(message, "id")
         encoding = negotiateEncoding(message)
         hierarchicalSymbols = negotiateHierarchicalSymbols(message)
+        tokenLegend = negotiateTokenLegend(message)
+        val capabilities = mutableListOf<Pair<String, J>>(
+            // Полная синхронизация: конфиг меняют вручную и целиком, а
+            // инкрементальные правки для него дороже, чем разбор файла в 200
+            // строк.
+            "textDocumentSync" to J.JNum(1.0, true, 1L),
+            // Объявленный формат, а не тот, что выбрал клиент: сервер обязан
+            // назвать кодировку, в которой он действительно считает колонки.
+            // Иначе клиент, выбравший utf-8, получил бы наши utf-16 координаты
+            // и подсветил бы не то место.
+            "positionEncoding" to J.JStr(encoding.protocolName),
+            "completionProvider" to J.JObj(
+                listOf(
+                    "resolveProvider" to J.JBool(false),
+                    // Свой триггер: после `=` нужен список значений, а пробелом
+                    // там ключ, а не значение. Словарь клиента по этому не
+                    // отличить, и подсказки прыгали бы.
+                    "triggerCharacters" to J.JArr(
+                        listOf(
+                            J.JStr("="),
+                            J.JStr("{"),
+                            J.JStr("["),
+                            J.JStr(" "),
+                            J.JStr("$"),
+                            J.JStr("."),
+                        ),
+                    ),
+                ),
+            ),
+            "hoverProvider" to J.JBool(true),
+            // Правки уже есть в диагностиках (см. CrenFix), клиент их только
+            // показывает — true вместо списка видов, потому что других не
+            // планируется.
+            "codeActionProvider" to J.JBool(true),
+            // Outline: без него в редакторе нечем обойти конфиг, кроме как
+            // поиском по тексту.
+            "documentSymbolProvider" to J.JBool(true),
+            "foldingRangeProvider" to J.JBool(true),
+            // Pull-диагностика. Push тоже шлём: клиенты без pull (старые версии
+            // neovim, часть плагинов) не спросят, а лишний повторный ответ им
+            // не мешает.
+            "diagnosticProvider" to J.JObj(
+                listOf(
+                    "identifier" to J.JStr("capecraft"),
+                    "interFileDependencies" to J.JBool(false),
+                    "workspaceDiagnostics" to J.JBool(false),
+                ),
+            ),
+        )
+        // Подсветка. Словарь ключей живёт тут, а не в редакторе, поэтому второго
+        // списка ключей, который разошёлся бы с игрой, просто не существует.
+        //
+        // Объявляем только если клиент назвал хотя бы один наш вид слов:
+        // токен, которого нет в легенде клиента, редактор не умеет красить, а
+        // молчащая подсветка хуже её отсутствия.
+        //
+        // `range = false`: диапазонный запрос — ускорение на больших файлах, а
+        // конфиг помещается в один экран и разбирается целиком быстрее, чем
+        // клиент успевает спросить.
+        tokenLegend?.let { legend ->
+            capabilities += "semanticTokensProvider" to J.JObj(
+                listOf(
+                    "legend" to J.JObj(
+                        listOf(
+                            "tokenTypes" to J.JArr(legend.types.map { J.JStr(it) }),
+                            "tokenModifiers" to J.JArr(legend.modifiers.map { J.JStr(it) }),
+                        ),
+                    ),
+                    "full" to J.JBool(true),
+                    "range" to J.JBool(false),
+                ),
+            )
+        }
         reply(
             id,
             J.JObj(
                 listOf(
-                    "capabilities" to J.JObj(
-                        listOf(
-                            // Полная синхронизация: конфиг меняют вручную и
-                            // целиком, а инкрементальные правки для него
-                            // дороже, чем разбор файла в 200 строк.
-                            "textDocumentSync" to J.JNum(1.0, true, 1L),
-                            // Объявленный формат, а не тот, что выбрал клиент:
-                            // сервер обязан назвать кодировку, в которой он
-                            // действительно считает колонки. Иначе клиент,
-                            // выбравший utf-8, получил бы наши utf-16
-                            // координаты и подсветил бы не то место.
-                            "positionEncoding" to J.JStr(encoding.protocolName),
-                            "completionProvider" to J.JObj(
-                                listOf(
-                                    "resolveProvider" to J.JBool(false),
-                                    // Свой триггер: после `=` нужен список
-                                    // значений, а пробелом там ключ, а не
-                                    // значение. Словарь клиента по этому не
-                                    // отличить, и подсказки прыгали бы.
-                                    "triggerCharacters" to J.JArr(
-                                        listOf(
-                                            J.JStr("="),
-                                            J.JStr("{"),
-                                            J.JStr("["),
-                                            J.JStr(" "),
-                                            J.JStr("$"),
-                                            J.JStr("."),
-                                        ),
-                                    ),
-                                ),
-                            ),
-                            "hoverProvider" to J.JBool(true),
-                            // Правки уже есть в диагностиках (см. CrenFix),
-                            // клиент их только показывает — true вместо
-                            // списка видов, потому что других не планируется.
-                            "codeActionProvider" to J.JBool(true),
-                            // Outline: без него в редакторе нечем обойти
-                            // конфиг, кроме как поиском по тексту.
-                            "documentSymbolProvider" to J.JBool(true),
-                            "foldingRangeProvider" to J.JBool(true),
-                            // Pull-диагностика. Push тоже шлём: клиенты без
-                            // pull (старые версии neovim, часть плагинов) не
-                            // спросят, а лишний повторный ответ им не мешает.
-                            "diagnosticProvider" to J.JObj(
-                                listOf(
-                                    "identifier" to J.JStr("capecraft"),
-                                    "interFileDependencies" to J.JBool(false),
-                                    "workspaceDiagnostics" to J.JBool(false),
-                                ),
-                            ),
-                        ),
-                    ),
+                    "capabilities" to J.JObj(capabilities),
                     "serverInfo" to J.JObj(
                         listOf(
                             "name" to J.JStr("capecraft-lsp"),
@@ -249,6 +272,32 @@ class LspServer(
         val textDocument = capabilities["textDocument"] as? J.JObj ?: return false
         val documentSymbol = textDocument["documentSymbol"] as? J.JObj ?: return false
         return (documentSymbol["hierarchicalDocumentSymbolSupport"] as? J.JBool)?.b ?: false
+    }
+
+    /**
+     * Легенда подсветки, о которой договорились в `initialize`.
+     *
+     * `null` — клиент подсветку не просил или не знает ни одного из наших видов
+     * слов. Тогда сервер и не объявляет `semanticTokensProvider`: лучше нет
+     * подсветки, чем клиент, который ждёт её и не получает.
+     */
+    private var tokenLegend: TokenLegend? = null
+
+    /**
+     * Виды слов, которые клиент готов принять.
+     *
+     * Читаем из `initialize`, а не из самого запроса: capability приходит один
+     * раз за сессию, и её нет в параметрах `textDocument/semanticTokens/full`.
+     * Свой список без проверки клиента — это токены с индексами, которых у
+     * редактора нет, то есть подсветка вслепую.
+     */
+    private fun negotiateTokenLegend(message: J.JObj): TokenLegend? {
+        val params = field(message, "params") as? J.JObj ?: return null
+        val capabilities = params["capabilities"] as? J.JObj ?: return null
+        val textDocument = capabilities["textDocument"] as? J.JObj ?: return null
+        val semanticTokens = textDocument["semanticTokens"] as? J.JObj ?: return null
+        val types = (semanticTokens["tokenTypes"] as? J.JArr)?.items ?: return null
+        return semanticTokenLegend(types.mapNotNull { (it as? J.JStr)?.s })
     }
 
     private fun onShutdown(message: J.JObj) {
@@ -422,6 +471,32 @@ class LspServer(
             } catch (e: Exception) {
                 log("foldingRange не удался: $e")
                 J.JArr(emptyList())
+            },
+        )
+    }
+
+    /**
+     * Подсветка целиком.
+     *
+     * Отдельный диапазонный запрос не ловим: клиент его не шлёт, потому что
+     * мы объявили `range = false`, а неизвестный метод сервер честно отвергает
+     * кодом MethodNotFound.
+     */
+    private fun onSemanticTokens(message: J.JObj) {
+        val id = field(message, "id")
+        val legend = tokenLegend
+        val doc = uriOf(message)?.let { document(it) }
+        if (legend == null || doc == null) {
+            reply(id, J.JObj(listOf("data" to J.JArr(emptyList()))))
+            return
+        }
+        reply(
+            id,
+            try {
+                Lsp.semanticTokens(doc, legend, encoding)
+            } catch (e: Exception) {
+                log("semanticTokens не удался: $e")
+                J.JObj(listOf("data" to J.JArr(emptyList())))
             },
         )
     }

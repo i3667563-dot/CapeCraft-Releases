@@ -9,6 +9,8 @@ import dev.ggtv.capecraft.ide.CrenDocument
 import dev.ggtv.capecraft.ide.CrenEntry
 import dev.ggtv.capecraft.ide.CrenLeaf
 import dev.ggtv.capecraft.ide.CrenLexKind
+import dev.ggtv.capecraft.ide.CrenLexeme
+import dev.ggtv.capecraft.ide.StrPart
 import dev.ggtv.capecraft.ide.CrenRef
 import dev.ggtv.capecraft.ide.CrenSeverity
 import dev.ggtv.capecraft.ide.CrenValue
@@ -419,4 +421,202 @@ object Lsp {
                 "items" to diagnostics(doc, list, encoding),
             ),
         )
+
+    /**
+     * Подсветка файла (`textDocument/semanticTokens/full`).
+     *
+     * Дерево конфига здесь не нужно: вид слова и так известен по лексеме, а
+     * разбор ради раскраски — лишняя работа на каждый символ. Ключ отличается
+     * от значения положением, а не списком: ключ либо начинает запись, либо
+     * стоит перед `=`, `:`, `{` или `[`.
+     *
+     * Дельты не считаем: клиент их умеет, но не требует. Полный ответ на файл
+     * в 200 строк — это сотни чисел, а счётчик «что поменялось» пришлось бы
+     * хранить между запросами, то есть завести кэш ради экономии, которую
+     * никто не почувствует.
+     */
+    fun semanticTokens(doc: CrenDocument, legend: TokenLegend, encoding: PositionEncoding): J.JObj {
+        val raw = ArrayList<RawToken>()
+        val lex = doc.lexemes()
+        for ((i, l) in lex.withIndex()) {
+            when (l.kind) {
+                CrenLexKind.COMMENT -> add(raw, doc, l.startOffset, l.endOffset, "comment")
+                CrenLexKind.STR -> addString(raw, doc, l)
+                CrenLexKind.PUNCT -> operatorKind(l.text)?.let { add(raw, doc, l.startOffset, l.endOffset, it) }
+                CrenLexKind.WORD -> add(raw, doc, l.startOffset, l.endOffset, wordKind(lex, i))
+                else -> Unit
+            }
+        }
+        val data = ArrayList<Int>()
+        var lastLine = 0
+        var lastStart = 0
+        for (t in raw) {
+            val type = legend.indexOf(t.type)
+            if (type < 0) continue
+            val start = doc.clientColumnOf(t.offset, encoding)
+            val length = doc.clientColumnOf(t.offset + t.length, encoding) - start
+            if (length <= 0) continue
+            val line = doc.spanOf(t.offset).line - 1
+            val deltaLine = line - lastLine
+            data += deltaLine
+            data += if (deltaLine == 0) start - lastStart else start
+            data += length
+            data += type
+            data += 0
+            lastLine = line
+            lastStart = start
+        }
+        return J.JObj(listOf("data" to J.JArr(data.map { J.JNum(it.toDouble(), true, it.toLong()) })))
+    }
+
+    /**
+     * Строка по кускам: текст — `string`, подстановка — `variable`.
+     *
+     * Один токен на строку целиком нельзя: протокол запрещает перекрытия, а
+     * `${CAPE_HOST}` внутри строки хочется видеть другим цветом, чем текст
+     * вокруг. Поэтому строка режется на куски, а куски одного вида склеиваются
+     * обратно: `"трава"` — это один токен, а не три, и по выделенному слову в
+     * редакторе не должно быть видно, что он собран из кусков.
+     */
+    private fun addString(out: MutableList<RawToken>, doc: CrenDocument, l: CrenLexeme) {
+        val pieces = ArrayList<Triple<Int, Int, String>>()
+        var at = l.startOffset
+        for (part in l.parts) {
+            val from = doc.offsetOf(part.range.start)
+            val to = doc.endOffsetOf(part.range)
+            pieces += Triple(at, from, "string")
+            pieces += Triple(from, to, if (part is StrPart.Substitution) "variable" else "string")
+            at = to
+        }
+        pieces += Triple(at, l.endOffset, "string")
+        var start = -1
+        var end = -1
+        var type: String? = null
+        for ((from, to, pieceType) in pieces) {
+            if (pieceType == type && from == end) {
+                end = to
+                continue
+            }
+            if (type != null) add(out, doc, start, end, type)
+            start = from
+            end = to
+            type = pieceType
+        }
+        if (type != null) add(out, doc, start, end, type)
+    }
+
+    /** Оператор — `=`, `:` и запятая. Скобки и точка молчат: они и так рисуются. */
+    private fun operatorKind(text: String): String? =
+        if (text == "=" || text == ":" || text == ",") "operator" else null
+
+    private fun wordKind(lex: List<CrenLexeme>, i: Int): String {
+        val text = lex[i].value
+        val next = lex.getOrNull(i + 1)
+        if (next?.kind == CrenLexKind.WORD) {
+            // Два слова подряд — это `maxFrames int = 100`. Ключ — первое, тип —
+            // второе; тип отсюда не виден, поэтому решаем по тому, что за ним.
+            return if (isAssign(lex.getOrNull(i + 2))) "property" else "variable"
+        }
+        if (lex.getOrNull(i - 1)?.kind == CrenLexKind.WORD && isAssign(next)) return "type"
+        return when {
+            isKey(lex, i) -> "property"
+            text == "true" || text == "false" -> "enumMember"
+            isNumber(text) -> "number"
+            else -> "variable"
+        }
+    }
+
+    private fun isAssign(lexeme: CrenLexeme?): Boolean =
+        lexeme != null && lexeme.kind == CrenLexKind.PUNCT && lexeme.text == "="
+
+    /**
+     * Это слово — ключ?
+     *
+     * Два уточнения, без которых выходит неверно:
+     *
+     * - `{` и `[` считаются признаком ключа только в начале записи. Иначе
+     *   `x = server.token[1]` покрасил бы `server.token` как ключ, а это ссылка.
+     * - `true`/`false` разбираются раньше чисел: в `enabled = true` настоящее
+     *   слово — последнее.
+     *
+     * Случай `maxFrames int = 100` разбирает не здесь, а в [wordKind]: там
+     * важно знать ещё и предыдущую лексему, а здесь — только следующую.
+     */
+    private fun isKey(lex: List<CrenLexeme>, i: Int): Boolean {
+        val next = lex.getOrNull(i + 1) ?: return false
+        if (next.kind != CrenLexKind.PUNCT) return false
+        if (next.text == "=" || next.text == ":") return true
+        if (next.text != "{" && next.text != "[") return false
+        val prev = lex.getOrNull(i - 1) ?: return true
+        return prev.kind == CrenLexKind.NEWLINE ||
+            prev.kind == CrenLexKind.COMMENT ||
+            (prev.kind == CrenLexKind.PUNCT && prev.text in setOf("{", "[", ","))
+    }
+
+    /**
+     * Число ли это.
+     *
+     * Подчёркивания убираем сами: формат их разрешает (`5_000`), а обычный
+     * партер на них спотыкается. Без этого миллион красился бы как значение, а
+     * единица рядом — как число.
+     */
+    private fun isNumber(text: String): Boolean {
+        val digits = text.replace("_", "")
+        return digits.toLongOrNull() != null || digits.toDoubleOrNull() != null
+    }
+
+    /**
+     * Разбить токен по строкам.
+     *
+     * Один токен не может пересечь перевод строки: протокол требует позицию в
+     * начале строки плюс длину. Многострочные строки существуют, поэтому каждая
+     * строка получает свой токен — иначе длина «поедет» на всех строках, кроме
+     * первой.
+     */
+    private fun add(out: MutableList<RawToken>, doc: CrenDocument, from: Int, to: Int, type: String) {
+        var start = from.coerceAtLeast(0)
+        val end = to.coerceAtLeast(start)
+        while (start < end) {
+            val line = doc.spanOf(start).line - 1
+            val segEnd = minOf(end, doc.lineEnd(line))
+            if (segEnd > start) out += RawToken(start, segEnd - start, type)
+            if (segEnd >= end) break
+            start = segEnd + 1
+        }
+    }
+}
+
+/** Токен в терминах смещения: [offset] — начало, [length] — в кодпоинтах. */
+private data class RawToken(val offset: Int, val length: Int, val type: String)
+
+/**
+ * Какие виды слов сервер умеет красить.
+ *
+ * Список видов — не наш, а клиентский: протокол запрещает слать токен, которого
+ * нет в легенде клиента, иначе редактор не знает, что с ним делать. Поэтому
+ * [semanticTokenLegend] берёт пересечение, а сервер объявляет в
+ * `semanticTokensProvider` ровно то, что осталось.
+ */
+data class TokenLegend(
+    val types: List<String>,
+    val modifiers: List<String>,
+) {
+    private val indices = types.withIndex().associate { (i, t) -> t to i }
+
+    /** Индекс вида в легенде; -1, если клиент такого вида не знает. */
+    fun indexOf(type: String): Int = indices[type] ?: -1
+}
+
+/** Виды слов, которые имеет смысл красить, в порядке убывания полезности. */
+private val WANTED_TOKEN_TYPES =
+    listOf("comment", "string", "number", "enumMember", "property", "type", "operator", "variable")
+
+/**
+ * Легенда из возможностей клиента; `null`, если красить нечем.
+ *
+ * @param clientTypes `initialize` → `capabilities.textDocument.semanticTokens.tokenTypes`
+ */
+fun semanticTokenLegend(clientTypes: List<String>): TokenLegend? {
+    val usable = WANTED_TOKEN_TYPES.filter { it in clientTypes }
+    return if (usable.isEmpty()) null else TokenLegend(usable, emptyList())
 }

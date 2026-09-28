@@ -351,9 +351,21 @@ LCG с общим фиксированным сидом даёт всем кли
 ./gradlew build -Pmc=1.21.1    # и 1.21.4, 1.21.8, 1.21.10, 1.21.11, 26.2
 ./gradlew cleanAll             # снести выходы всех версий
 ./gradlew publishArtifact -Pmc=26.2   # только переопубликовать jar в artifacts/
+./gradlew lspJar               # пересобрать artifacts/capecraft-lsp.jar (нужно после правок в lsp/)
 ```
 
-Все шесть версий: BUILD SUCCESSFUL, 835 тестов на версию (5010 суммарно), 0 failures.
+Живая проверка подсветки в настоящем neovim (цвет видно только если группы
+`@lsp.type.*` названы — иначе токены есть, а цвета нет):
+
+```bash
+nvim --headless -u ~/.config/nvim/init.lua \
+  -c 'lua ... vim.api.nvim_get_namespaces()["nvim.lsp.semantic_tokens:" .. client.id] ...' -c 'qa!'
+```
+
+`nvim -u NONE` для этой проверки не годится: там нет ни filetype, ни темы, то
+есть ровно то, ради чего проверяем.
+
+Все шесть версий: BUILD SUCCESSFUL, 847 тестов на версию (5082 суммарно), 0 failures.
 
 ### Тесты, которые читают репозиторий
 

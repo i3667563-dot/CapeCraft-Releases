@@ -229,6 +229,305 @@ class LspServerTest {
         assertTrue((report["items"] as J.JArr).items.isEmpty())
     }
 
+    // --- подсветка ------------------------------------------------------------
+
+    /**
+     * Список видов слов, которые знает Neovim 0.12.
+     *
+     * Взят из `vim.lsp.protocol.make_client_capabilities()`, а не выдуман:
+     * сервер обязан слать токены только из легенды клиента, и проверять это
+     * нужно на реальном списке, иначе тест пропустит подсветку, которая в
+     * редакторе не рисуется.
+     */
+    private val nvimTokenTypes = listOf(
+        "namespace", "type", "class", "enum", "interface", "struct", "typeParameter", "parameter",
+        "variable", "property", "enumMember", "event", "function", "method", "macro", "keyword",
+        "modifier", "comment", "string", "number", "regexp", "operator", "decorator",
+    )
+
+    private fun initializeTokens(
+        types: List<String> = nvimTokenTypes,
+        encoding: String? = null,
+    ): String {
+        val general = if (encoding == null) "" else ""","general":{"positionEncodings":["$encoding"]}"""
+        val list = types.joinToString(",") { "\"$it\"" }
+        return req(
+            1,
+            "initialize",
+            """{"capabilities":{"textDocument":{"semanticTokens":{"tokenTypes":[$list]}}$general}}""",
+        )
+    }
+
+    private fun semanticTokensRequest(id: Int = 2): String =
+        req(id, "textDocument/semanticTokens/full", """{"textDocument":{"uri":"$uri"}}""")
+
+    /**
+     * Подсветка файла в виде «текст → вид слова».
+     *
+     * Сравнивается текст, а не координаты: координаты в тесте пришлось бы
+     * считать руками, и проверка превратилась бы в проверку арифметики.
+     *
+     * Заодно проверяются два требования протокола, которые клиент не проверяет
+     * и потому ломает молча: токены идут по порядку и не перекрываются.
+     * Перекрытие — это когда один токен наехал на другой: редактор красит
+     * перекрытые токены произвольно, и подсветка «мигает» без причины.
+     */
+    /**
+     * Сырые данные подсветки: легенда и пять чисел на токен.
+     *
+     * Разбор в «текст → вид» живёт в [highlighted], а кодировки проверяются
+     * здесь: там колонки приходят уже в единицах клиента, а тут видно, что
+     * именно мы отправили.
+     */
+    private fun rawTokenData(
+        text: String,
+        types: List<String> = nvimTokenTypes,
+        encoding: String? = null,
+    ): Pair<List<String>, List<LongArray>> {
+        val res = Session(initializeTokens(types, encoding) + openText(text) + semanticTokensRequest()).run()
+        val legend = res.first().obj("result")!!.obj("capabilities")!!
+            .obj("semanticTokensProvider")!!.obj("legend")!!
+            .arr("tokenTypes").map { (it as J.JStr).s }
+        val data = res.last().obj("result")!!.arr("data").map { (it as J.JNum).long() }
+        assertEquals(0, data.size % 5, "данные подсветки идут по пять чисел на токен: $data")
+        return legend to data.chunked(5) { LongArray(it.size) { n -> it[n] } }
+    }
+
+    /**
+     * Подсветка файла в виде «текст → вид слова».
+     *
+     * Сравнивается текст, а не координаты: координаты в тесте пришлось бы
+     * считать руками, и проверка превратилась бы в проверку арифметики.
+     *
+     * Заодно проверяются два требования протокола, которые клиент не проверяет
+     * и потому ломает молча: токены идут по порядку и не перекрываются.
+     * Перекрытие — когда один токен наехал на другой: редактор красит такие
+     * токены произвольно, и подсветка «мигает» без причины.
+     */
+    private fun highlighted(
+        text: String,
+        types: List<String> = nvimTokenTypes,
+    ): List<Pair<String, String>> {
+        val (legend, tokens) = rawTokenData(text, types)
+        val lines = text.split("\n")
+        val out = ArrayList<Pair<String, String>>()
+        var line = 0
+        var col = 0
+        var previousEnd = 0
+        for (t in tokens) {
+            val deltaLine = t[0].toInt()
+            val deltaCol = t[1].toInt()
+            val length = t[2].toInt()
+            line += deltaLine
+            col = if (deltaLine == 0) col + deltaCol else deltaCol
+            assertTrue(line < lines.size, "токен на строке $line, а в файле ${lines.size}: ${tokens.toList()}")
+            assertTrue(
+                col + length <= lines[line].length,
+                "токен длиннее строки $line: там ${lines[line].length} символов, токен с $col длиной $length",
+            )
+            if (deltaLine == 0) {
+                assertTrue(
+                    col >= previousEnd,
+                    "токены перекрываются или идут назад: конец предыдущего $previousEnd, начало $col",
+                )
+            }
+            previousEnd = col + length
+            out += lines[line].substring(col, col + length) to legend[t[3].toInt()]
+        }
+        return out
+    }
+
+    private fun kindOf(tokens: List<Pair<String, String>>, text: String): String? =
+        tokens.firstOrNull { it.first == text }?.second
+
+    @Test
+    fun `подсветка объявляется клиенту, который её умеет`() {
+        val caps = Session(initializeTokens())
+            .run().single().obj("result")!!.obj("capabilities")!!
+        val provider = caps.obj("semanticTokensProvider")
+        assertNotNull(provider, "клиент умеет подсветку, сервер должен её предложить: $caps")
+        val legend = provider!!.obj("legend")!!
+        assertEquals(
+            listOf("comment", "string", "number", "enumMember", "property", "type", "operator", "variable"),
+            legend.arr("tokenTypes").map { (it as J.JStr).s },
+            "легенда должна быть нашими видами в нашем порядке",
+        )
+        assertTrue(legend.arr("tokenModifiers").isEmpty(), "модификаторы не используются")
+        assertEquals(true, provider["full"]?.let { it as? J.JBool }?.b, "умеем целиком")
+        assertEquals(false, provider["range"]?.let { it as? J.JBool }?.b, "диапазонные запросы не объявляем")
+    }
+
+    @Test
+    fun `клиенту без подсветки сервер её не предлагает`() {
+        val caps = Session(req(1, "initialize", """{"capabilities":{"textDocument":{}}}"""))
+            .run().single().obj("result")!!.obj("capabilities")!!
+        assertNull(
+            caps.obj("semanticTokensProvider"),
+            "клиент не знает про semanticTokens, предложение ему только сбивает с толку",
+        )
+    }
+
+    @Test
+    fun `легенда обрезается до того, что знает клиент`() {
+        // Клиент знает два наших вида. Сервер не вправе слать `property` с
+        // индексом из своей легенды: у клиента такого индекса нет, и он
+        // покрасит не то или не покрасит ничего.
+        val caps = Session(initializeTokens(listOf("string", "comment", "namespace")))
+            .run().single().obj("result")!!.obj("capabilities")!!
+        val legend = caps.obj("semanticTokensProvider")!!.obj("legend")!!
+        assertEquals(
+            listOf("comment", "string"),
+            legend.arr("tokenTypes").map { (it as J.JStr).s },
+            "в легенде остаётся только пересечение, в нашем порядке",
+        )
+        val tokens = highlighted("capeCraft {\n    x = 1 # хвост\n}\n", listOf("string", "comment", "namespace"))
+        assertEquals(
+            listOf("# хвост" to "comment"),
+            tokens,
+            "всё, чего клиент не знает, молчит; что знает — красится",
+        )
+    }
+
+    @Test
+    fun `подсветка различает ключ, значение, число, строку и комментарий`() {
+        val text = """
+            capeCraft {
+                providers [ { name = "trusted", enabled = true, budget = 5_000 } ]
+                # заметка
+            }
+        """.trimIndent()
+        val tokens = highlighted(text)
+        assertEquals("property", kindOf(tokens, "capeCraft"), "имя блока — ключ")
+        assertEquals("property", kindOf(tokens, "providers"))
+        assertEquals("property", kindOf(tokens, "name"))
+        assertEquals("property", kindOf(tokens, "enabled"))
+        assertEquals("property", kindOf(tokens, "budget"))
+        assertEquals("string", kindOf(tokens, "\"trusted\""), "строка вместе с кавычками")
+        assertEquals("enumMember", kindOf(tokens, "true"), "true/false — не ключ и не число")
+        assertEquals("number", kindOf(tokens, "5_000"), "число с подчёркиваниями")
+        assertEquals("comment", kindOf(tokens, "# заметка"))
+        assertEquals("operator", kindOf(tokens, "="), "знак равенства")
+        assertEquals("operator", kindOf(tokens, ","), "запятая")
+        assertNull(kindOf(tokens, "["), "скобки не красим: они и так рисуются")
+    }
+
+    @Test
+    fun `подстановка внутри строки отдельный токен`() {
+        // Один токен на всю строку нельзя: протокол запрещает перекрытия, а
+        // `${CAPE_HOST}` хочется видеть иначе, чем текст вокруг.
+        val tokens = highlighted("""name = "pic-${'$'}{CAPE_HOST}.png"""" + "\n")
+        assertEquals("string", kindOf(tokens, "\"pic-"), "текст до подстановки")
+        assertEquals("variable", kindOf(tokens, "${'$'}{CAPE_HOST}"), "сама подстановка")
+        assertEquals("string", kindOf(tokens, ".png\""))
+    }
+
+    @Test
+    fun `явный тип между ключом и знаком равенства не путается`() {
+        // Формат разрешает `maxFrames int = 100`. Слова два: первое — ключ,
+        // второе — объявленный тип. Если смотреть только на следующее слово, то
+        // первое выглядит значением, и подсветка ключа пропала бы.
+        val tokens = highlighted("limits { maxFrames int = 100 }\n")
+        assertEquals("property", kindOf(tokens, "maxFrames"), "ключ перед явным типом")
+        assertEquals("type", kindOf(tokens, "int"), "явный тип")
+        assertEquals("number", kindOf(tokens, "100"))
+    }
+
+    @Test
+    fun `ссылка не выглядит как ключ`() {
+        // `server.token[` — то же самое, что `limits {`, если смотреть только на
+        // следующее слово. Различает только то, что перед: у ключа начало
+        // записи, у ссылки — знак равенства.
+        val tokens = highlighted("limits = 1\nweather { a = server.token[0] }\n")
+        assertEquals("property", kindOf(tokens, "limits"), "ключ перед `=`")
+        assertEquals("property", kindOf(tokens, "weather"), "ключ блока")
+        assertEquals("variable", kindOf(tokens, "server.token"), "ссылка — значение, а не ключ")
+    }
+
+    @Test
+    fun `длина токена не переезжает через перевод строки`() {
+        // Многострочная строка: один токен на весь текст сдвинул бы длину на
+        // всех строках, кроме первой, и подсветка уехала бы вправо.
+        val tokens = highlighted("name = \"первая\nвторая\"\n")
+        assertEquals("string", kindOf(tokens, "\"первая"))
+        assertEquals("string", kindOf(tokens, "вторая\""))
+    }
+
+    @Test
+    fun `длина токена считается в кодировке клиента`() {
+        // Эмодзи внутри строки: в utf-16 он две единицы, в utf-8 четыре, в
+        // utf-32 одна. Если бы сервер слал свою длину, подсветка уехала бы
+        // вправо ровно на эту разницу.
+        val emoji = String(Character.toChars(0x1F600))
+        val text = "x = \"$emoji\"\nmaxFrames = 1\n"
+        for ((encoding, emojiWidth) in listOf("utf-16" to 2, "utf-8" to 4, "utf-32" to 1)) {
+            val (_, tokens) = rawTokenData(text, encoding = encoding)
+            val onFirstLine = tokens.filter { it[0] == 0L }
+            val string = onFirstLine.firstOrNull { it[2] == emojiWidth + 2L }
+            assertNotNull(
+                string,
+                "строка с эмодзи в $encoding — это две кавычки плюс $emojiWidth, а получилось: ${tokens.toList()}",
+            )
+            // Ключ на следующей строке: дельта строки 1, колонка 0.
+            val key = tokens.firstOrNull { it[0] == 1L && it[1] == 0L }
+            assertNotNull(key, "maxFrames в начале второй строки, а получилось: ${tokens.toList()}")
+            assertEquals(9L, key!![2], "длина ключа не зависит от кодировки")
+        }
+    }
+
+    @Test
+    fun `подсветка после didChange пересчитывается`() {
+        // Клиент перезапрашивает подсветку на каждый didChange; если сервер
+        // отдаёт прошлую, ключ пропадает из цвета сразу после первой правки.
+        val text = "capeCraft {\n    serverSinc = 1\n}\n"
+        val changed = text.replace("serverSinc", "serverSync")
+        val res = Session(
+            initializeTokens() + openText(text) +
+                note(
+                    "textDocument/didChange",
+                    """{"textDocument":{"uri":"$uri","version":2},"contentChanges":[{"text":${Json.render(J.JStr(changed))}}]}""",
+                ) + semanticTokensRequest(3),
+        ).run()
+        val data = res.last().obj("result")!!.arr("data")
+        assertTrue(data.isNotEmpty(), "после правки подсветка должна остаться")
+        val legend = res.first().obj("result")!!.obj("capabilities")!!
+            .obj("semanticTokensProvider")!!.obj("legend")!!
+            .arr("tokenTypes").map { (it as J.JStr).s }
+        val tokens = (0 until data.size step 5).map { legend[(data[it + 3] as J.JNum).long().toInt()] }
+        assertTrue(
+            tokens.all { it in setOf("property", "string", "number", "operator") },
+            "в исправленном файле остались ключи, числа и равенства: $tokens",
+        )
+    }
+
+    @Test
+    fun `подсветка не падает на пустом файле и на незнакомом файле`() {
+        for (text in listOf("", "\n", "# только комментарий\n", "{{{", "\"незакрытая")) {
+            val res = Session(initializeTokens() + openText(text) + semanticTokensRequest()).run()
+            assertNotNull(res.last().obj("result")?.arr("data"), "пустой ответ на '$text'")
+        }
+        val unknown = Session(
+            initializeTokens() + req(2, "textDocument/semanticTokens/full", """{"textDocument":{"uri":"file:///tmp/нет.kn"}}"""),
+        ).run()
+        assertTrue(
+            unknown.last().obj("result")!!.arr("data").isEmpty(),
+            "файла нет — токенов нет, а не ошибка",
+        )
+    }
+
+    @Test
+    fun `диапазонную подсветку сервер отвергает честно`() {
+        // Мы объявили `range = false`, поэтому клиент так не спросит. А если
+        // спросит — честный MethodNotFound, потому что незнакомый метод,
+        // на который не подписан, обязан им и заканчиваться.
+        val res = Session(
+            initializeTokens() + openText("capeCraft {\n}\n") +
+                req(2, "textDocument/semanticTokens/range", """{"textDocument":{"uri":"$uri"}}"""),
+        ).run()
+        val error = res.last().obj("error")
+        assertNotNull(error, "на неподписанный метод нужен ответ с ошибкой, а не тишина")
+        assertEquals(-32601L, (error!!["code"] as J.JNum).long())
+    }
+
     // --- кодировка позиций ---------------------------------------------------
 
     /**
