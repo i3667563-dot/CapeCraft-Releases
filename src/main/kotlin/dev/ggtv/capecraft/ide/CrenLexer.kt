@@ -229,15 +229,27 @@ object CrenLexer {
          *
          * Дробная часть есть только когда после точки идёт цифра, иначе это
          * путь ссылки вроде `server.token`, а не число.
+         *
+         * Подчёркивание внутри числа разрешено (`5_000_000`): игра такой конфиг
+         * читает, а без этого разбора редактор ругался бы на правильную запись.
+         * Подчёркивание допускается только между цифрами — ведущее `5_` и
+         * хвостовое `_` остаются отдельным мусором, как и в Kotlin.
          */
         private fun lexNumber() {
             if (text[i] == '-') i += 1
-            while (i < len && text[i] in '0'..'9') i += 1
+            while (i < len && isNumberPart(text, i)) i += 1
             if (i + 1 < len && text[i] == '.' && text[i + 1] in '0'..'9') {
                 i += 1
-                while (i < len && text[i] in '0'..'9') i += 1
+                while (i < len && isNumberPart(text, i)) i += 1
             }
             add(CrenLexKind.WORD, value = text.substring(start, i))
+        }
+
+        /** Цифра, либо подчёркивание, у которого с обеих сторон цифры. */
+        private fun isNumberPart(s: String, at: Int): Boolean {
+            val c = s[at]
+            if (c in '0'..'9') return true
+            return c == '_' && at > 0 && s[at - 1] in '0'..'9' && at + 1 < s.length && s[at + 1] in '0'..'9'
         }
 
         /**

@@ -179,7 +179,7 @@ object CrenParser {
         private val problems = ArrayList<CrenProblem>()
 
         fun run(): CrenTree {
-            val entries = parseEntries(null)
+            val entries = parseEntries(null, commasAllowed = false)
             return CrenTree(entries, problems)
         }
 
@@ -198,8 +198,13 @@ object CrenParser {
          * Разбирать записи, пока не встретим [closer] или конец файла.
          *
          * @param closer закрывающая пунктуация, например `}`; `null` для верха
+         * @param commasAllowed разрешена ли запятая между записями. В словаре
+         *   (`key = { a: 1, b: 2 }`) и в массиве — да, в блоке (`limits { ... }`)
+         *   — нет: там записи разделяет новая строка, и игра на запятой в конце
+         *   строки отказывается грузить конфиг целиком. Разница проверяется
+         *   `CrenKorenAgreementTest` против настоящего парсера koren.
          */
-        private fun parseEntries(closer: String?): List<CrenEntry> {
+        private fun parseEntries(closer: String?, commasAllowed: Boolean): List<CrenEntry> {
             val out = ArrayList<CrenEntry>()
             while (true) {
                 skipNewLines()
@@ -215,7 +220,15 @@ object CrenParser {
                         continue
                     }
                     if (t.text == ",") {
-                        k += 1 // запятая между записями словаря допустима
+                        if (!commasAllowed) {
+                            problems += CrenProblem(
+                                "запятая лишняя: в блоке записи пишутся с новой строки",
+                                t.range,
+                            )
+                        } else if (lexemes.getOrNull(k + 1)?.let { it.kind == CrenLexKind.PUNCT && it.text == "," } == true) {
+                            problems += CrenProblem("две запятые подряд", lexemes[k + 1].range)
+                        }
+                        k += 1
                         continue
                     }
                 }
@@ -228,9 +241,31 @@ object CrenParser {
                 val entry = parseEntry()
                 if (entry != null) out += entry
                 if (k == before) k += 1 // страховка от бесконечного цикла
+                complainAboutMissingSeparator()
             }
             return out
         }
+
+        /**
+         * Две записи в одной строке без разделителя: `maxFrames = 1 maxBytes = 2`.
+         *
+         * Игра на такой строке отказывается грузить конфиг, а раньше мы молчали
+         * и показывали подсказки, будто всё в порядке.
+         */
+        private fun complainAboutMissingSeparator() {
+            val next = peek() ?: return
+            if (next.kind != CrenLexKind.WORD && next.kind != CrenLexKind.STR) return
+            // Явный тип `key str = 1` — не начало новой записи, а продолжение
+            // текущей, но сюда мы попадаем уже после разбора значения, так что
+            // достаточно проверить, что после ключа действительно «=».
+            problems += CrenProblem(
+                "между записями нужна новая строка${if (peekIsColonOrComma()) " или запятая" else ""}",
+                next.range,
+            )
+        }
+
+        private fun peekIsColonOrComma(): Boolean =
+            peek()?.let { it.kind == CrenLexKind.PUNCT && (it.text == "," || it.text == ":") } == true
 
         private fun parseEntry(): CrenEntry? {
             val key = parseKey() ?: return null
@@ -258,7 +293,7 @@ object CrenParser {
                     val from = lexemes.getOrNull(k)?.range?.start ?: key.range.end
                     k += 1
                     form = EntryForm.BLOCK
-                    children += parseEntries("}")
+                    children += parseEntries("}", commasAllowed = false)
                     val closed = expectCloser("}", from)
                     if (closed != null) end = closed
                 }
@@ -403,7 +438,7 @@ object CrenParser {
         private fun parseDict(): CrenValue {
             val open = lexemes[k]
             k += 1
-            val entries = parseEntries("}")
+            val entries = parseEntries("}", commasAllowed = true)
             val closed = expectCloser("}", open.range.start)
             val end = closed ?: lexemes.getOrNull(k - 1)?.range?.end ?: open.range.end
             return CrenDict(TextRange(open.range.start, end), entries)

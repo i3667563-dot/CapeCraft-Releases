@@ -120,6 +120,42 @@ class CrenAnalyzerTest {
         assertTrue(d.any { it.code == CrenAnalyzer.CODE_UNKNOWN_KEY }, "пропущено: ${d.map { it.code }}")
     }
 
+    @Test
+    fun `when блоком без знака в словаре провайдера`() {
+        // `when { ... }` внутри словаря — самая частая форма, которую пишут по
+        // привычке от верхнего `capeCraft { ... }`. Терпимый разбор её берёт,
+        // а мод — нет: KorenParser требует «:» или «=» после ключа в словаре.
+        // Без этой проверки человек узнаёт о своём файле только из лога игры.
+        val d = diags(
+            """capeCraft { providers [ { name = "a", type = "url", when { location.y: "<= -20" } } ] }""",
+        )
+        val err = d.single { it.code == CrenAnalyzer.CODE_NO_SEPARATOR }
+        assertTrue(err.severity == CrenSeverity.ERROR, err.message)
+        assertTrue(err.message.contains("="), err.message)
+    }
+
+    @Test
+    fun `пустой when блоком тоже ругается`() {
+        val d = diags(
+            """capeCraft { providers [ { name = "a", type = "url", when { } } ] }""",
+        )
+        assertTrue(
+            d.any { it.code == CrenAnalyzer.CODE_NO_SEPARATOR },
+            "пустой `when { }` мод тоже не прочитает: ${d.map { it.code }}",
+        )
+    }
+
+    @Test
+    fun `тот же when со знаком не ругается`() {
+        val d = diags(
+            """capeCraft { providers [ { name = "a", type = "url", when = { location.y: "<= -20" } } ] }""",
+        )
+        assertTrue(
+            d.none { it.severity == CrenSeverity.ERROR },
+            "правильная форма не должна ругаться: ${d.map { it.message }}",
+        )
+    }
+
     // ---------------------------------------------------------------- when
 
     @Test
@@ -293,6 +329,47 @@ class CrenAnalyzerTest {
     }
 
     @Test
+    fun `подсказка сразу после равно без значения даёт значения поля`() {
+        // `type = |` и `enabled = |` — самый частый момент ввода: человек
+        // набрал ключ и разделитель, а значения ещё нет. Раньше запись без
+        // значения не находилась вовсе, и подсказки уезжали в соседние ключи
+        // блока: список предлагал вставить ключ туда, где пишется значение.
+        val enum = """capeCraft { providers [ { name = "a", type = | } ] }"""
+        val atEnum = enum.indexOf('|')
+        val labels = CrenAnalyzer.complete(CrenDocument(enum), atEnum).map { it.label }
+        assertTrue(
+            labels.containsAll(listOf("url", "json", "file")),
+            "у type значения-перечисления, а не ключи провайдера: $labels",
+        )
+
+        val bool = "capeCraft { serverSync { enabled = | } }"
+        val atBool = bool.indexOf('|')
+        val boolLabels = CrenAnalyzer.complete(CrenDocument(bool), atBool).map { it.label }
+        assertEquals(
+            listOf("true", "false"),
+            boolLabels,
+            "у enabled ровно два значения, без кавычек",
+        )
+    }
+
+    @Test
+    fun `на пустой строке между записями предлагаются ключи а не значения`() {
+        // Обратная сторона: заканчивается запятой — значит запись закрыта, и
+        // курсор уже не в её значении. Здесь нужны ключи, иначе подсказка
+        // значений встанет не туда.
+        val text = "capeCraft { providers [ {\n    name = \"a\",\n    |\n} ] }"
+        val labels = CrenAnalyzer.complete(CrenDocument(text), text.indexOf('|')).map { it.label }
+        assertTrue(
+            labels.containsAll(listOf("type", "url", "path")),
+            "после запятой нужны ключи записи провайдера: $labels",
+        )
+        assertFalse(
+            labels.contains("json"),
+            "json — это значение type, а не ключ; тут он лишний: $labels",
+        )
+    }
+
+    @Test
     fun `подсказки в when дают корни условий`() {
         val text = "capeCraft { providers [ { name = \"a\", type = \"url\", when = { | } } ] }"
         val items = CrenAnalyzer.complete(CrenDocument(text), text.indexOf('|'))
@@ -301,13 +378,161 @@ class CrenAnalyzerTest {
     }
 
     @Test
-    fun `подсказки значения when дают синонимы и операторы`() {
+    fun `подсказки значения when дают синонимы и равенство`() {
         val text = "capeCraft { providers [ { name = \"a\", type = \"url\", when = { weather: \"\" } } ] }"
         val at = offsetOf(text, "weather: \"")
         val items = CrenAnalyzer.complete(CrenDocument(text), at)
         val labels = items.map { it.label }
         assertTrue(labels.contains("rain"), "ожидался синоним rain: $labels")
-        assertTrue(labels.any { it.startsWith(">") }, "ожидался оператор: $labels")
+        assertTrue(labels.contains("=…"), "ожидался оператор равенства: $labels")
+    }
+
+    @Test
+    fun `строковому полю when не предлагают сравнение числа`() {
+        // `>` у строки не сработает никогда: [dev.ggtv.capecraft.condition.Op]
+        // приводит фактическое значение к числу, и `VStr` даёт `null`.
+        // Предлагать такое — значит подсовывать условие, которое молча
+        // не выполнится.
+        val text = "capeCraft { providers [ { name = \"a\", type = \"url\", when = { weather: \"\" } } ] }"
+        val labels = CrenAnalyzer.complete(CrenDocument(text), offsetOf(text, "weather: \"")).map { it.label }
+        assertTrue(
+            labels.none { it.startsWith(">") || it.startsWith("<") },
+            "у строкового поля не должно быть сравнений числа: $labels",
+        )
+        assertTrue(labels.none { it == "от..до" }, "диапазон числовому полю не подходит: $labels")
+    }
+
+    @Test
+    fun `числовому полю when предлагают сравнение и диапазон`() {
+        val text = "capeCraft { providers [ { name = \"a\", type = \"url\", when = { location.y: \"\" } } ] }"
+        val labels = CrenAnalyzer.complete(CrenDocument(text), offsetOf(text, "location.y: \"")).map { it.label }
+        assertTrue(labels.contains(">…"), "ожидалось сравнение числа: $labels")
+        assertTrue(labels.contains("от..до"), "ожидался диапазон: $labels")
+    }
+
+    @Test
+    fun `подсказки значения when предлагают канонические значения поля`() {
+        val cases = mapOf(
+            "time.period" to listOf("day", "sunrise", "sunset", "night"),
+            "weather" to listOf("clear", "rain", "thunder"),
+            "biome.precipitation" to listOf("none", "rain", "snow"),
+            "dimension.type" to listOf("overworld", "nether", "end"),
+        )
+        for ((key, values) in cases) {
+            val text = "capeCraft { providers [ { name = \"a\", type = \"url\", when = { $key: \"\" } } ] }"
+            val labels = CrenAnalyzer.complete(CrenDocument(text), offsetOf(text, "$key: \"")).map { it.label }
+            assertTrue(
+                labels.containsAll(values),
+                "для $key ожидались $values, а подсказано $labels",
+            )
+        }
+    }
+
+    @Test
+    fun `после точки в when предлагают поле а не тип`() {
+        val text = "capeCraft { providers [ { name = \"a\", type = \"url\", when = { location. } } ] }"
+        val labels = CrenAnalyzer.complete(CrenDocument(text), offsetOf(text, "location.")).map { it.label }
+        assertEquals(listOf("location.x", "location.y", "location.z"), labels, "после location. ждём поля координат")
+    }
+
+    @Test
+    fun `поле after-точки вставляется вместе с корнем`() {
+        // Подсказка заменяет диапазон `location.` целиком, поэтому в тексте
+        // должен быть полный ключ: вставка одного лишь `y` дала бы `y` без
+        // корня, а `location.y` поверх `location.` — `location.location.y`.
+        // Правильный вариант один — целиком `location.y`, и именно его
+        // накрывает textEdit.
+        val text = "capeCraft { providers [ { name = \"a\", type = \"url\", when = { location. } } ] }"
+        val item = CrenAnalyzer.complete(CrenDocument(text), offsetOf(text, "location."))
+            .single { it.label == "location.y" }
+        assertEquals("location.y", item.insertText)
+    }
+
+    @Test
+    fun `подсказки when предлагают поля без точки для координат`() {
+        // У `location` нет поля по умолчанию: `when { location: 0 }` не
+        // развернётся ни во что. Поэтому предлагаем `location.y` явно.
+        val text = "capeCraft { providers [ { name = \"a\", type = \"url\", when = { } } ] }"
+        val labels = CrenAnalyzer.complete(CrenDocument(text), offsetOf(text, "{ }")).map { it.label }
+        assertTrue(labels.containsAll(listOf("location.x", "location.y", "location.z")), "подсказки: $labels")
+        assertTrue(labels.contains("time.period"), "подсказки: $labels")
+    }
+
+    @Test
+    fun `внутри when не предлагают типы значения`() {
+        // Внутри `when` условие пишется `ключ: значение`; знак `=` там
+        // невозможен, поэтому предложение типов — заведомо неверная запись.
+        val text = "capeCraft { providers [ { name = \"a\", type = \"url\", when = { location.  } } ] }"
+        val at = offsetOf(text, "location.")
+        val labels = CrenAnalyzer.complete(CrenDocument(text), at).map { it.label }
+        assertTrue(
+            labels.containsAll(listOf("location.x", "location.y", "location.z")),
+            "после `location.` ждём поля: $labels",
+        )
+        assertTrue(!labels.contains("str"), "внутри when типов быть не должно: $labels")
+    }
+
+    @Test
+    fun `пробел после точки не сбрасывает подсказку в корни`() {
+        // Курсор ставят в конец строки, а не в конец ключа: после пробела
+        // человек всё ещё дописывает `location.y`.
+        val text = "capeCraft { providers [ { name = \"a\", type = \"url\", when = { location.  } } ] }"
+        val at = offsetOf(text, "location.  ")
+        val labels = CrenAnalyzer.complete(CrenDocument(text), at).map { it.label }
+        assertEquals(
+            listOf("location.x", "location.y", "location.z"),
+            labels,
+            "после `location. ` ждём поля координат: $labels",
+        )
+    }
+
+    @Test
+    fun `набранное поле after-точки сужает список`() {
+        val text = "capeCraft { providers [ { name = \"a\", type = \"url\", when = { location.y  } } ] }"
+        val at = offsetOf(text, "location.y")
+        val labels = CrenAnalyzer.complete(CrenDocument(text), at).map { it.label }
+        assertEquals(listOf("location.y"), labels, "после `location.y` подходит только location.y: $labels")
+    }
+
+    @Test
+    fun `переименовываемый ключ остаётся в подсказках`() {
+        // `enabled` в блоке уже написан, но человек стоит внутри него и
+        // правит букву: повторно предложить этот же ключ — единственное,
+        // что тут полезно.
+        val text = """capeCraft { serverSync { enabled = true } }"""
+        val at = text.indexOf("enabled") + "ena".length
+        val labels = CrenAnalyzer.complete(CrenDocument(text), at).map { it.label }
+        assertTrue(labels.contains("enabled"), "ключ под курсором нельзя выбрасывать из подсказок: $labels")
+    }
+
+    @Test
+    fun `подсказки фильтруются по набранному началу`() {
+        val text = "capeCraft { providers [ { name = \"a\", type = \"url\", when = { loc } } ] }"
+        val labels = CrenAnalyzer.complete(CrenDocument(text), offsetOf(text, "loc")).map { it.label }
+        assertTrue(labels.contains("location"), "подсказки: $labels")
+        assertTrue(
+            labels.none { it.startsWith("weather") || it.startsWith("biome") },
+            "на `loc` biome и weather не подходят: $labels",
+        )
+    }
+
+    @Test
+    fun `подсказки не повторяют уже написанные условия`() {
+        val text = """capeCraft { providers [ { name = "a", type = "url", when = { location.x: 1, | } } ] }"""
+        val labels = CrenAnalyzer.complete(CrenDocument(text), offsetOf(text, "|")).map { it.label }
+        assertTrue(!labels.contains("location.x"), "location.x уже написан: $labels")
+        assertTrue(labels.contains("location.y"), "соседние поля ещё нужны: $labels")
+    }
+
+    @Test
+    fun `в пустом providers предлагают готовую запись`() {
+        val text = "capeCraft { providers [ ] }"
+        val items = CrenAnalyzer.complete(CrenDocument(text), offsetOf(text, "[ ]"))
+        assertEquals(1, items.size, "в пустом массиве один осмысленный вариант: ${items.map { it.label }}")
+        assertTrue(
+            items.single().insertText.contains("type ="),
+            "нужна готовая запись с типом, а не пустая скобка: ${items.single().insertText}",
+        )
     }
 
     @Test

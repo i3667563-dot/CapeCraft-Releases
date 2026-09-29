@@ -56,17 +56,63 @@
     этапа 3 материализуют все кадры сразу; покрыто frameAt + прореживанием + сжатием.
 
 ## Этап 6 — интеграция Minecraft
-- [ ] Реестр плащей (UUID → плащ), привязка по имени профиля
-- [ ] Mixin рендера плаща (перехват CapeFeatureRenderer + свой рендер)
-- [ ] Анимация по игровому времени (кадры APNG/GIF)
-- [ ] Команда `/cp reload` (динамическая перезагрузка конфигов+плащей)
-- [ ] Команды `/cp list`, `/cp status`, `/cp clear` (кэш)
+> Статус пересчитан 2026-09-28 по фактическому коду. Код написан и покрыт
+> сборкой/тестами, но по правилу выше (`[x]` = проверено и в игре тоже)
+> галочки не проставлены: не хватает прогона в runClient.
+
+- [~] Реестр плащей (UUID → плащ), привязка по имени профиля — `CapeRegistry.kt`
+- [~] Mixin рендера плаща (перехват CapeFeatureRenderer + свой рендер)
+      — `versions/*/…/mixin/CapeFeatureRendererMixin.kt` + `capecraft.mixins.json`
+- [~] Анимация по игровому времени (кадры APNG/GIF)
+      — `CapeCraftClient.kt`: `registry.animate(world.getLevelData().getGameTime() * 50L)`
+- [~] Команда `/cp reload` (динамическая перезагрузка конфигов+плащей)
+- [~] Команды `/cp list`, `/cp status`, `/cp clear` (кэш) — плюс `/cp sync`
+      — `CapeCommands.kt`
+- [ ] Точка расширения рендера для аддонов — `api/render/` есть,
+      но с боевым вендором (кто-то реально подключает `CapeRenderModifier`) не проверено
 
 ## Этап 7 — качество
-- [ ] Полная сборка `./gradlew build` + все тесты зелёные
+- [x] Полная сборка `./gradlew build` + все тесты зелёные
+      — 2026-09-28: BUILD SUCCESSFUL, 881 тест, 0 failures, 0 skipped
 - [ ] Проверка в игре (runClient): плащ PNG/APNG/GIF, reload
-- [ ] AGENTS.md + README.md
-- [ ] Бэкап и git-инициализация
+      — **главный оставшийся пункт проекта**
+- [x] AGENTS.md + README.md
+- [~] Бэкап и git-инициализация — git есть, история чистая,
+      но 14 коммитов не запушены в пульт
+
+## Этап 8 — IDE: Language Server для `.kn`/`.crn`
+> Отдельная ветка работы, в плане раньше не была заведена. Заведена 2026-09-28.
+> Принцип: LSP — строгий слой поверх того же анализатора, что и мод, а не
+> второй независимый парсер (иначе редактор и игра будут решать разное).
+
+- [x] Транспорт JSON-RPC (LSP Content-Length, парсинг, диспетчеризация)
+      — `lsp/RpcTransport.kt`
+- [x] Сервер: `initialize`/`initialized`, `shutdown`/`exit`
+      — `lsp/LspServer.kt`, `lsp/Lsp.kt`
+- [x] Синхронизация документов: `didOpen`, `didChange`, `didClose`, `didSave`
+- [x] `completion` — ключи и значения из схемы, с учётом контекста блока
+      (после `key = ` не предлагаются соседние ключи)
+- [x] `hover` — тип и значение узла, диапазон
+- [x] `codeAction` — быстрые исправления по диагностике
+- [x] Диагностика: pull (`textDocument/diagnostic`) + push (`publishDiagnostics`),
+      кодировка позиций по UTF-16
+- [x] `documentSymbol` — outline по блокам
+- [x] `foldingRange` — сворачивание по блокам и словарям
+- [x] `semanticTokens/full` — подсветка ключей/значений/строк/комментариев
+- [x] Схема конфигов отдельно от схемы игровых сущностей (диагностика не лезет
+      в игровые значения) — `schema/ConfigSchema.kt`
+- [x] Расширение KoreN для Zed — `tools/` + `docs/`
+- [x] Сборка сервера: `artifacts/capecraft-lsp.jar` (2.7 МБ, 2026-09-28)
+- [x] Тесты: `LspServerTest` 67 + анализатор/схема — зелёные,
+      881 тест всего по проекту
+
+- [ ] Навигация и рефакторинг (не входит в текущий объём):
+      `definition`, `references`, `rename`, `documentHighlight`,
+      `selectionRange`, `inlayHint`
+- [ ] Форматирование (`textDocument/formatting`) и `completionItem/resolve`
+- [ ] `workspace/didChangeConfiguration` — реакция на смену настроек без рестарта
+- [ ] Проверка в реальном редакторе (Zed/VS Code) на живом проекте,
+      а не только через тесты протокола
 
 ## Правило 1 — зависимости
 - Внешние зависимости — ни в коем случае (кроме Fabric API).

@@ -1,6 +1,5 @@
 package dev.ggtv.capecraft.api
 
-import dev.ggtv.capecraft.CapeCraftClient
 import dev.ggtv.capecraft.image.AnimatedImage
 import dev.ggtv.capecraft.image.GifDecoder
 import dev.ggtv.capecraft.image.ImageFormat
@@ -12,9 +11,13 @@ import dev.ggtv.capecraft.schema.Placeholders
  * Глобальный держатель активного [CapeApi] и мост между ним и внутренностями.
  *
  * Фабричные реестры (декодеры/плейсхолдеры) доступны и вне MC-контекста,
- * поэтому конструируются без ссылок на [CapeCraftClient] и тестируются чисто.
- * [CapeApiHolder] собирает один общий [CapeApi], регистрирует встроенные
- * декодеры/плейсхолдеры и отдаётся аддонам.
+ * поэтому конструируются без ссылок на версионный `CapeCraftClient` и
+ * тестируются чисто. [CapeApiHolder] собирает один общий [CapeApi],
+ * регистрирует встроенные декодеры/плейсхолдеры и отдаётся аддонам.
+ *
+ * Импорт на `CapeCraftClient` здесь был бы связкой общего кода с версионным
+ * и ломал бы сборку LSP-сервера, который компилирует эту же папку: версии
+ * под ним нет, и KDoc-ссылки на класс не должны требовать её наличия.
  */
 object CapeApiHolder {
 

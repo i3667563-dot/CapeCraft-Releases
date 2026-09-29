@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import java.io.File
 
 /**
  * Примеры из README должны работать. Документация, которую нельзя
@@ -62,6 +63,9 @@ class ReadmeExamplesTest {
     )
 
     private fun kn(text: String) = KorenConfig.fromString(text, EmptyWorldContext)
+
+    /** Начала fenced-блоков README, которые являются конфигом CapeCraft. */
+    private val CONFIG_HEADS = listOf("capeCraft {", "limits {", "serverSync {")
 
     @Test
     fun `when example from README loads with all four providers`() {
@@ -187,6 +191,55 @@ class ReadmeExamplesTest {
             """.trimIndent(),
         )
         assertTrue(sync.getBool("serverSync.enabled"))
+    }
+
+    /**
+     * Каждый конфиг-пример из README обязан разбираться модом.
+     *
+     * Примеры раньше копировались в тест руками, и как только в README
+     * появлялась правка текста, тест продолжал проверять старую копию: три
+     * месяца документация могла показывать форму, которую мод не читает.
+     * Поэтому берём сами блоки из файла.
+     */
+    @Test
+    fun `все конфиг-примеры из README разбираются настоящим парсером`() {
+        val readme = File("README.md").readText()
+        val configs = Regex("```[a-z]*\n(.*?)```", RegexOption.DOT_MATCHES_ALL)
+            .findAll(readme)
+            .map { it.groupValues[1] }
+            .filter { CONFIG_HEADS.any { head -> it.trimStart().startsWith(head) } }
+            .toList()
+        assertTrue(configs.isNotEmpty(), "в README не нашлось ни одного конфиг-примера")
+
+        for (config in configs) {
+            // Переменные окружения получают заглушку: пример с `${CAPE_HOST}`
+            // иначе не разберётся без запущенного окружения, а проверять тут
+            // нечего — синтаксис. Смысл подстановок проверяют отдельные тесты
+            // выше, с настоящими значениями.
+            val env = Regex("\\$\\{([A-Za-z_][A-Za-z0-9_]*)")
+                .findAll(config)
+                .map { it.groupValues[1] }
+                .distinct()
+                .associateWith { "capes.example.com" }
+            try {
+                KorenConfig.fromStringWithEnv(config, env)
+            } catch (e: dev.ggtv.kjen.CrenError.Parse) {
+                throw AssertionError("пример из README не разбирается: ${e.message}\n$config")
+            }
+        }
+    }
+
+    /**
+     * Блок-форма `when { ... }` мод в словаре не читает — после ключа нужен
+     * `=` или `:`. В README такая форма осталась в двух местах прозы, и человек,
+     * поверивший документу, получил ошибку разбора вместо работающего
+     * конфига. Держим README в форме, которую мод принимает.
+     */
+    @Test
+    fun `в README нет блок-формы when без знака`() {
+        val readme = File("README.md").readText()
+        val bad = Regex("(?m)\\bwhen\\s*\\{").findAll(readme).map { it.value }.toList()
+        assertTrue(bad.isEmpty(), "в README есть неразбираемый `when {`: $bad")
     }
 
     private fun assertThrowsParse(block: () -> Unit) {

@@ -4,7 +4,7 @@ import dev.ggtv.capecraft.condition.Condition
 import dev.ggtv.capecraft.condition.Expected
 import dev.ggtv.capecraft.condition.Predicate
 import dev.ggtv.capecraft.memory.Limits
-import dev.ggtv.capecraft.provider.ProviderLoader
+import dev.ggtv.capecraft.provider.ProviderNames
 import dev.ggtv.capecraft.sync.ServerSyncSettings
 import dev.ggtv.kjen.Value
 import dev.ggtv.koren.WorldRoot
@@ -59,13 +59,13 @@ class ConfigSchemaTest {
     fun `ключи провайдера совпадают с константами загрузчика`() {
         val names = ConfigSchema.providerFields().map { it.name }.toSet()
         val fromCode = setOf(
-            ProviderLoader.Keys.NAME,
-            ProviderLoader.Keys.TYPE,
-            ProviderLoader.Keys.URL,
-            ProviderLoader.Keys.PATH,
-            ProviderLoader.Keys.EXTRACT,
-            ProviderLoader.Keys.WHEN,
-            ProviderLoader.Keys.PRIORITY,
+            ProviderNames.Keys.NAME,
+            ProviderNames.Keys.TYPE,
+            ProviderNames.Keys.URL,
+            ProviderNames.Keys.PATH,
+            ProviderNames.Keys.EXTRACT,
+            ProviderNames.Keys.WHEN,
+            ProviderNames.Keys.PRIORITY,
         )
         assertEquals(fromCode, names, "схема провайдера разошлась с ProviderLoader.Keys")
     }
@@ -74,25 +74,25 @@ class ConfigSchemaTest {
     fun `в схеме провайдера нет ключей, которых не читает загрузчик`() {
         val names = ConfigSchema.providerFields().map { it.name }.toSet()
         val fromCode = setOf(
-            ProviderLoader.Keys.NAME,
-            ProviderLoader.Keys.TYPE,
-            ProviderLoader.Keys.URL,
-            ProviderLoader.Keys.PATH,
-            ProviderLoader.Keys.EXTRACT,
-            ProviderLoader.Keys.WHEN,
-            ProviderLoader.Keys.PRIORITY,
+            ProviderNames.Keys.NAME,
+            ProviderNames.Keys.TYPE,
+            ProviderNames.Keys.URL,
+            ProviderNames.Keys.PATH,
+            ProviderNames.Keys.EXTRACT,
+            ProviderNames.Keys.WHEN,
+            ProviderNames.Keys.PRIORITY,
         )
         assertTrue(names.none { it !in fromCode }, "в схеме есть лишние ключи провайдера")
     }
 
     @Test
     fun `type провайдера помечен открытым — аддоны регистрируют свои`() {
-        val type = ConfigSchema.providerFields().first { it.name == ProviderLoader.Keys.TYPE }
+        val type = ConfigSchema.providerFields().first { it.name == ProviderNames.Keys.TYPE }
         assertTrue(type.open, "type открыт для аддон-типов, иначе чужие типы будут ругаться")
         for (builtin in listOf(
-            ProviderLoader.Types.URL,
-            ProviderLoader.Types.FILE,
-            ProviderLoader.Types.JSON,
+            ProviderNames.Types.URL,
+            ProviderNames.Types.FILE,
+            ProviderNames.Types.JSON,
         )) {
             assertTrue(
                 type.allowed.contains(builtin),
@@ -103,13 +103,13 @@ class ConfigSchemaTest {
 
     @Test
     fun `специфичные ключи провайдера не показываются чужому типу`() {
-        val extract = ConfigSchema.providerFields().first { it.name == ProviderLoader.Keys.EXTRACT }
-        val path = ConfigSchema.providerFields().first { it.name == ProviderLoader.Keys.PATH }
+        val extract = ConfigSchema.providerFields().first { it.name == ProviderNames.Keys.EXTRACT }
+        val path = ConfigSchema.providerFields().first { it.name == ProviderNames.Keys.PATH }
 
-        assertTrue(extract.offeredFor(ProviderLoader.Types.JSON), "extract нужен json")
-        assertTrue(!extract.offeredFor(ProviderLoader.Types.URL), "extract у url лишний")
-        assertTrue(path.offeredFor(ProviderLoader.Types.FILE), "path нужен file")
-        assertTrue(!path.offeredFor(ProviderLoader.Types.JSON), "path у json лишний")
+        assertTrue(extract.offeredFor(ProviderNames.Types.JSON), "extract нужен json")
+        assertTrue(!extract.offeredFor(ProviderNames.Types.URL), "extract у url лишний")
+        assertTrue(path.offeredFor(ProviderNames.Types.FILE), "path нужен file")
+        assertTrue(!path.offeredFor(ProviderNames.Types.JSON), "path у json лишний")
     }
 
     @Test

@@ -143,6 +143,79 @@ test {
 		events "failed", "skipped"
 		exceptionFormat "full"
 	}
+	// READMEExamplesTest читает README с диска, поэтому правка документации
+	// обязана перезапускать тесты. Без этого Gradle считает задачу
+	// up-to-date, и проверка примеров молча ничего не проверяет: именно так
+	// в документации и жил неразбираемый `when { ... }`.
+	inputs.file(file('README.md')).withPropertyName('readmeUnderTest')
+}
+
+// --- Сервер LSP для конфигов .kn ------------------------------------------
+//
+// Живёт в том же проекте, а не в подпроекте, по конкретной причине: общий
+// код не компилируется без Minecraft, а Gradle 9 не даёт подпроекту взять
+// чужую конфигурацию (`Resolution ... without an exclusive lock`). Отдельный
+// проект означал бы либо копию исходников (разойдутся схемы — подсказки
+// начнут врать), либо перечисление координат Minecraft вручную (разъедется
+// с модом по версии). Здесь classpath уже правильный, потому что это он.
+//
+// В мод сервер не попадает: jar мода его исключает, сборка — отдельная
+// (`./gradlew lspJar`). При этом Minecraft в classpath запуска сервера не
+// нужен и в его jar не упаковывается: до классов, связанных с игрой, разбор
+// конфига не доходит.
+configurations {
+	lspRuntime {
+		canBeConsumed = false
+		canBeResolved = true
+	}
+}
+
+dependencies {
+	// Ровно три jar'а: kotlin-stdlib, slf4j-api и его простой биндинг.
+	// simple нужен, чтобы лог общего кода ушёл в stderr, а не потерялся без
+	// биндинга: stdout сервера принадлежит протоколу, и лог в нём ломает
+	// разбор кадров.
+	lspRuntime "org.jetbrains.kotlin:kotlin-stdlib:${project.kotlin_version}"
+	lspRuntime 'org.slf4j:slf4j-api:2.0.16'
+	lspRuntime 'org.slf4j:slf4j-simple:2.0.16'
+}
+
+// Жирный jar: редактор запускает сервер одной командой, и требовать от
+// пользователя classpath с kotlin-stdlib — значит гарантированно сломанная
+// установка у половины людей. Без плагина-затемнителя: берём распакованное
+// содержимое lspRuntime.
+tasks.register('lspJar', Jar) {
+	group = 'build'
+	description = 'Собирает запускаемый сервер LSP: artifacts/capecraft-lsp.jar'
+	archiveBaseName = 'capecraft-lsp'
+	// Имя без версии — намеренно: путь к серверу живёт в конфиге редактора,
+	// и версия в имени заставила бы править его на каждом релизе. Версия
+	// остаётся в Implementation-Version внутри манифеста.
+	archiveVersion = ''
+	archiveClassifier = ''
+	duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+	manifest.attributes(
+		'Main-Class': 'dev.ggtv.capecraft.lsp.MainKt',
+		'Implementation-Title': 'CapeCraft LSP',
+		'Implementation-Version': project.lsp_version,
+	)
+	from(sourceSets.main.output)
+	from({
+		configurations.lspRuntime.filter { it.name.endsWith('.jar') }.collect { zipTree(it) }
+	})
+	// Служебные файлы подписи и module-info не нужны и ломают сборку при
+	// дубликатах (в kotlin-stdlib и slf4j они есть).
+	exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA', 'META-INF/versions/9/module-info.class'
+	// Свой путь, а не общий artifactDir из секции ниже: тот объявлен после
+	// этого блока, и ссылка на него отсюда сработала бы только при переносе.
+	destinationDirectory = layout.projectDirectory.dir('artifacts')
+}
+
+// Сервер в jar мода не едет: игрок получает 30 КБ серверного кода, который
+// никогда не грузится, а лишние классы в модe — это лишняя поверхность для
+// конфликтов (например, если у игрока есть свой класс с тем же именем).
+tasks.named('jar', Jar) {
+	exclude 'dev/ggtv/capecraft/lsp/**'
 }
 
 processResources {

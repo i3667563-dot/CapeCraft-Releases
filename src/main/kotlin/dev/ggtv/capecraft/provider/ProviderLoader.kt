@@ -4,6 +4,8 @@ import dev.ggtv.capecraft.condition.Condition
 import dev.ggtv.capecraft.api.CapeApiHolder
 import dev.ggtv.capecraft.api.provider.CapeSource
 import dev.ggtv.capecraft.api.provider.CapeValues
+import dev.ggtv.capecraft.provider.ProviderNames.Keys
+import dev.ggtv.capecraft.provider.ProviderNames.Types
 import dev.ggtv.kjen.Value
 import dev.ggtv.koren.KorenConfig
 
@@ -35,23 +37,6 @@ import dev.ggtv.koren.KorenConfig
 object ProviderLoader {
     const val ROOT = "capeCraft.providers"
 
-    object Keys {
-        const val NAME = "name"
-        const val TYPE = "type"
-        const val URL = "url"
-        const val PATH = "path"
-        const val EXTRACT = "extract"
-        const val WHEN = "when"
-        const val PRIORITY = "priority"
-    }
-
-    /** Типы провайдеров, как в `type = ...`. */
-    object Types {
-        const val URL = "url"
-        const val FILE = "file"
-        const val JSON = "json"
-    }
-
     /** Собрать список провайдеров из конфига (в порядке появления, без I/O). */
     fun load(config: KorenConfig): List<Provider> {
         val configRoot = config.getArray(ROOT)
@@ -66,21 +51,21 @@ object ProviderLoader {
         val dict = v as? Value.VDict
             ?: throw IllegalArgumentException("провайдер должен быть словарём {name, type, ...}, найдено «${v.kind}»")
         val kv = dict.pairs.toMap()
-        val type = str(kv, Keys.TYPE) ?: throw IllegalArgumentException("у провайдера нет «type» (url|file|json|...)")
-        val name = str(kv, Keys.NAME) ?: "provider-${type}"
+        val type = str(kv, ProviderNames.Keys.TYPE) ?: throw IllegalArgumentException("у провайдера нет «type» (url|file|json|...)")
+        val name = str(kv, ProviderNames.Keys.NAME) ?: "provider-${type}"
 
         // 1. Встроенные типы (url/file/json).
         val builtSource: Source? = when (type) {
-            Types.URL -> Source.Url(
-                str(kv, Keys.URL) ?: throw IllegalArgumentException("провайдер «$name» типа url: нужен «url»"),
+            ProviderNames.Types.URL -> Source.Url(
+                str(kv, ProviderNames.Keys.URL) ?: throw IllegalArgumentException("провайдер «$name» типа url: нужен «url»"),
             )
-            Types.FILE -> Source.File(
-                str(kv, Keys.PATH) ?: throw IllegalArgumentException("провайдер «$name» типа file: нужен «path»"),
+            ProviderNames.Types.FILE -> Source.File(
+                str(kv, ProviderNames.Keys.PATH) ?: throw IllegalArgumentException("провайдер «$name» типа file: нужен «path»"),
             )
-            Types.JSON -> {
-                val url = str(kv, Keys.URL)
+            ProviderNames.Types.JSON -> {
+                val url = str(kv, ProviderNames.Keys.URL)
                     ?: throw IllegalArgumentException("провайдер «$name» типа json: нужен «url»")
-                val extract = str(kv, Keys.EXTRACT)
+                val extract = str(kv, ProviderNames.Keys.EXTRACT)
                     ?: throw IllegalArgumentException("провайдер «$name» типа json: нужен «extract» (например «$.data.cape_url»)")
                 Source.Json(url, extract)
             }
@@ -98,8 +83,8 @@ object ProviderLoader {
             typeSpec.source(capeValues)
         } else null
 
-        val condition = (kv[Keys.WHEN] as? Value.VDict)?.let { Condition.parse(it) }
-        val priority = (kv[Keys.PRIORITY] as? Value.VInt)?.i?.toInt() ?: 0
+        val condition = (kv[ProviderNames.Keys.WHEN] as? Value.VDict)?.let { Condition.parse(it) }
+        val priority = (kv[ProviderNames.Keys.PRIORITY] as? Value.VInt)?.i?.toInt() ?: 0
 
         val capeValues = if (addonSource != null) CapeValues(
             name = name,

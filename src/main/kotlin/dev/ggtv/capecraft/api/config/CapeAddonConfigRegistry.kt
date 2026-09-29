@@ -6,12 +6,19 @@ import dev.ggtv.koren.KorenConfig
 /**
  * Реестр конфигов аддонов: хранит схемы и выдаёт [AddonConfig] после загрузки.
  *
- * Потокобезопасен: схемы добавляются на старте (однопоточно), значения
- * читаются из любого потока (immutable).
+ * **Значения публикуются снимком, а не правкой на месте.** Раньше [loadFrom]
+ * делал `configs.clear()` и заново наполнял тот же `HashMap`, а [get] читал его
+ * без синхронизации: между `clear()` и первым `put` читатель с другого потока
+ * видел `null` для аддона, у которого конфиг только что загрузился, а на ARM
+ * без happens-before — ещё и небезопасно опубликованный `HashMap`. Теперь
+ * [loadFrom] собирает новый `LinkedHashMap` и присваивает его [configs] через
+ * `@Volatile`: читатель видит либо прежний снимок целиком, либо новый целиком.
  */
 class CapeAddonConfigRegistry {
     private val schemas = LinkedHashMap<String, CapeAddonConfig>()
-    private val configs = HashMap<String, AddonConfig>()
+
+    @Volatile
+    private var configs: Map<String, AddonConfig> = emptyMap()
 
     /** Зарегистрировать схему конфига аддона. */
     @Synchronized
@@ -26,7 +33,7 @@ class CapeAddonConfigRegistry {
      */
     @Synchronized
     fun loadFrom(cfg: KorenConfig) {
-        configs.clear()
+        val next = LinkedHashMap<String, AddonConfig>(schemas.size)
         for ((id, schema) in schemas) {
             val section = try {
                 val block = cfg.getBlock(schema.sectionPath)
@@ -34,14 +41,16 @@ class CapeAddonConfigRegistry {
             } catch (_: Exception) {
                 emptyMap()
             }
-            configs[id] = MapAddonConfig(schema, section)
+            next[id] = MapAddonConfig(schema, section)
         }
+        configs = next
     }
 
     /** Получить конфиг аддона по ID (null, если аддон не зарегистрировал схему). */
     operator fun get(addonId: String): AddonConfig? = configs[addonId]
 
     /** Все зарегистрированные ID. */
+    @Synchronized
     fun ids(): List<String> = schemas.keys.toList()
 }
 
