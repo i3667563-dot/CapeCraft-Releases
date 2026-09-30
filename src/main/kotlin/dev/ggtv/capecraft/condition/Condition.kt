@@ -73,6 +73,114 @@ data class Condition(val predicates: List<Predicate>) {
         )
 
         /**
+         * Тиры брони — обещание, а не описание Minecraft.
+         *
+         * Имя достаётся из id предмета (`diamond_chestplate` → `diamond`),
+         * а не из `ArmorMaterial`: в 1.21 это `RegistryEntry` по id, в 26.2
+         * материал вообще стал записью без имени, и общего у них ничего нет.
+         * Список нужен ещё и для того, чтобы `unknown` отличался от настоящего
+         * тира: без него подошло бы что угодно с подстрокой до `_`.
+         */
+        val ARMOR_TIERS = listOf(
+            "none", "leather", "chainmail", "iron", "gold", "diamond", "netherite", "turtle",
+        )
+
+        /**
+         * Значения булевых полей: мир отдаёт их строкой, а не `Value.VBool`.
+         *
+         * Вынесено в константу, потому что [FIELD_VALUES] и подсказки редактора
+         * обязаны предлагать один и тот же список — иначе подсказка предложит
+         * значение, на котором мод потом упадёт.
+         */
+        val BOOLEANS = listOf("true", "false")
+
+        /**
+         * Значения, которые поле отдаёт **ровно** в таком виде.
+         *
+         * Ключ — корень, значение — поле → множество. Пустое множество означает
+         * «значение не ограничено» (`biome.id` — реестр модов, `location.y` —
+         * число), и проверять там нечего.
+         *
+         * Список лежит здесь, а не в редакторе, потому что проверка и подсказка —
+         * два следствия одного факта: мир отдаёт именно эти строки. Список в
+         * `WhenSchema` был бы второй копией того же самого, и опечатка в любой
+         * из них превращалась в тихо неработающий провайдер: `armor.chest:
+         * "plate"` принимался, подсказка его не предлагала, и совпадение не
+         * наступало никогда.
+         *
+         * Чего здесь нет: `unknown`. Мир отдаёт его вместо любого значения,
+         * которое прочитать не удалось (в том числе для брони нестандартного
+         * мода), и `armor.chest: "unknown"` — законное условие, поэтому
+         * [UNKNOWN] принимается везде, где принимается значение.
+         */
+        val FIELD_VALUES: Map<WorldRoot, Map<String, List<String>>> = mapOf(
+            WorldRoot.BIOME to mapOf("precipitation" to listOf("none", "rain", "snow")),
+            WorldRoot.WEATHER to mapOf("condition" to listOf("clear", "rain", "thunder")),
+            // Порядок — как в `timeField`: сначала то, что человек ищет чаще.
+            WorldRoot.TIME to mapOf("period" to listOf("day", "sunrise", "sunset", "night")),
+            WorldRoot.DIMENSION to mapOf("type" to listOf("overworld", "nether", "end")),
+            // Тир брони одинаков для всех слотов — список один, а не на слот.
+            WorldRoot.ARMOR to mapOf(
+                "head" to ARMOR_TIERS,
+                "chest" to ARMOR_TIERS,
+                "legs" to ARMOR_TIERS,
+                "feet" to ARMOR_TIERS,
+            ),
+            // Булевы поля отдаются строками "true"/"false", а не `Value.VBool`:
+            // тогда `state.sneaking: true` разбирается в равенство строке и
+            // работает тем же кодом сравнения, что остальные поля.
+            WorldRoot.STATE to mapOf(
+                "inWater" to BOOLEANS,
+                "sneaking" to BOOLEANS,
+                "sprinting" to BOOLEANS,
+                "onGround" to BOOLEANS,
+                "pose" to listOf(
+                    "standing", "crouching", "swimming", "fall_flying",
+                    "sleeping", "spin_attack", "long_jumping", "dying",
+                ),
+            ),
+        )
+
+        /**
+         * Поля, где значение приходит числом.
+         *
+         * Только у них осмысленны `>`, `<`, `..`: [Op] для строк просто
+         * возвращает `false`, и подсказка «`>`» у `weather.condition` была бы
+         * враньём. В списке [FIELD_VALUES] их нет, и это не пропуск: поле
+         * числовое и строковое одновременно не бывает, а расхождение этих двух
+         * списков проверяет тест.
+         */
+        val NUMERIC_FIELDS: Map<WorldRoot, List<String>> = mapOf(
+            WorldRoot.BIOME to listOf("temperature"),
+            WorldRoot.TIME to listOf("tick"),
+            WorldRoot.LOCATION to listOf("x", "y", "z"),
+            // И текущее, и максимальное здоровье — числа, поэтому `health.max`
+            // пишется как `">=20"`, а `health.current: "<10"`.
+            WorldRoot.HEALTH to listOf("current", "max"),
+        )
+
+        /** Принимает ли поле числа, а значит ли операторы сравнения. */
+        fun isNumeric(root: WorldRoot, field: String): Boolean =
+            NUMERIC_FIELDS[root]?.contains(field) == true
+
+        /**
+         * Значение, которым мир отвечает «не смог прочитать».
+         *
+         * Принимается в любом поле со строковыми значениями: для брони это
+         * способ поймать нестандартный слот, для остальных полей — просто
+         * «мир не отвечает», и условие честно не срабатывает, а не падает.
+         */
+        const val UNKNOWN = "unknown"
+
+        /** Значения поля; пустой список — поле не ограничено. */
+        fun valuesOf(root: WorldRoot, field: String): List<String> =
+            FIELD_VALUES[root]?.get(field).orEmpty()
+
+        /** Принимает ли поле строковое значение из закрытого списка. */
+        fun isClosedField(root: WorldRoot, field: String): Boolean =
+            valuesOf(root, field).isNotEmpty()
+
+        /**
          * Корни, которые не уезжают по сети.
          *
          * `state` описывает то, чего про другого игрока не узнать: в воде ли
@@ -120,7 +228,57 @@ data class Condition(val predicates: List<Predicate>) {
                 }
             }
             val (op, expected) = parseValueFor("when", value)
+            checkValue(root, field, op, expected)
             return Predicate(root, field, op, expected)
+        }
+
+        /**
+         * Проверить, что значение вообще может совпасть.
+         *
+         * Без этой проверки `armor.chest: "plate"` молча превращался в условие,
+         * которое не срабатывает никогда: разбор проходил, провайдер грузился,
+         * ошибки не было нигде, а плащ просто не появлялся — и винить не на
+         * что. Теперь это ошибка загрузки с перечнем допустимых значений.
+         *
+         * Проверяются только те значения, где список закрыт. `biome.id` и
+         * `dimension.id` открыты (реестр модов), числа открыты по построению, а
+         * [UNKNOWN] принимается везде: это ответ мира «не прочитано», и
+         * `armor.chest: "unknown"` — законный способ поймать нестандартный слот.
+         */
+        private fun checkValue(root: WorldRoot, field: String, op: Op, expected: Expected) {
+            // Числовое поле со строкой: `health.current: "низко"`. Строка не
+            // число, и `parseValueFor` оставил её строкой — сравнивать её
+            // тут не с чем, условие не сработает никогда.
+            if (isNumeric(root, field) && expected is Expected.Str) {
+                throw IllegalArgumentException(
+                    "условие when: «${root.segment}.$field» — числовое поле, " +
+                        "а значение «${expected.s}» не число. Пишите " +
+                        "\">20\", \"<=20\" или \"10..20\"",
+                )
+            }
+            val allowed = valuesOf(root, field)
+            if (allowed.isEmpty()) return
+            val text = (expected as? Expected.Str)?.s ?: throw IllegalArgumentException(
+                "условие when: «${root.segment}.$field» — поле со списком значений, " +
+                    "а здесь число или диапазон. Допустимо: ${allowed.joinToString(", ")}",
+            )
+            // `!` сравнивает строки, а `>`/`<`/`..` — числа. Оператор над
+            // закрытым списком строк не может сработать, поэтому это ошибка
+            // формата, а не значения.
+            if (op != Op.Eq && op != Op.NotEq) {
+                throw IllegalArgumentException(
+                    "условие when: «${root.segment}.$field» — поле со списком значений, " +
+                        "оператор «${op.symbol()}» к нему неприменим. " +
+                        "Допустимо: ${allowed.joinToString(", ")}",
+                )
+            }
+            if (text != UNKNOWN && text !in allowed) {
+                throw IllegalArgumentException(
+                    "условие when: «${text}» не подходит для «${root.segment}.$field». " +
+                        "Допустимо: ${allowed.joinToString(", ")}" +
+                        " (или $UNKNOWN, если поле не удалось прочитать)",
+                )
+            }
         }
 
         /** Переписать значение для корня без поля в нормализованное поле. */
@@ -163,19 +321,6 @@ data class Condition(val predicates: List<Predicate>) {
                 else -> null
             }
         }
-
-        /**
-         * Тиры брони — обещание, а не описание Minecraft.
-         *
-         * Имя достаётся из id предмета (`diamond_chestplate` → `diamond`),
-         * а не из `ArmorMaterial`: в 1.21 это `RegistryEntry` по id, в 26.2
-         * материал вообще стал записью без имени, и общего у них ничего нет.
-         * Список нужен ещё и для того, чтобы `unknown` отличался от настоящего
-         * тира: без него подошло бы что угодно с подстрокой до `_`.
-         */
-        val ARMOR_TIERS = listOf(
-            "none", "leather", "chainmail", "iron", "gold", "diamond", "netherite", "turtle",
-        )
 
         /**
          * Строка → операция + ожидаемое значение.
@@ -245,6 +390,17 @@ sealed interface Op {
     data object Lt : Op
     data object Le : Op
     data object Range : Op
+
+    /** Символ оператора — для текста ошибки. */
+    fun symbol(): String = when (this) {
+        Eq -> "="
+        NotEq -> "!"
+        Gt -> ">"
+        Ge -> ">="
+        Lt -> "<"
+        Le -> "<="
+        Range -> ".."
+    }
 
     /** Применить к фактическому значению поля мира. */
     fun apply(actual: Value, expected: Expected): Boolean = when (this) {

@@ -1,5 +1,6 @@
 package dev.ggtv.capecraft.ide
 
+import dev.ggtv.capecraft.condition.Condition
 import dev.ggtv.capecraft.condition.VarCondition
 import dev.ggtv.capecraft.condition.VarSource
 import dev.ggtv.capecraft.schema.ConfigSchema
@@ -569,11 +570,76 @@ object CrenAnalyzer {
                 )
                 continue
             }
+            checkWhenValue(root, fieldName, child)?.let { out += it }
             WhenSchema.docFor(root, fieldName)?.let { doc ->
                 out += CrenDiagnostic(child.keyRange, doc, CrenSeverity.HINT, CODE_WHEN)
             }
         }
         return out
+    }
+
+    /**
+     * Проверить значение длинной формы: `armor.chest: "plate"`.
+     *
+     * Правило то же, что и в рантайме ([dev.ggtv.capecraft.condition.Condition]):
+     * мод на таком значении падает при загрузке, поэтому и подсветка должна быть
+     * ошибкой, а не подсказкой. Раньше длинная форма давала только hint со
+     * списком значений, из-за чего провайдер с опечаткой выглядел рабочим: в
+     * редакторе — чисто, в игре — плаща нет и ни одного сообщения.
+     *
+     * Короткая форма проверяется отдельно ([checkWhenShortForm]): там алиас
+     * может свернуть значение в другое поле, и проверять надо результат
+     * свёртки, а не написанное.
+     */
+    private fun checkWhenValue(
+        root: WorldRoot,
+        fieldName: String,
+        child: CrenEntry,
+    ): CrenDiagnostic? {
+        val leaf = child.value as? CrenLeaf ?: return null
+        val raw = leaf.lexeme.value.trim()
+
+        if (WhenSchema.isNumeric(root, fieldName)) {
+            // Число, записанное строкой, — норма (`">20"`), поэтому смотрим на
+            // содержимое после оператора, а не на сам литерал.
+            val operand = raw.removePrefix(">=").removePrefix("<=")
+                .removePrefix(">").removePrefix("<").removePrefix("!").trim()
+            if (operand.toDoubleOrNull() == null && !operand.contains('.')) {
+                return CrenDiagnostic(
+                    leaf.range,
+                    "«$raw» — «${root.segment}.$fieldName» числовое поле, а это не число. " +
+                        "Пишите \">20\", \"<=20\" или \"10..20\"",
+                    CrenSeverity.ERROR,
+                    CODE_WHEN,
+                )
+            }
+            return null
+        }
+
+        val allowed = WhenSchema.valuesOf(root, fieldName)
+        if (allowed.isEmpty()) return null
+
+        // Оператор сравнения на строковом поле не может сработать никогда.
+        if (raw.startsWith(">") || raw.startsWith("<")) {
+            return CrenDiagnostic(
+                leaf.range,
+                "«${root.segment}.$fieldName» — поле со списком значений, " +
+                    "сравнение «$raw» неприменимо. Допустимо: ${allowed.joinToString(", ")}",
+                CrenSeverity.ERROR,
+                CODE_WHEN,
+            )
+        }
+        val text = raw.removePrefix("!").trim()
+        if (text == Condition.UNKNOWN || text in allowed) return null
+        return CrenDiagnostic(
+            leaf.range,
+            "«$text» не подходит для «${root.segment}.$fieldName». " +
+                "Допустимо: ${allowed.joinToString(", ")} " +
+                "(или ${Condition.UNKNOWN}, если поле не удалось прочитать)",
+            CrenSeverity.ERROR,
+            CODE_WHEN,
+            allowed.map { CrenFix("заменить на «$it»", it, leaf.range) },
+        )
     }
 
     /**

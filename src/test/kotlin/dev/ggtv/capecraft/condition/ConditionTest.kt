@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import kotlin.test.assertFailsWith
 
 class ConditionParseTest {
 
@@ -58,7 +59,7 @@ class ConditionParseTest {
     fun `operator prefixes parse`() {
         val cases = mapOf(
             ">63" to Op.Gt, ">=63" to Op.Ge, "<63" to Op.Lt,
-            "<=63" to Op.Le, "!63" to Op.NotEq, "!rain" to Op.NotEq,
+            "<=63" to Op.Le, "!63" to Op.NotEq,
         )
         for ((text, op) in cases) {
             val p = Condition.parse(dictOf("time.tick" to str(text))).predicates.single()
@@ -67,6 +68,15 @@ class ConditionParseTest {
         val strOp = Condition.parse(dictOf("weather.condition" to str("!rain"))).predicates.single()
         assertEquals(Op.NotEq, strOp.op)
         assertEquals(Expected.Str("rain"), strOp.expected)
+    }
+
+    @Test
+    fun `строка на числовом поле больше не принимается`() {
+        // Раньше `time.tick: "!rain"` разбиралось: это то же самое, что
+        // `health.current: "низко"` — опечатка, которая тихо не срабатывала.
+        assertThrows(IllegalArgumentException::class.java) {
+            Condition.parse(dictOf("time.tick" to str("!rain")))
+        }
     }
 
     @Test
@@ -147,10 +157,18 @@ class ConditionMatchTest {
         assertTrue(Condition.parse(dictOf("time.tick" to str(">12000"))).matches(world))
     }
 
+    // Диапазон на строковом поле больше не «просто не срабатывает»: разбор
+    // падает. Проверяется отдельно, в `ConditionValueTest` — здесь важно лишь
+    // то, что строка поля не проходит как ложь молча.
     @Test
     fun `range against non-number fails`() {
         val world = FakeWorld(mapOf("weather.condition" to str("rain")))
-        assertFalse(Condition.parse(dictOf("weather.condition" to str("1..2"))).matches(world))
+        assertThrows(IllegalArgumentException::class.java) {
+            Condition.parse(dictOf("weather.condition" to str("1..2")))
+        }
+        // Мир при этом отвечает «rain» — то есть провайдер с таким условием
+        // был бы рабочим, если бы условие вообще собралось.
+        assertEquals(str("rain"), world.field(WorldRoot.WEATHER, "condition", "weather.condition"))
     }
 
     @Test
@@ -183,6 +201,144 @@ class ConditionMatchTest {
         val c = Condition.parse(dictOf("weather.condition" to str("rain"), "time.period" to str("day")))
         val world = FakeWorld(mapOf("weather.condition" to str("rain"), "time.period" to str("night")))
         assertFalse(c.matches(world))
+    }
+}
+
+/**
+ * Проверка значений условия: то, что мир отдаёт, и то, что человек написал,
+ * обязаны совпадать.
+ *
+ * Тесты появились из-за тихой поломки: `armor.chest: "plate"` разбирался без
+ * ошибок, провайдер грузился, подсказка такое значение не предлагала — и
+ * совпадение не наступало никогда. Нигде не было ни ошибки, ни сообщения, по
+ * которому можно понять, что условие не сработает. Разбор падает вместо этого.
+ */
+class ConditionValueTest {
+
+    @Test
+    fun `значение из списка принимается`() {
+        for (v in listOf("none", "leather", "diamond", "netherite", "turtle")) {
+            val p = Condition.parse(dictOf("armor.chest" to str(v))).predicates.single()
+            assertEquals(Expected.Str(v), p.expected, "для «$v»")
+        }
+    }
+
+    @Test
+    fun `опечатка в значении поля падает при разборе`() {
+        val e = assertThrows(IllegalArgumentException::class.java) {
+            Condition.parse(dictOf("armor.chest" to str("plate")))
+        }
+        val msg = e.message!!
+        assertTrue(msg.contains("plate"), "сообщение должно называть написанное значение: $msg")
+        assertTrue(msg.contains("netherite"), "сообщение должно перечислять допустимые: $msg")
+    }
+
+    @Test
+    fun `опечатка в позе и осадках падает`() {
+        for (key in listOf("state.pose", "biome.precipitation", "time.period", "dimension.type")) {
+            assertFailsWith<IllegalArgumentException>("ключ $key") {
+                Condition.parse(dictOf(key to str("stаnding")))
+            }
+        }
+    }
+
+    @Test
+    fun `не-логическое значение булева поля падает`() {
+        val e = assertThrows(IllegalArgumentException::class.java) {
+            Condition.parse(dictOf("state.inWater" to str("yes")))
+        }
+        assertTrue(e.message!!.contains("true"), "перечислить true/false: ${e.message}")
+    }
+
+    @Test
+    fun `unknown принимается везде, где принимается значение`() {
+        // Мир отдаёт «unknown» вместо того, что не прочитал: нестандартная
+        // броня, отсутствие игрока. Это законное условие, а не опечатка.
+        for (key in listOf("armor.chest", "state.pose", "weather.condition", "time.period")) {
+            val p = Condition.parse(dictOf(key to str("unknown"))).predicates.single()
+            assertEquals(Expected.Str("unknown"), p.expected, "ключ $key")
+        }
+    }
+
+    @Test
+    fun `отрицание остаётся законным`() {
+        // `!` — сравнение строк, а не «неизвестное значение»: им ловят всё,
+        // кроме одного тира, и это должно работать и дальше работало.
+        val p = Condition.parse(dictOf("armor.chest" to str("!diamond"))).predicates.single()
+        assertEquals(Op.NotEq, p.op)
+        assertEquals(Expected.Str("diamond"), p.expected)
+        assertTrue(
+            Condition.parse(dictOf("armor.chest" to str("!diamond")))
+                .matches(FakeWorld(mapOf("armor.chest" to str("iron")))),
+        )
+    }
+
+    @Test
+    fun `отрицание опечатки тоже падает`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            Condition.parse(dictOf("armor.chest" to str("!plate")))
+        }
+    }
+
+    @Test
+    fun `свободные поля не ограничены`() {
+        // `biome.id` и `dimension.id` приходят из реестра модов: их значения
+        // заранее неизвестны, и ругаться на них нельзя.
+        for (key in listOf("biome.id", "dimension.id")) {
+            val p = Condition.parse(dictOf(key to str("some_mod:whatever"))).predicates.single()
+            assertEquals(Expected.Str("some_mod:whatever"), p.expected, "ключ $key")
+        }
+    }
+
+    @Test
+    fun `числовые поля принимают числа и диапазоны`() {
+        for (text in listOf("20", ">=20", "<10", "5..15")) {
+            Condition.parse(dictOf("health.current" to str(text)))
+        }
+    }
+
+    @Test
+    fun `число на строковом поле падает`() {
+        // `state.inWater: 5` — это не «не совпадёт», это опечатка: человек
+        // думал, что пишет число, а поле ждёт «true».
+        val e = assertThrows(IllegalArgumentException::class.java) {
+            Condition.parse(dictOf("state.inWater" to num(5.0)))
+        }
+        assertTrue(e.message!!.contains("true"), "перечислить true/false: ${e.message}")
+    }
+
+    @Test
+    fun `строковое значение на числовом поле падает`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            Condition.parse(dictOf("health.current" to str("низко")))
+        }
+    }
+
+    @Test
+    fun `оператор сравнения на строковом поле падает`() {
+        for (text in listOf(">diamond", ">=1", "<9", "1..2")) {
+            assertFailsWith<IllegalArgumentException>("значение «$text»") {
+                Condition.parse(dictOf("armor.chest" to str(text)))
+            }
+        }
+    }
+
+    @Test
+    fun `список WhenSchema и мод — один и тот же`() {
+        // Редактор обещает подсказкой ровно то, что мод теперь принимает.
+        // Разойтись они могут только молча, поэтому сверяемся напрямую.
+        for ((root, fields) in dev.ggtv.capecraft.schema.WhenSchema.VALUES) {
+            for ((field, values) in fields) {
+                assertEquals(
+                    values,
+                    Condition.valuesOf(root, field),
+                    "список значений ${root.segment}.$field разошёлся между схемой и модом",
+                )
+                for (v in values) {
+                    Condition.parse(dictOf("${root.segment}.$field" to str(v)))
+                }
+            }
+        }
     }
 }
 

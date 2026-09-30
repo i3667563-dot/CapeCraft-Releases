@@ -248,6 +248,130 @@ class CrenAnalyzerTest {
 
     // --------------------------------------------------------- значения и типы
 
+    // Длинная форма `поле: значение` раньше проверялась только подсказкой, и
+    // опечатка в значении выглядела рабочей: в редакторе чисто, в игре провайдер
+    // не срабатывает. Теперь мод падает на таком значении, и подсветка обязана
+    // быть ошибкой, а не hint — иначе редактор врал бы про работоспособность.
+
+    @Test
+    fun `опечатка в значении длинной формы это ошибка`() {
+        val d = diags(
+            """capeCraft { providers [ { name = "a", type = "url", when = { armor.chest: "plate" } } ] }""",
+        )
+        val err = d.single { it.code == CrenAnalyzer.CODE_WHEN && it.severity == CrenSeverity.ERROR }
+        assertEquals(CrenSeverity.ERROR, err.severity, err.message)
+        assertTrue(err.message.contains("plate"), err.message)
+        assertTrue(err.message.contains("netherite"), "ожидался список тиров: ${err.message}")
+        assertTrue(
+            err.fixes.any { it.newText == "diamond" },
+            "ожидались правки со значениями: ${err.fixes.map { it.newText }}",
+        )
+    }
+
+    @Test
+    fun `опечатка в позе и осадках это ошибка`() {
+        for (key in listOf("state.pose", "biome.precipitation", "time.period", "dimension.type")) {
+            val d = diags(
+                """capeCraft { providers [ { name = "a", type = "url", when = { $key: "stаnding" } } ] }""",
+            )
+            val err = d.singleOrNull { it.code == CrenAnalyzer.CODE_WHEN && it.severity == CrenSeverity.ERROR }
+                ?: error("ключ $key не дал диагностику вовсе")
+            assertEquals(CrenSeverity.ERROR, err.severity, "ключ $key: ${err.message}")
+        }
+    }
+
+    @Test
+    fun `не-логическое значение булева поля это ошибка`() {
+        val d = diags(
+            """capeCraft { providers [ { name = "a", type = "url", when = { state.inWater: "yes" } } ] }""",
+        )
+        val err = d.single { it.code == CrenAnalyzer.CODE_WHEN && it.severity == CrenSeverity.ERROR }
+        assertEquals(CrenSeverity.ERROR, err.severity, err.message)
+        assertTrue(err.message.contains("true"), err.message)
+    }
+
+    @Test
+    fun `unknown это не ошибка`() {
+        // Мир отдаёт «unknown» вместо непрочитанного: для брони это способ
+        // поймать нестандартный слот, и ругаться на него нельзя.
+        for (key in listOf("armor.chest", "state.pose", "weather.condition")) {
+            val d = diags(
+                """capeCraft { providers [ { name = "a", type = "url", when = { $key: "unknown" } } ] }""",
+            )
+            assertTrue(
+                d.none { it.code == CrenAnalyzer.CODE_WHEN && it.severity == CrenSeverity.ERROR },
+                "ключ $key: unknown должен быть законным: ${d.map { it.message }}",
+            )
+        }
+    }
+
+    @Test
+    fun `отрицание законного значения не ругается`() {
+        val d = diags(
+            """capeCraft { providers [ { name = "a", type = "url", when = { armor.chest: "!diamond" } } ] }""",
+        )
+        assertTrue(
+            d.none { it.severity == CrenSeverity.ERROR },
+            "«!diamond» валиден: ${d.map { it.message }}",
+        )
+    }
+
+    @Test
+    fun `отрицание опечатки это ошибка`() {
+        val d = diags(
+            """capeCraft { providers [ { name = "a", type = "url", when = { armor.chest: "!plate" } } ] }""",
+        )
+        assertEquals(
+            CrenSeverity.ERROR,
+            d.single { it.code == CrenAnalyzer.CODE_WHEN && it.severity == CrenSeverity.ERROR }.severity,
+        )
+    }
+
+    @Test
+    fun `свободные поля не ограничены списком`() {
+        // `biome.id` приходит из реестра модов — проверять его не на что.
+        for (key in listOf("biome.id", "dimension.id")) {
+            val d = diags(
+                """capeCraft { providers [ { name = "a", type = "url", when = { $key: "some_mod:x" } } ] }""",
+            )
+            assertTrue(
+                d.none { it.severity == CrenSeverity.ERROR },
+                "ключ $key свободен: ${d.map { it.message }}",
+            )
+        }
+    }
+
+    @Test
+    fun `числовое поле со строкой это ошибка`() {
+        val d = diags(
+            """capeCraft { providers [ { name = "a", type = "url", when = { health.current: "низко" } } ] }""",
+        )
+        val err = d.single { it.code == CrenAnalyzer.CODE_WHEN && it.severity == CrenSeverity.ERROR }
+        assertEquals(CrenSeverity.ERROR, err.severity, err.message)
+    }
+
+    @Test
+    fun `числовые операторы на числовом поле не ругаются`() {
+        for (text in listOf("20", ">=20", "<10", "5..15")) {
+            val d = diags(
+                """capeCraft { providers [ { name = "a", type = "url", when = { health.current: "$text" } } ] }""",
+            )
+            assertTrue(
+                d.none { it.severity == CrenSeverity.ERROR },
+                "health.current: \"$text\" валиден: ${d.map { it.message }}",
+            )
+        }
+    }
+
+    @Test
+    fun `оператор сравнения на строковом поле это ошибка`() {
+        val d = diags(
+            """capeCraft { providers [ { name = "a", type = "url", when = { armor.chest: ">diamond" } } ] }""",
+        )
+        val err = d.single { it.code == CrenAnalyzer.CODE_WHEN && it.severity == CrenSeverity.ERROR }
+        assertEquals(CrenSeverity.ERROR, err.severity, err.message)
+    }
+
     @Test
     fun `значение не из списка`() {
         val d = diags("""capeCraft { providers [ { name = "a", type = "wobble" } ] }""")

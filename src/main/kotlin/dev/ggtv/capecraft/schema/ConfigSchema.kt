@@ -159,47 +159,24 @@ object WhenSchema {
         WorldRoot.HEALTH to listOf("current", "max"),
     )
 
-    /** Значения булевых полей: мир отдаёт их строкой, а не `Value.VBool`. */
-    private val BOOLEANS = listOf("true", "false")
-
     /**
      * Поля со списком значений: всё, что мир отдаёт, — и больше ничего.
      *
-     * Список — ровно то, что возвращает живой мир, а не «вроде бы подходит».
-     * Проверяется тестом `WorldContextAgreementTest` по исходникам всех
-     * версий: `MinecraftWorldContext` отдаёт эти строки литералами, и разойтись
-     * с ним здесь можно только молча.
+     * Список — **не** второй экземпляр правил, а ссылка на
+     * [Condition.FIELD_VALUES]: мод проверяет значение по этому же списку и
+     * падает на опечатке, поэтому копия здесь разошлась бы с ним при первом же
+     * изменении. Раньше так и вышло: подсказка предлагала тиры брони, а мод
+     * принимал любую строку — и провайдер с `armor.chest: "plate"` не работал
+     * молча.
+     *
+     * Сверяется с исходниками всех версий тестом `WorldContextAgreementTest`:
+     * `MinecraftWorldContext` отдаёт эти строки литералами, и разойтись с ним
+     * можно только молча.
      *
      * Поля, которых тут нет, — свободные (`biome.id`, `dimension.id`) или
      * числа ([NUMERIC_FIELDS]); перечислять их нельзя.
      */
-    val VALUES: Map<WorldRoot, Map<String, List<String>>> = mapOf(
-        WorldRoot.BIOME to mapOf("precipitation" to listOf("none", "rain", "snow")),
-        WorldRoot.WEATHER to mapOf("condition" to listOf("clear", "rain", "thunder")),
-        // Порядок — как в `timeField`: сначала то, что человек ищет чаще.
-        WorldRoot.TIME to mapOf("period" to listOf("day", "sunrise", "sunset", "night")),
-        WorldRoot.DIMENSION to mapOf("type" to listOf("overworld", "nether", "end")),
-        // Тир брони одинаков для всех слотов — список один, а не на слот.
-        WorldRoot.ARMOR to mapOf(
-            "head" to Condition.ARMOR_TIERS,
-            "chest" to Condition.ARMOR_TIERS,
-            "legs" to Condition.ARMOR_TIERS,
-            "feet" to Condition.ARMOR_TIERS,
-        ),
-        // Булевы поля отдаются строками "true"/"false", а не `Value.VBool`:
-        // тогда `state.sneaking: true` разбирается в равенство строке и работает
-        // тем же кодом сравнения, что остальные поля, без отдельной ветки.
-        WorldRoot.STATE to mapOf(
-            "inWater" to BOOLEANS,
-            "sneaking" to BOOLEANS,
-            "sprinting" to BOOLEANS,
-            "onGround" to BOOLEANS,
-            "pose" to listOf(
-                "standing", "crouching", "swimming", "fall_flying",
-                "sleeping", "spin_attack", "long_jumping", "dying",
-            ),
-        ),
-    )
+    val VALUES: Map<WorldRoot, Map<String, List<String>>> get() = Condition.FIELD_VALUES
 
     /**
      * Self-only корни — те, что не уезжают по сети.
