@@ -1,6 +1,7 @@
 package dev.ggtv.capecraft.provider
 
 import dev.ggtv.capecraft.condition.Condition
+import dev.ggtv.capecraft.condition.VarCondition
 import dev.ggtv.capecraft.schema.Placeholders
 import dev.ggtv.capecraft.api.provider.CapeSource
 import dev.ggtv.capecraft.api.provider.CapeValues
@@ -50,7 +51,13 @@ sealed interface Source {
  * мире. Без условия провайдер активен всегда (default). [priority] задаёт
  * приоритет среди совпадших провайдеров: выше — ближе к началу fallback-цепи.
  *
+ * [ifCondition] — необязательное условие `if { ... }`: те же операторы, но
+ * сравниваются переменные (плейсхолдеры и `$ИМЯ`), а не поля мира. Оба
+ * условия независимы и соединяются по И: `when` решает «где он стоит»,
+ * `if` — «про что этот игрок».
+ *
  * @param condition условие, при котором провайдер активен (null = всегда).
+ * @param ifCondition условие по переменным (null = не проверять).
  * @param priority приоритет выбора — по умолчанию 0 (порядок в списке).
  * @param addonSource non-null для аддон-провайдера (fetch определён аддоном).
  * @param values параметры из словаря .kn для аддон-провайдера (null для встроенного).
@@ -59,10 +66,15 @@ class Provider(
     val name: String,
     val source: Source,
     val condition: Condition? = null,
+    val ifCondition: VarCondition? = null,
     val priority: Int = 0,
     val addonSource: CapeSource? = null,
     val values: CapeValues? = null,
 ) {
+
+    /** Есть ли хоть одно условие: без них провайдер работает всегда. */
+    val hasConditions: Boolean get() = condition != null || ifCondition != null
+
 
     /**
      * Подставить плейсхолдеры и получить конкретный источник.

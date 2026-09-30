@@ -2,6 +2,7 @@ package dev.ggtv.capecraft.sync
 
 import dev.ggtv.capecraft.condition.ProviderSelector
 import dev.ggtv.capecraft.provider.Provider
+import dev.ggtv.capecraft.schema.Placeholders
 import dev.ggtv.koren.WorldContext
 
 /**
@@ -97,6 +98,11 @@ object ObjectCapePolicy {
      *   сказало «ничего». Отличать от молчания обязательно — см. KDoc.
      * @param firstSeenMs когда объект увиден впервые (монотонные мс).
      * @param nowMs сейчас (монотонные мс).
+     * @param context состояние мира **того, кого видно**.
+     * @param vars контекст переменных **того, кого видно** — для `if`. Считается
+     *   локально у зрителя: `username`/`uuid` известны любому, кто видит игрока,
+     *   а `root` и `$*` намеренно свои на каждой машине (как `{root}` в
+     *   неразвёрнутом URL-шаблоне, который тоже едет по сети).
      * @param graceMs срок ожидания; 0 — навязать свой набор сразу.
      */
     fun decide(
@@ -139,6 +145,7 @@ object ObjectCapePolicy {
         firstSeenMs: Long,
         nowMs: Long,
         context: WorldContext,
+        vars: Placeholders.Context,
         graceMs: Long = ANNOUNCE_GRACE_MS,
     ): Resolution {
         val decision = decide(
@@ -154,6 +161,6 @@ object ObjectCapePolicy {
             Decision.DECLARED -> declaredProviders.orEmpty()
             Decision.WAIT -> emptyList()
         }
-        return Resolution(decision, ProviderSelector.select(selected, context))
+        return Resolution(decision, ProviderSelector.select(selected, context, vars))
     }
 }

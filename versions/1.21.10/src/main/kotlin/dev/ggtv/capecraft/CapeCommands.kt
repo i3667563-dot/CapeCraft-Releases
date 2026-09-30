@@ -50,10 +50,13 @@ object CapeCommands {
         // видят прежний набор.
         CapeSyncClient.announceNow()
         val msg = if (cfg.lastError != null) " с ошибкой: ${cfg.lastError}" else ""
-        ctx.source.sendFeedback(Text.literal("CapeCraft перезагружен (${cfg.path}). Провайдеров: ${cfg.providers.size}, " +
+        // Отдельной строкой, а не в скобках: откат с недоступного файла из
+        // окружения — ровно та причина, по которой человек идёт читать лог.
+        val warn = cfg.sourceWarning?.let { "\nВНИМАНИЕ: $it" } ?: ""
+        ctx.source.sendFeedback(Text.literal("CapeCraft перезагружен (${cfg.activeSource}). Провайдеров: ${cfg.providers.size}, " +
             "кэш плащей очищен, загрузка в фоне, набор — локальный конфиг" +
             ", набор объявлен" +
-            "$msg"))
+            "$msg$warn"))
         return 1
     }
 
@@ -99,9 +102,19 @@ object CapeCommands {
     }
 
     private fun status(ctx: CommandContext<FabricClientCommandSource>, registry: CapeRegistry): Int {
+        val cfg = CapeCraftClient.config
         val name = MinecraftClient.getInstance().session?.username
         ctx.source.sendFeedback(Text.literal("CapeCraft ${modVersion()}"))
         ctx.source.sendFeedback(Text.literal("Игрок: $name"))
+        // Откуда взят конфиг — иначе при CAPECRAFT_CONFIG в статусе не видно
+        // ни пути, ни того, что внешний файл не прочитался и взят обычный.
+        ctx.source.sendFeedback(Text.literal("Конфиг: ${cfg.activeSource}"))
+        cfg.sourceWarning?.let {
+            ctx.source.sendFeedback(Text.literal("  ВНИМАНИЕ: $it"))
+        }
+        cfg.lastError?.let {
+            ctx.source.sendFeedback(Text.literal("  ОШИБКА: $it"))
+        }
         ctx.source.sendFeedback(Text.literal("Провайдеров: ${registry.providers.size} (${sourceOf(registry)})"))
         ctx.source.sendFeedback(Text.literal("Плащей в кэше: ${registry.size}"))
         ctx.source.sendFeedback(Text.literal("Память плащей: ${registry.totalBytes} байт"))

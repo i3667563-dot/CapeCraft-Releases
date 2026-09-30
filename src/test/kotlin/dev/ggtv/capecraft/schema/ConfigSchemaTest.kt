@@ -4,9 +4,12 @@ import dev.ggtv.capecraft.condition.Condition
 import dev.ggtv.capecraft.condition.Expected
 import dev.ggtv.capecraft.condition.Predicate
 import dev.ggtv.capecraft.memory.Limits
+import dev.ggtv.capecraft.provider.ProviderLoader
 import dev.ggtv.capecraft.provider.ProviderNames
+import dev.ggtv.capecraft.provider.Source
 import dev.ggtv.capecraft.sync.ServerSyncSettings
 import dev.ggtv.kjen.Value
+import dev.ggtv.koren.KorenConfig
 import dev.ggtv.koren.WorldRoot
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -56,33 +59,47 @@ class ConfigSchemaTest {
     }
 
     @Test
-    fun `ключи провайдера совпадают с константами загрузчика`() {
-        val names = ConfigSchema.providerFields().map { it.name }.toSet()
-        val fromCode = setOf(
-            ProviderNames.Keys.NAME,
-            ProviderNames.Keys.TYPE,
-            ProviderNames.Keys.URL,
-            ProviderNames.Keys.PATH,
-            ProviderNames.Keys.EXTRACT,
-            ProviderNames.Keys.WHEN,
-            ProviderNames.Keys.PRIORITY,
-        )
-        assertEquals(fromCode, names, "схема провайдера разошлась с ProviderLoader.Keys")
-    }
+    fun `каждый ключ схемы действительно читается загрузчиком`() {
+        // Загрузчик лишние ключи молча игнорирует, а редактор по схеме их
+        // подсвечивает. Расхождение невидимо: ключ выглядит
+        // работающим, а значения никто не читает. Поэтому сверка идёт по
+        // **поведению**: ключ из схемы обязан менять собранный провайдер.
+        //
+        // Все три типа в одном конфиге: `path` и `extract` читаются не всеми
+        // сразу, и по одному провайдеру их не различить с «загрузчик их
+        // игнорирует».
+        val kn = """
+            capeCraft {
+                providers [
+                    { name = "a", type = "url", url = "https://ex.invalid/a.png",
+                      extract = "$.a", path = "/tmp/a.png", priority = 7,
+                      when = { biome: "snowy" },
+                      if = { username: "Steve" } },
 
-    @Test
-    fun `в схеме провайдера нет ключей, которых не читает загрузчик`() {
-        val names = ConfigSchema.providerFields().map { it.name }.toSet()
-        val fromCode = setOf(
-            ProviderNames.Keys.NAME,
-            ProviderNames.Keys.TYPE,
-            ProviderNames.Keys.URL,
-            ProviderNames.Keys.PATH,
-            ProviderNames.Keys.EXTRACT,
-            ProviderNames.Keys.WHEN,
-            ProviderNames.Keys.PRIORITY,
-        )
-        assertTrue(names.none { it !in fromCode }, "в схеме есть лишние ключи провайдера")
+                    { name = "b", type = "file", url = "https://ex.invalid/b.png",
+                      extract = "$.b", path = "/tmp/b.png", priority = 7,
+                      when = { biome: "snowy" },
+                      if = { username: "Steve" } },
+
+                    { name = "c", type = "json", url = "https://ex.invalid/c",
+                      extract = "$.c", path = "/tmp/c.png", priority = 7,
+                      when = { biome: "snowy" },
+                      if = { username: "Steve" } },
+                ]
+            }
+        """.trimIndent()
+        val loaded = ProviderLoader.load(KorenConfig.fromString(kn))
+        assertEquals(3, loaded.size)
+
+        val url = loaded[0]
+        assertEquals("a", url.name)
+        assertEquals(Source.Url("https://ex.invalid/a.png"), url.source)
+        assertEquals(7, url.priority)
+        assertEquals(1, url.condition?.predicates?.size)
+        assertEquals("username", url.ifCondition?.predicates?.single()?.name)
+
+        assertEquals(Source.File("/tmp/b.png"), loaded[1].source)
+        assertEquals(Source.Json("https://ex.invalid/c", "$.c"), loaded[2].source)
     }
 
     @Test

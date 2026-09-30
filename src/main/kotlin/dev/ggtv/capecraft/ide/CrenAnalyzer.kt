@@ -1,5 +1,7 @@
 package dev.ggtv.capecraft.ide
 
+import dev.ggtv.capecraft.condition.VarCondition
+import dev.ggtv.capecraft.condition.VarSource
 import dev.ggtv.capecraft.schema.ConfigSchema
 import dev.ggtv.capecraft.schema.Field
 import dev.ggtv.capecraft.schema.SchemaType
@@ -196,6 +198,7 @@ object CrenAnalyzer {
     const val CODE_TYPE = "bad-type"
     const val CODE_APPLIES = "applies-to"
     const val CODE_WHEN = "bad-when"
+    const val CODE_IF = "bad-if"
     const val CODE_UNKNOWN_TYPE = "unknown-type"
     const val CODE_NO_SEPARATOR = "no-separator"
 
@@ -354,6 +357,10 @@ object CrenAnalyzer {
         val key = e.keyText
         if (key == "when" && e.value is CrenDict) {
             out += checkWhen(e.value)
+            return out
+        }
+        if (key == "if" && e.value is CrenDict) {
+            out += checkIf(e.value)
             return out
         }
 
@@ -564,6 +571,48 @@ object CrenAnalyzer {
             }
             WhenSchema.docFor(root, fieldName)?.let { doc ->
                 out += CrenDiagnostic(child.keyRange, doc, CrenSeverity.HINT, CODE_WHEN)
+            }
+        }
+        return out
+    }
+
+    /**
+     * Проверить содержимое `if`.
+     *
+     * Отличается от `when` тем, что набор имён **открытый**: аддонный
+     * плейсхолдер и `$ЛЮБОЕ_ИМЯ` заранее неизвестны, и ругаться на них
+     * как на опечатки нельзя — иначе подсветка сломала бы конфиг с аддоном.
+     * Поэтому проверяется только то, что известно точно: корень мира вместо
+     * переменной (самая частая ошибка при переносе `when` в `if`).
+     */
+    private fun checkIf(value: CrenDict): List<CrenDiagnostic> {
+        val out = ArrayList<CrenDiagnostic>()
+        for (child in value.entries) {
+            val key = child.keyText
+            val segment = key.substringBefore('.')
+            if (WorldRoot.bySegment(segment) != null) {
+                out += CrenDiagnostic(
+                    child.keyRange,
+                    "«$segment» — корень мира, а не переменная. Так проверяется " +
+                        "в when { $segment: ... }; в if кладут имя переменной " +
+                        "(${VarCondition.KNOWN.joinToString(", ")})",
+                    CrenSeverity.ERROR,
+                    CODE_IF,
+                )
+                continue
+            }
+            // Игра отвергает `$` без имени и `$my.var` при загрузке. Молчать
+            // тут нельзя: конфиг дойдёт до запуска и упадёт уже без редактора
+            // рядом, а человек решит, что дело в другом.
+            if (key.startsWith(VarCondition.ENV_PREFIX) && VarSource.envKey(key) == null) {
+                out += CrenDiagnostic(
+                    child.keyRange,
+                    "«$key» — не имя переменной окружения. После «$» нужны буквы, " +
+                        "цифры и «_» (или фигурные скобки: «\${ИМЯ}»). Точка в имени " +
+                        "означает аддонный плейсхолдер, а не переменную окружения.",
+                    CrenSeverity.ERROR,
+                    CODE_IF,
+                )
             }
         }
         return out
@@ -934,6 +983,7 @@ object CrenAnalyzer {
     ): List<CrenCompletion> {
         if (c.kind == ContainerKind.ARRAY) return emptyList()
         if (c.path.lastOrNull() == "when") return whenKeyCompletions(c, prefix, typed, editing)
+        if (c.path.lastOrNull() == "if") return ifKeyCompletions(c, prefix, typed, editing)
 
         val known = ConfigSchema.childrenOf(c.path)
         if (known.isEmpty()) return emptyList()
@@ -970,6 +1020,39 @@ object CrenAnalyzer {
      *   Тогда подсказываем **само поле** (`x`, `y`, `z`): вставляется оно
      *   прямо после точки, и получается `location.y`.
      */
+    /**
+     * Ключи внутри `if { }`.
+     *
+     * Список здесь намеренно неполный и это не упущение: имена переменных,
+     * которые знает мод, перечислить можно, а аддонных — нельзя. Поэтому
+     * подсказка предлагает то, что гарантированно осмысленно, и молчит про
+     * остальное, вместо того чтобы отсекать чужое как опечатку.
+     */
+    private fun ifKeyCompletions(
+        c: LocatedContainer,
+        prefix: String,
+        typed: TextRange?,
+        editing: String?,
+    ): List<CrenCompletion> {
+        val used = usedKeys(c, editing)
+        return VarCondition.COMPLETABLE
+            .filter { it !in used }
+            .filter { it.startsWith(prefix) }
+            .map { name ->
+                CrenCompletion(
+                    label = name,
+                    detail = "Переменная наблюдаемого игрока",
+                    insertText = name,
+                    snippet = snippetForIfVar(),
+                    kind = CompletionKind.WHEN_FIELD,
+                    replace = typed,
+                )
+            }
+    }
+
+    /** `|`: значение условия, оператор оставляем на выбор. */
+    private fun snippetForIfVar(): String = "\$0"
+
     private fun whenKeyCompletions(
         c: LocatedContainer,
         prefix: String,

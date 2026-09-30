@@ -83,7 +83,7 @@ data class Condition(val predicates: List<Predicate>) {
                     return Predicate(root, newField, op, expected)
                 }
             }
-            val (op, expected) = parseValue(value)
+            val (op, expected) = parseValueFor("when", value)
             return Predicate(root, field, op, expected)
         }
 
@@ -121,15 +121,22 @@ data class Condition(val predicates: List<Predicate>) {
             }
         }
 
-        /** Строка → операция + ожидаемое значение. */
-        private fun parseValue(value: Value): Pair<Op, Expected> {
+        /**
+         * Строка → операция + ожидаемое значение.
+         *
+         * Общий разбор для `when` и `if`: операторный набор у них один, и
+         * разбирать его в двух местах означало бы, что со временем один блок
+         * получит правило, которого нет у второго. [block] подставляется в
+         * текст ошибки, чтобы человек знал, в каком блоке опечатка.
+         */
+        internal fun parseValueFor(block: String, value: Value): Pair<Op, Expected> {
             val text = when (value) {
                 is Value.VStr -> value.s
                 is Value.VInt -> value.i.toString()
                 is Value.VFloat -> value.f.toString()
                 is Value.VBool -> value.b.toString()
                 else -> throw IllegalArgumentException(
-                    "условие when: значение должно быть строкой или числом, найдено «${value.kind}»",
+                    "условие $block: значение должно быть строкой или числом, найдено «${value.kind}»",
                 )
             }
             val s = text.trim()
@@ -138,9 +145,9 @@ data class Condition(val predicates: List<Predicate>) {
             val range = "^(.+?)\\.\\.(.+)$".toRegex().matchEntire(s)
             if (range != null) {
                 val from = range.groupValues[1].trim().toDoubleOrNull()
-                    ?: throw IllegalArgumentException("условие when: неверный диапазон «$s»")
+                    ?: throw IllegalArgumentException("условие $block: неверный диапазон «$s»")
                 val to = range.groupValues[2].trim().toDoubleOrNull()
-                    ?: throw IllegalArgumentException("условие when: неверный диапазон «$s»")
+                    ?: throw IllegalArgumentException("условие $block: неверный диапазон «$s»")
                 return Op.Range to Expected.Range(from, to)
             }
 

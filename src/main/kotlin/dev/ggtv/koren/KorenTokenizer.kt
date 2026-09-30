@@ -45,6 +45,55 @@ object KorenTokenizer {
                 tokens += KorenToken(kind, start, Span(line, col))
             }
 
+            /**
+             * Разобрать кусок, начатый на `$`: значение или ключ словаря.
+             *
+             * Подстановка окружения по формату **жадная** и случается на
+             * разборе: `$NAME` становится значением, а незаданная переменная —
+             * ошибка загрузки. Для значения это и нужно, но для ключа словаря
+             * сломано бы всё: `if = { $TIER: "gold" }` превратился бы в
+             * `if = { prod: "gold" }` — имя переменной исчезло бы, и условие
+             * стало бы сравнением плейсхолдера по имени, совпавшему со
+             * значением переменной.
+             *
+             * Поэтому ключ отдаётся как [KorenTokenKind.EnvRef] без
+             * подстановки: разбирать его будет тот, кто знает, что это
+             * условие, — и сделает это позже, когда переменная появится.
+             *
+             * Ключ узнаётся по разделителю за `$NAME`: «:» или «=».
+             * Пробелы между ними пропускаются, новая строка — нет: `$NAME` в
+             * конце строки почти всегда значение, а не начало следующей пары.
+             */
+            fun emitEnvironment(raw: String, env: Map<String, String>, start: Span) {
+                // `:` и `=` не разрывают `$`-кусок (иначе сломались бы
+                // документированные `url = $HOST:8080/...`), поэтому разделитель
+                // ключа мог остаться внутри. Возвращаем его парсеру отдельно.
+                val trailing = raw.lastOrNull()
+                val separatorInside = trailing == ':' || trailing == '='
+                val text = if (separatorInside) raw.dropLast(1) else raw
+
+                var isKey = separatorInside
+                if (!isKey) {
+                    var look = i
+                    while (look < len && (input[look] == ' ' || input[look] == '\t' || input[look] == '\r')) {
+                        look += 1
+                    }
+                    isKey = look < len && (input[look] == ':' || input[look] == '=')
+                }
+
+                if (separatorInside) {
+                    col -= 1
+                    emit(KorenTokenKind.EnvRef(text))
+                    emit(if (trailing == ':') KorenTokenKind.Colon else KorenTokenKind.Assign)
+                    return
+                }
+                if (isKey) {
+                    emit(KorenTokenKind.EnvRef(text))
+                    return
+                }
+                emit(KorenTokenKind.Str(interpolateEnvironment(text, env, start)))
+            }
+
             val c = peek()
 
             fun advance(codePoint: Int = c) {
@@ -222,9 +271,7 @@ object KorenTokenizer {
                         raw.appendCodePoint(next)
                         advance(next)
                     }
-                    emit(
-                        KorenTokenKind.Str(interpolateEnvironment(raw.toString(), env, start))
-                    )
+                    emitEnvironment(raw.toString(), env, start)
                 }
 
                 else -> {
@@ -361,6 +408,15 @@ object KorenTokenizer {
 
 sealed interface KorenTokenKind {
     data class Word(val w: String) : KorenTokenKind
+    /**
+     * `$NAME` или `${NAME}` в позиции **ключа** словаря — неподставленная
+     * ссылка на переменную окружения.
+     *
+     * Значение, а не подстановка: имя нужно донести до читателя конфига как
+     * есть, чтобы он сравнил его с окружением тогда, когда это понадобится,
+     * а не на момент загрузки файла.
+     */
+    data class EnvRef(val text: String) : KorenTokenKind
     data class Str(val s: String) : KorenTokenKind
     data class Int(val i: Long) : KorenTokenKind
     data class Float(val f: Double) : KorenTokenKind

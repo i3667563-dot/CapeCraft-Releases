@@ -6,6 +6,7 @@ import dev.ggtv.koren.EmptyWorldContext
 import dev.ggtv.koren.KorenConfig
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.io.File
@@ -29,6 +30,24 @@ class ReadmeExamplesTest {
 
                 { name = "deep",  type = "url", url = "https://example.com/deep.png",
                   when = { location.y: ">-20" }, priority = 10 },
+
+                { name = "default", type = "url", url = "https://example.com/{username}.png" }
+            ]
+        }
+    """.trimIndent()
+
+    /** Пример `if` из раздела «Условия `if»». */
+    private val ifExample = """
+        capeCraft {
+            providers [
+                { name = "trusted", type = "url", url = "https://example.com/{username}.png",
+                  if = { username: "Eonixx" } },
+
+                { name = "prod", type = "url", url = "https://example.com/prod.png",
+                  if = { ${'$'}DEPLOY_ENV: "prod" } },
+
+                { name = "dev", type = "url", url = "https://example.com/dev.png",
+                  if = { ${'$'}DEPLOY_ENV: "dev" }, priority = 10 },
 
                 { name = "default", type = "url", url = "https://example.com/{username}.png" }
             ]
@@ -85,6 +104,36 @@ class ReadmeExamplesTest {
 
         // У дефолтного провайдера условий нет вовсе.
         assertEquals(null, providers[3].condition)
+    }
+
+    @Test
+    fun `if example from README loads with conditions on all three`() {
+        val providers = ProviderLoader.load(kn(ifExample))
+        assertEquals(4, providers.size)
+        assertNotNull(providers[0].ifCondition)
+        assertEquals("username", providers[0].ifCondition!!.predicates.single().name)
+        // Точка в имени значащая: `$DEPLOY_ENV` — это одно имя, а не путь.
+        assertEquals("\$DEPLOY_ENV", providers[1].ifCondition!!.predicates.single().name)
+        assertEquals(10, providers[2].priority)
+        // У дефолтного провайдера нет ни `when`, ни `if`.
+        assertNull(providers[3].ifCondition)
+        assertNull(providers[3].condition)
+    }
+
+    @Test
+    fun `каждый fenced-блок README про условия разбирается модом`() {
+        // Пример в README, который не грузится, врёт читателю. Проверяются
+        // именно блоки с условиями: остальное покрыто остальными тестами
+        // этого файла, а несовпадение тут выглядело бы как «всё ок».
+        val readme = File("README.md").readText()
+        val blocks = Regex("(?s)```\\n(capeCraft \\{.*?\\n\\})\\n```").findAll(readme)
+            .map { it.groupValues[1] }
+            .filter { it.contains("when =") || it.contains("if =") }
+            .toList()
+        assertTrue(blocks.isNotEmpty(), "в README не нашлось ни одного блока с условиями")
+        for (block in blocks) {
+            ProviderLoader.load(kn(block))
+        }
     }
 
     @Test

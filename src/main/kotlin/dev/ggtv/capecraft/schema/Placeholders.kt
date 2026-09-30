@@ -41,12 +41,28 @@ object Placeholders {
         return out.toString()
     }
 
-    private fun value(key: String, ctx: Context, template: String): String = when (key) {
+    private fun value(key: String, ctx: Context, template: String): String =
+        resolveOrNull(key, ctx)
+            ?: throw JsonError("неизвестный плейсхолдер «{$key}» в «$template»")
+
+    /**
+     * Значение плейсхолдера или `null`, если такого нет.
+     *
+     * Нужен блоку `if`, где неизвестная переменная — это «не подошло», а не
+     * ошибка: у получателя объявления может не быть аддона, регистрирующего
+     * переменную, и ронять его из-за чужого условия нельзя. Для шаблонов
+     * `url`/`path` поведение прежнее — там неизвестный плейсхолдер падает
+     * через [value], потому что битый URL молча уехал бы на провайдера.
+     *
+     * Резолв общий с [value] намеренно: иначе `if` и `{...}` сошлись бы на
+     * разных наборах имён, и одинаково написанное имя работало бы в одном
+     * месте и не работало в другом.
+     */
+    fun resolveOrNull(key: String, ctx: Context): String? = when (key) {
         "username" -> ctx.username
         "uuid" -> ctx.uuid
         "name" -> ctx.name
         "root" -> ctx.root
         else -> dev.ggtv.capecraft.api.CapeApiHolder.placeholder(key, ctx)
-            ?: throw JsonError("неизвестный плейсхолдер «{$key}» в «$template»")
     }
 }

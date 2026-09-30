@@ -189,13 +189,24 @@ class ConditionMatchTest {
 class ProviderSelectorTest {
     private val world = FakeWorld(mapOf("weather.condition" to str("rain"), "time.period" to str("night")))
 
-    private fun provider(name: String, condition: Condition? = null, priority: Int = 0) =
-        dev.ggtv.capecraft.provider.Provider(
-            name = name,
-            source = dev.ggtv.capecraft.provider.Source.Url("https://x/$name"),
-            condition = condition,
-            priority = priority,
-        )
+    // `if` считается против переменных; в тестах подбора `when` значение не важно,
+    // но контекст обязан быть настоящим, иначе тест врал бы про новую сигнатуру.
+    private val vars = dev.ggtv.capecraft.schema.Placeholders.Context(
+        username = "Steve", uuid = "u", name = "x", root = "/root",
+    )
+
+    private fun provider(
+        name: String,
+        condition: Condition? = null,
+        ifCondition: VarCondition? = null,
+        priority: Int = 0,
+    ) = dev.ggtv.capecraft.provider.Provider(
+        name = name,
+        source = dev.ggtv.capecraft.provider.Source.Url("https://x/$name"),
+        condition = condition,
+        ifCondition = ifCondition,
+        priority = priority,
+    )
 
     @Test
     fun `matching condition beats defaults`() {
@@ -203,7 +214,7 @@ class ProviderSelectorTest {
             "rainy",
             condition = Condition.parse(dictOf("weather.condition" to str("rain"))),
         )
-        val selected = ProviderSelector.select(listOf(provider("default"), p), world)
+        val selected = ProviderSelector.select(listOf(provider("default"), p), world, vars)
         assertEquals(listOf("rainy", "default"), selected.map { it.name })
     }
 
@@ -220,7 +231,7 @@ class ProviderSelectorTest {
             priority = 20,
         )
         // high стоит позже в списке, но приоритет выше — он первый.
-        val selected = ProviderSelector.select(listOf(low, high, provider("default")), world)
+        val selected = ProviderSelector.select(listOf(low, high, provider("default")), world, vars)
         assertEquals(listOf("high", "low", "default"), selected.map { it.name })
     }
 
@@ -228,7 +239,7 @@ class ProviderSelectorTest {
     fun `equal priority keeps list order`() {
         val a = provider("a", condition = Condition.parse(dictOf("weather.condition" to str("rain"))), priority = 1)
         val b = provider("b", condition = Condition.parse(dictOf("time.period" to str("night"))), priority = 1)
-        val selected = ProviderSelector.select(listOf(a, b), world)
+        val selected = ProviderSelector.select(listOf(a, b), world, vars)
         assertEquals(listOf("a", "b"), selected.map { it.name })
     }
 
@@ -238,20 +249,97 @@ class ProviderSelectorTest {
             "other",
             condition = Condition.parse(dictOf("weather.condition" to str("clear"))),
         )
-        val selected = ProviderSelector.select(listOf(other, provider("default")), world)
+        val selected = ProviderSelector.select(listOf(other, provider("default")), world, vars)
         assertEquals(listOf("default"), selected.map { it.name })
     }
 
     @Test
     fun `only defaults when no condition matched`() {
-        val selected = ProviderSelector.select(listOf(provider("d1"), provider("d2")), world)
+        val selected = ProviderSelector.select(listOf(provider("d1"), provider("d2")), world, vars)
         assertEquals(listOf("d1", "d2"), selected.map { it.name })
+    }
+
+    @Test
+    fun `приоритет работает и на провайдерах без условия`() {
+        // Раньше безусловные шли в порядке списка, и `priority` у них был
+        // ключом в конфиге, который подсвечивает редактор и не делает ничего.
+        val selected = ProviderSelector.select(
+            listOf(provider("d-low", priority = 1), provider("d-high", priority = 9)),
+            world,
+            vars,
+        )
+        assertEquals(listOf("d-high", "d-low"), selected.map { it.name })
+    }
+
+    @Test
+    fun `безусловные с равным приоритетом держат порядок списка`() {
+        val selected = ProviderSelector.select(
+            listOf(provider("a", priority = 3), provider("b", priority = 3), provider("c", priority = 3)),
+            world,
+            vars,
+        )
+        assertEquals(listOf("a", "b", "c"), selected.map { it.name })
+    }
+
+    @Test
+    fun `условные всё равно идут ahead безусловных несмотря на приоритет`() {
+        // Группы не перемешиваются: подошедшее условие — это осознанный выбор
+        // человека, и безусловный провайдер не должен его перебивать числом.
+        val selected = ProviderSelector.select(
+            listOf(
+                provider("always-high", priority = 100),
+                provider("matched-low", condition = Condition.parse(dictOf("weather.condition" to str("rain"))), priority = 1),
+            ),
+            world,
+            vars,
+        )
+        assertEquals(listOf("matched-low", "always-high"), selected.map { it.name })
+    }
+
+    @Test
+    fun `безусловные сортируются между собой даже когда условные подошли`() {
+        val selected = ProviderSelector.select(
+            listOf(
+                provider("d1", priority = 2),
+                provider("m", condition = Condition.parse(dictOf("weather.condition" to str("rain")))),
+                provider("d2", priority = 8),
+            ),
+            world,
+            vars,
+        )
+        assertEquals(listOf("m", "d2", "d1"), selected.map { it.name })
+    }
+
+    @Test
+    fun `провайдер с одним лишь if тоже попадает в приоритетную группу`() {
+        val selected = ProviderSelector.select(
+            listOf(
+                provider("no-condition-high", priority = 50),
+                provider("if-low", ifCondition = VarCondition.parse(dictOf("username" to str("Steve"))), priority = 1),
+            ),
+            world,
+            vars,
+        )
+        assertEquals(listOf("if-low", "no-condition-high"), selected.map { it.name })
+    }
+
+    @Test
+    fun `if не подошёл — провайдер не сдвигает безусловные вниз`() {
+        val selected = ProviderSelector.select(
+            listOf(
+                provider("no-condition", priority = 0),
+                provider("if-miss", ifCondition = VarCondition.parse(dictOf("username" to str("Другой"))), priority = 99),
+            ),
+            world,
+            vars,
+        )
+        assertEquals(listOf("no-condition"), selected.map { it.name })
     }
 
     @Test
     fun `empty world selects only defaults`() {
         val c = provider("c", condition = Condition.parse(dictOf("weather.condition" to str("rain"))))
-        val selected = ProviderSelector.select(listOf(c, provider("d")), EmptyWorld())
+        val selected = ProviderSelector.select(listOf(c, provider("d")), EmptyWorld(), vars)
         assertEquals(listOf("d"), selected.map { it.name })
     }
 }

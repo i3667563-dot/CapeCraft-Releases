@@ -23,6 +23,13 @@ import kotlin.test.assertTrue
  */
 class SyncObjectFunctionsTest {
 
+    /** Контекст переменных: в тестах проверяется `when`, а `if` пуст,
+     *  но параметр обязателен — иначе тест врал бы про сигнатуру. */
+    private val vars = dev.ggtv.capecraft.schema.Placeholders.Context(
+        username = "Steve", uuid = "u", name = "", root = "/root",
+    )
+
+
     /**
      * Мир с заданной температурой биома — подставляется вместо игрового.
      *
@@ -107,9 +114,9 @@ class SyncObjectFunctionsTest {
         val providers = SyncRosterPolicy.toLocalProviders(decoded)
 
         // Смотрю на объект, стоящий в джунглях: его условие совпадает.
-        val seenFromJungle = ProviderSelector.select(providers, jungle).map { it.name }
+        val seenFromJungle = ProviderSelector.select(providers, jungle, vars).map { it.name }
         // Смотрю на того же объект из пустыни: тот же набор, но условие — нет.
-        val seenFromTundra = ProviderSelector.select(providers, tundra).map { it.name }
+        val seenFromTundra = ProviderSelector.select(providers, tundra, vars).map { it.name }
 
         assertEquals(listOf("jungle"), seenFromJungle, "в джунглях должен выиграть условный провайдер")
         assertTrue(
@@ -137,7 +144,7 @@ class SyncObjectFunctionsTest {
 
         assertEquals(
             listOf("высокий", "средний", "низкий"),
-            ProviderSelector.select(providers, jungle).map { it.name },
+            ProviderSelector.select(providers, jungle, vars).map { it.name },
             "совпавшие по условию должны идти по убыванию приоритета",
         )
     }
@@ -153,7 +160,7 @@ class SyncObjectFunctionsTest {
         val providers = SyncRosterPolicy.toLocalProviders(
             SyncCodec.decodeAnnounce(SyncCodec.encodeAnnounce(Announce(shuffled))).functions,
         )
-        assertEquals(listOf("b", "a"), ProviderSelector.select(providers, jungle).map { it.name })
+        assertEquals(listOf("b", "a"), ProviderSelector.select(providers, jungle, vars).map { it.name })
     }
 
     @Test
@@ -164,7 +171,7 @@ class SyncObjectFunctionsTest {
         val providers = SyncRosterPolicy.toLocalProviders(
             listOf(function("default", priority = 1000), function("jungle", priority = 1, warmerThan = warmEnough)),
         )
-        assertEquals(listOf("jungle", "default"), ProviderSelector.select(providers, jungle).map { it.name })
+        assertEquals(listOf("jungle", "default"), ProviderSelector.select(providers, jungle, vars).map { it.name })
     }
 
     // ── приватность локального файла ─────────────────────────────────────────
@@ -286,6 +293,6 @@ class SyncObjectFunctionsTest {
         val providers = SyncRosterPolicy.toLocalProviders(
             SyncCodec.decodeAnnounce(SyncCodec.encodeAnnounce(Announce(functions))).functions,
         )
-        assertEquals(listOf("просто"), ProviderSelector.select(providers, EmptyWorldContext).map { it.name })
+        assertEquals(listOf("просто"), ProviderSelector.select(providers, EmptyWorldContext, vars).map { it.name })
     }
 }

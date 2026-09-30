@@ -24,6 +24,12 @@ class ObjectCapePolicyTest {
 
     private val grace = ObjectCapePolicy.ANNOUNCE_GRACE_MS
 
+    /** Контекст переменных наблюдаемого — в этих тестах `if` не проверяется,
+     *  но параметр обязателен намеренно (см. `ProviderSelector.select`). */
+    private val vars = dev.ggtv.capecraft.schema.Placeholders.Context(
+        username = "Steve", uuid = "u", name = "", root = "/root",
+    )
+
     private fun urlProvider(name: String, priority: Int = 0, condition: Condition? = null) = Provider(
         name = name,
         source = Source.Url("https://example.invalid/$name.png"),
@@ -66,7 +72,7 @@ class ObjectCapePolicyTest {
             localProviders = listOf(urlProvider("мой-url")),
             firstSeenMs = 1_000L,
             nowMs = 1_000L + grace,
-            context = EmptyWorldContext,
+            context = EmptyWorldContext, vars = vars,
         )
 
         assertEquals(ObjectCapePolicy.Decision.FORCED_LOCAL, r.decision)
@@ -81,7 +87,7 @@ class ObjectCapePolicyTest {
             localProviders = listOf(urlProvider("мой-url")),
             firstSeenMs = 1_000L,
             nowMs = 1_000L + grace - 1,
-            context = EmptyWorldContext,
+            context = EmptyWorldContext, vars = vars,
         )
 
         assertEquals(ObjectCapePolicy.Decision.WAIT, r.decision)
@@ -99,7 +105,7 @@ class ObjectCapePolicyTest {
             localProviders = listOf(fileProvider("мой-файл")),
             firstSeenMs = 0L,
             nowMs = grace * 10,
-            context = EmptyWorldContext,
+            context = EmptyWorldContext, vars = vars,
         )
 
         assertEquals(listOf("мой-файл"), r.providers.map { it.name })
@@ -115,11 +121,11 @@ class ObjectCapePolicyTest {
         )
         val inJungle = ObjectCapePolicy.resolve(
             isSelf = false, declaredProviders = null, localProviders = local,
-            firstSeenMs = 0L, nowMs = grace * 10, context = jungle,
+            firstSeenMs = 0L, nowMs = grace * 10, context = jungle, vars = vars,
         )
         val inTundra = ObjectCapePolicy.resolve(
             isSelf = false, declaredProviders = null, localProviders = local,
-            firstSeenMs = 0L, nowMs = grace * 10, context = FixedWorld("0.1"),
+            firstSeenMs = 0L, nowMs = grace * 10, context = FixedWorld("0.1"), vars = vars,
         )
 
         assertEquals(listOf("в-джунглях", "всегда"), inJungle.providers.map { it.name })
@@ -136,7 +142,7 @@ class ObjectCapePolicyTest {
             localProviders = listOf(urlProvider("мой-набор")),
             firstSeenMs = 0L,
             nowMs = grace * 100,
-            context = EmptyWorldContext,
+            context = EmptyWorldContext, vars = vars,
         )
 
         assertEquals(ObjectCapePolicy.Decision.DECLARED, r.decision)
@@ -149,12 +155,12 @@ class ObjectCapePolicyTest {
         // объявление. Чужой набор обязан заменить мой, а не наоборот.
         val first = ObjectCapePolicy.resolve(
             isSelf = false, declaredProviders = null, localProviders = listOf(urlProvider("мой")),
-            firstSeenMs = 0L, nowMs = grace + 1, context = EmptyWorldContext,
+            firstSeenMs = 0L, nowMs = grace + 1, context = EmptyWorldContext, vars = vars,
         )
         val after = ObjectCapePolicy.resolve(
             isSelf = false, declaredProviders = listOf(urlProvider("его")),
             localProviders = listOf(urlProvider("мой")),
-            firstSeenMs = 0L, nowMs = grace + 1, context = EmptyWorldContext,
+            firstSeenMs = 0L, nowMs = grace + 1, context = EmptyWorldContext, vars = vars,
         )
 
         assertEquals(listOf("мой"), first.providers.map { it.name })
@@ -169,13 +175,13 @@ class ObjectCapePolicyTest {
         // от нового первого появления, а решение принимает вызывающий код.
         val afterForget = ObjectCapePolicy.resolve(
             isSelf = false, declaredProviders = null, localProviders = listOf(urlProvider("мой")),
-            firstSeenMs = 50_000L, nowMs = 50_000L, context = EmptyWorldContext,
+            firstSeenMs = 50_000L, nowMs = 50_000L, context = EmptyWorldContext, vars = vars,
         )
         assertEquals(ObjectCapePolicy.Decision.WAIT, afterForget.decision)
 
         val afterGrace = ObjectCapePolicy.resolve(
             isSelf = false, declaredProviders = null, localProviders = listOf(urlProvider("мой")),
-            firstSeenMs = 50_000L, nowMs = 50_000L + grace, context = EmptyWorldContext,
+            firstSeenMs = 50_000L, nowMs = 50_000L + grace, context = EmptyWorldContext, vars = vars,
         )
         assertEquals(ObjectCapePolicy.Decision.FORCED_LOCAL, afterGrace.decision)
         assertEquals(listOf("мой"), afterGrace.providers.map { it.name })
@@ -187,7 +193,7 @@ class ObjectCapePolicyTest {
     fun `свой набор берётся сразу, без ожидания`() {
         val r = ObjectCapePolicy.resolve(
             isSelf = true, declaredProviders = null, localProviders = listOf(fileProvider("мой-файл")),
-            firstSeenMs = 0L, nowMs = 0L, context = EmptyWorldContext,
+            firstSeenMs = 0L, nowMs = 0L, context = EmptyWorldContext, vars = vars,
         )
 
         assertEquals(ObjectCapePolicy.Decision.SELF, r.decision)
@@ -203,7 +209,7 @@ class ObjectCapePolicyTest {
             isSelf = true,
             declaredProviders = listOf(urlProvider("его-url")),
             localProviders = listOf(fileProvider("мой-файл")),
-            firstSeenMs = 0L, nowMs = 0L, context = EmptyWorldContext,
+            firstSeenMs = 0L, nowMs = 0L, context = EmptyWorldContext, vars = vars,
         )
 
         assertEquals(ObjectCapePolicy.Decision.SELF, r.decision)
@@ -216,7 +222,7 @@ class ObjectCapePolicyTest {
     fun `срок ноль навязывает набор сразу`() {
         val r = ObjectCapePolicy.resolve(
             isSelf = false, declaredProviders = null, localProviders = listOf(urlProvider("мой")),
-            firstSeenMs = 7L, nowMs = 7L, context = EmptyWorldContext, graceMs = 0L,
+            firstSeenMs = 7L, nowMs = 7L, context = EmptyWorldContext, vars = vars, graceMs = 0L,
         )
         assertEquals(ObjectCapePolicy.Decision.FORCED_LOCAL, r.decision)
     }
@@ -255,7 +261,7 @@ class ObjectCapePolicyTest {
         // клиентах — GGSHNIKK с web-провайдером и Eonixx без провайдеров.
         val r = ObjectCapePolicy.resolve(
             isSelf = false, declaredProviders = emptyList(), localProviders = listOf(urlProvider("мой")),
-            firstSeenMs = 0L, nowMs = grace * 10, context = EmptyWorldContext,
+            firstSeenMs = 0L, nowMs = grace * 10, context = EmptyWorldContext, vars = vars,
         )
 
         assertEquals(ObjectCapePolicy.Decision.FORCED_LOCAL, r.decision)
@@ -269,7 +275,7 @@ class ObjectCapePolicyTest {
         val now = 1_000L
         val r = ObjectCapePolicy.resolve(
             isSelf = false, declaredProviders = emptyList(), localProviders = listOf(urlProvider("мой")),
-            firstSeenMs = now, nowMs = now, context = EmptyWorldContext,
+            firstSeenMs = now, nowMs = now, context = EmptyWorldContext, vars = vars,
         )
 
         assertEquals(ObjectCapePolicy.Decision.FORCED_LOCAL, r.decision)
@@ -281,7 +287,7 @@ class ObjectCapePolicyTest {
         // Свой объект идёт первым в decide: пустое объявление себя не касается.
         val r = ObjectCapePolicy.resolve(
             isSelf = true, declaredProviders = emptyList(), localProviders = listOf(urlProvider("мой")),
-            firstSeenMs = 0L, nowMs = 0L, context = EmptyWorldContext,
+            firstSeenMs = 0L, nowMs = 0L, context = EmptyWorldContext, vars = vars,
         )
 
         assertEquals(ObjectCapePolicy.Decision.SELF, r.decision)
@@ -294,7 +300,7 @@ class ObjectCapePolicyTest {
         val r = ObjectCapePolicy.resolve(
             isSelf = false, declaredProviders = listOf(urlProvider("его")),
             localProviders = listOf(urlProvider("мой")),
-            firstSeenMs = 0L, nowMs = 0L, context = EmptyWorldContext,
+            firstSeenMs = 0L, nowMs = 0L, context = EmptyWorldContext, vars = vars,
         )
 
         assertEquals(ObjectCapePolicy.Decision.DECLARED, r.decision)

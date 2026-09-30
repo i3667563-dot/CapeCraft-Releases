@@ -1,6 +1,7 @@
 package dev.ggtv.capecraft.provider
 
 import dev.ggtv.capecraft.condition.Condition
+import dev.ggtv.capecraft.condition.VarCondition
 import dev.ggtv.capecraft.api.CapeApiHolder
 import dev.ggtv.capecraft.api.provider.CapeSource
 import dev.ggtv.capecraft.api.provider.CapeValues
@@ -84,6 +85,7 @@ object ProviderLoader {
         } else null
 
         val condition = (kv[ProviderNames.Keys.WHEN] as? Value.VDict)?.let { Condition.parse(it) }
+        val ifCondition = (kv[ProviderNames.Keys.IF] as? Value.VDict)?.let { VarCondition.parse(it) }
         val priority = (kv[ProviderNames.Keys.PRIORITY] as? Value.VInt)?.i?.toInt() ?: 0
 
         val capeValues = if (addonSource != null) CapeValues(
@@ -96,6 +98,7 @@ object ProviderLoader {
             name = name,
             source = builtSource ?: Source.Url("addon://${type}/${name}"),
             condition = condition,
+            ifCondition = ifCondition,
             priority = priority,
             addonSource = addonSource,
             values = capeValues,

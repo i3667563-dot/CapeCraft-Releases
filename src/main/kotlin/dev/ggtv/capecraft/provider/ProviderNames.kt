@@ -29,6 +29,7 @@ object ProviderNames {
         const val PATH = "path"
         const val EXTRACT = "extract"
         const val WHEN = "when"
+        const val IF = "if"
         const val PRIORITY = "priority"
     }
 

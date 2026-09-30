@@ -242,6 +242,40 @@ object KorenParser {
                     return Value.VDict(pairs)
                 }
                 KorenTokenKind.Comma -> c.err("лишняя «,» в словаре")
+                is KorenTokenKind.EnvRef -> {
+                    // Ключ-ссылка на переменную окружения: имя сохраняется
+                    // вместе с `$`, и разбирает его уже владелец значения
+                    // (см. VarCondition), а не парсер формата.
+                    c.pos += 1
+                    val key = kind.text
+                    when (c.peekKind()) {
+                        KorenTokenKind.Colon, KorenTokenKind.Assign -> c.pos += 1
+                        else -> c.err(
+                            "ожидалось «:» или «=» после ключа «$key» в словаре, найдено: ${c.peekKind()}",
+                        )
+                    }
+                    pairs += key to parseValue(c, depth)
+
+                    skipNewlinesAndComments(c)
+                    when (val after = c.peekKind()) {
+                        KorenTokenKind.Comma -> {
+                            c.pos += 1
+                            skipNewlinesAndComments(c)
+                            if (c.peekKind() is KorenTokenKind.RBrace) {
+                                c.pos += 1
+                                return Value.VDict(pairs)
+                            }
+                            if (c.peekKind() is KorenTokenKind.Comma) {
+                                c.err("лишняя «,» в словаре")
+                            }
+                        }
+                        KorenTokenKind.RBrace -> {
+                            c.pos += 1
+                            return Value.VDict(pairs)
+                        }
+                        else -> c.err("ожидалась «,» или «}» после пары словаря, найдено: $after")
+                    }
+                }
                 is KorenTokenKind.Word -> {
                     c.pos += 1
                     val key = parseDictKey(c, kind.w)
