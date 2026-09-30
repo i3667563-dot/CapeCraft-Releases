@@ -2,6 +2,7 @@ package dev.ggtv.capecraft
 
 import dev.ggtv.capecraft.CapeConfigEnv
 import com.mojang.brigadier.context.CommandContext
+import dev.ggtv.capecraft.render.MinecraftWorldContext
 import dev.ggtv.capecraft.sync.CapeSyncClient
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback
 import net.fabricmc.fabric.api.client.command.v2.ClientCommands
@@ -50,10 +51,13 @@ object CapeCommands {
         // видят прежний набор.
         CapeSyncClient.announceNow()
         val msg = if (cfg.lastError != null) " с ошибкой: ${cfg.lastError}" else ""
-        ctx.source.sendFeedback(Component.literal("CapeCraft перезагружен (${cfg.path}). Провайдеров: ${cfg.providers.size}, " +
+        // Отдельной строкой, а не в скобках: откат с недоступного файла из
+        // окружения — ровно та причина, по которой человек идёт читать лог.
+        val warn = cfg.sourceWarning?.let { "\nВНИМАНИЕ: $it" } ?: ""
+        ctx.source.sendFeedback(Component.literal("CapeCraft перезагружен (${cfg.activeSource}). Провайдеров: ${cfg.providers.size}, " +
             "кэш плащей очищен, загрузка в фоне, набор — локальный конфиг" +
             ", набор объявлен" +
-            "$msg"))
+            "$msg$warn"))
         return 1
     }
 
@@ -75,33 +79,94 @@ object CapeCommands {
         return 1
     }
 
+    /**
+     * Разбор отбора: что мод выбрал и почему.
+     *
+     * Раньше тут был только список загруженных плащей и байты, из которых
+     * нельзя было понять **ничего** про выбор. Ровно поэтому баг в условиях
+     * приходилось выискивать глазами по конфигу: мод молчал, а человек
+     * догадывался. Теперь видно и фактическое значение каждого поля, и
+     * причину, по которой провайдер отсеялся.
+     *
+     * Отчёт считается тем же [dev.ggtv.capecraft.condition.ProviderSelector],
+     * что и рендер, поэтому «здесь подошло» и «там подошло» не могут
+     * разойтись: расхождение было бы хуже отсутствия вывода.
+     */
     private fun list(ctx: CommandContext<FabricClientCommandSource>, registry: CapeRegistry): Int {
+        val report = registry.explainLocal(registry.providers, MinecraftWorldContext)
+        val who = Minecraft.getInstance().user.name
+        say(ctx, "Провайдеров: ${report.reports.size}. Отбор для $who.")
+
+        val chain = report.ordered.map { it.name }
+        if (chain.isEmpty()) {
+            say(ctx, "Ничего не подошло, и запасных провайдеров нет — плаща не будет.")
+        } else {
+            say(ctx, "Цепочка загрузки: ${chain.joinToString(" → ")}")
+            say(ctx, "На экране: ${chain.first()}")
+        }
+
+        // Расхождение возможно только если состояние мира сменилось между
+        // последним пересчётом и этой командой. Само по себе полезно увидеть:
+        // значит картинка на экране ещё от прошлого отбора.
+        val applied = registry.localPlayerId?.let { registry.appliedOrder[it] }
+        if (applied != null && applied != chain) {
+            say(ctx, "Применён был: ${applied.joinToString(" → ")}")
+        }
+
+        for (r in report.reports) {
+            val mark = when {
+                r.provider === report.ordered.firstOrNull() -> "→"
+                r.selected -> "+"
+                else -> "×"
+            }
+            val tail = when {
+                r.isFallback -> "без условий, всегда в цепочке"
+                r.matched -> "условия выполнены"
+                else -> "не подходит"
+            }
+            val prio = if (r.provider.priority == 0) "" else "  приоритет ${r.provider.priority}"
+            say(ctx, "$mark ${r.provider.name}$prio — $tail")
+            for (c in r.whenChecks) {
+                say(ctx, "      ${tick(c.ok)} ${c.path}: ${c.actual} ${c.expected}")
+            }
+            for (c in r.ifChecks) {
+                say(ctx, "      ${tick(c.ok)} if ${c.name}: ${c.actual} ${c.expected}")
+            }
+        }
+
         val keys = registry.cachedKeys
         val errs = registry.errorsSnapshot
-        if (keys.isEmpty()) {
-            if (errs.isEmpty()) {
-                ctx.source.sendFeedback(Component.literal("Плащей в памяти нет."))
-            } else {
-                ctx.source.sendFeedback(Component.literal("Плащей в памяти нет. Ошибки загрузки:"))
-                for (e in errs.values) {
-                    ctx.source.sendFeedback(Component.literal("  $e"))
-                }
-            }
-            return 1
+        if (keys.isEmpty() && errs.isNotEmpty()) {
+            say(ctx, "Плащей в памяти нет. Ошибки загрузки:")
+            for (e in errs.values) say(ctx, "  $e")
+        } else {
+            say(ctx, "Плащей в памяти: ${keys.size}, ${registry.totalBytes} байт")
         }
-        ctx.source.sendFeedback(Component.literal("Плащи в памяти (${keys.size}):"))
-        for (k in keys) {
-            val err = registry.error(k)
-            ctx.source.sendFeedback(Component.literal("  $k" + if (err != null) " — $err" else ""))
-        }
-        ctx.source.sendFeedback(Component.literal("Память: ${registry.totalBytes} байт"))
         return 1
     }
 
+    /** Строка в чат. Отдельный хелпер — строк в выводе много. */
+    private fun say(ctx: CommandContext<FabricClientCommandSource>, text: String) {
+        ctx.source.sendFeedback(Component.literal(text))
+    }
+
+    /** Галочка проверки: совпало фактическое значение с ожиданием или нет. */
+    private fun tick(ok: Boolean): String = if (ok) "✓" else "✗"
+
     private fun status(ctx: CommandContext<FabricClientCommandSource>, registry: CapeRegistry): Int {
+        val cfg = CapeCraftClient.config
         val name = Minecraft.getInstance().user.name
         ctx.source.sendFeedback(Component.literal("CapeCraft ${modVersion()}"))
         ctx.source.sendFeedback(Component.literal("Игрок: $name"))
+        // Откуда взят конфиг — иначе при CAPECRAFT_CONFIG в статусе не видно
+        // ни пути, ни того, что внешний файл не прочитался и взят обычный.
+        ctx.source.sendFeedback(Component.literal("Конфиг: ${cfg.activeSource}"))
+        cfg.sourceWarning?.let {
+            ctx.source.sendFeedback(Component.literal("  ВНИМАНИЕ: $it"))
+        }
+        cfg.lastError?.let {
+            ctx.source.sendFeedback(Component.literal("  ОШИБКА: $it"))
+        }
         ctx.source.sendFeedback(Component.literal("Провайдеров: ${registry.providers.size} (${sourceOf(registry)})"))
         ctx.source.sendFeedback(Component.literal("Плащей в кэше: ${registry.size}"))
         ctx.source.sendFeedback(Component.literal("Память плащей: ${registry.totalBytes} байт"))

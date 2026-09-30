@@ -212,7 +212,14 @@ class Resolver(private val root: Block) {
                     }
                 }
                 1 -> block.get(seg, 1) ?: throw CrenError.NotFound(pathLabel)
-                else -> throw CrenError.Ambiguous(seg, count)
+                // Позиции всех совпадений обязательны: без них сообщение
+                // отвечает «сколько», но не «где», а это ровно то, что нужно
+                // человеку, чтобы починить конфиг.
+                else -> throw CrenError.Ambiguous(
+                    seg,
+                    count,
+                    block.entries.filter { it.key == seg }.map { it.span },
+                )
             }
         }
 

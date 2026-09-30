@@ -3,8 +3,25 @@ package dev.ggtv.capecraft.render
 import dev.ggtv.kjen.Value
 import dev.ggtv.koren.WorldContext
 import dev.ggtv.koren.WorldRoot
+import net.minecraft.core.registries.BuiltInRegistries
+import net.minecraft.world.entity.EquipmentSlot
+import net.minecraft.world.item.ItemStack
 import net.minecraft.server.level.ServerPlayer
 import net.minecraft.world.level.Level
+
+/**
+ * Тиры брони, которые обещает подсказка редактора.
+ *
+ * Дублируется в [dev.ggtv.capecraft.condition.Condition.ARMOR_TIERS] намеренно:
+ * именно литералами в этом файле сверяет его `WorldContextAgreementTest`, и
+ * ссылка на общий список сделала бы проверку совпадением с самим собой.
+ */
+private val ARMOR_TIERS = setOf(
+    "none", "leather", "chainmail", "iron", "gold", "diamond", "netherite", "turtle",
+)
+
+/** Части тела, для которых id предмета разбирается на тир и слот. */
+private val ARMOR_PIECES = setOf("helmet", "chestplate", "leggings", "boots")
 
 /**
  * [WorldContext] сервера: читает состояние мира конкретного игрока.
@@ -37,6 +54,12 @@ class ServerWorldContext(private val player: ServerPlayer) : WorldContext {
                 WorldRoot.TIME -> timeField(world, field)
                 WorldRoot.DIMENSION -> dimensionField(world, field)
                 WorldRoot.LOCATION -> locationField(field)
+                WorldRoot.ARMOR -> armorField(field)
+                WorldRoot.HEALTH -> healthField(field)
+                // Self-only: сервер это не решает. Условие по `state` считает
+                // только владелец на своей машине — и то, что сервер знает про
+                // игрока, к его собственному состоянию отношения не имеет.
+                WorldRoot.STATE -> Value.VStr("unknown")
             }
         } catch (_: Exception) {
             Value.VStr("unknown")
@@ -103,5 +126,41 @@ class ServerWorldContext(private val player: ServerPlayer) : WorldContext {
             in 13001L..23000L -> "night"
             else -> "sunrise"
         }
+    }
+
+    /**
+     * Броня в слоте: `head`, `chest`, `legs`, `feet`.
+     *
+     * Публичное условие: броня видна и другим, поэтому сервер вправе считать
+     * её так же, как клиент. Тир берётся из id предмета
+     * (`diamond_chestplate` → `diamond`) — это данные, а не API, и в 26.2
+     * `ArmorMaterial` перестал быть именованным, так что через него не вышло бы.
+     */
+    private fun armorField(field: String): Value {
+        val slot = when (field) {
+            "head" -> EquipmentSlot.HEAD
+            "chest" -> EquipmentSlot.CHEST
+            "legs" -> EquipmentSlot.LEGS
+            "feet" -> EquipmentSlot.FEET
+            else -> return Value.VStr("unknown")
+        }
+        return Value.VStr(armorTier(player.getItemBySlot(slot)))
+    }
+
+    /** Тир брони в стопке. `unknown` — не броня, `none` — пустой слот. */
+    private fun armorTier(stack: ItemStack): String {
+        if (stack.isEmpty) return "none"
+        val id = BuiltInRegistries.ITEM.getKey(stack.item).path
+        val tier = id.substringBefore('_')
+        val piece = id.substringAfter('_', "")
+        if (piece !in ARMOR_PIECES) return "unknown"
+        return if (tier in ARMOR_TIERS) tier else "unknown"
+    }
+
+    /** Здоровье: `current` падает от урона, `max` — нет. Оба публичные. */
+    private fun healthField(field: String): Value = when (field) {
+        "current" -> Value.VFloat(player.health.toDouble())
+        "max" -> Value.VFloat(player.maxHealth.toDouble())
+        else -> return Value.VStr("unknown")
     }
 }

@@ -20,9 +20,20 @@ class CrenConfig private constructor(private val root: Block) {
             return CrenConfig(root)
         }
 
-        /** Разобрать конфиг из строки с заданным окружением. */
-        fun fromStringWithEnv(input: String, env: Map<String, String>): CrenConfig {
-            val tokens = Tokenizer.tokenizeWithEnv(input, env)
+        /**
+         * Разобрать конфиг из строки с заданным окружением.
+         *
+         * @param onUnset имя переменной, которой нет и у которой нет дефолта
+         *   `${NAME:-...}`. Подстановка не падает — на её место встаёт пустая
+         *   строка, — но вызывающий всё равно должен узнать, какое именно имя
+         *   не задано, иначе `url = "$HOST"` тихо превратится в `url = ""`.
+         */
+        fun fromStringWithEnv(
+            input: String,
+            env: Map<String, String>,
+            onUnset: (String) -> Unit = {},
+        ): CrenConfig {
+            val tokens = Tokenizer.tokenizeWithEnv(input, env, onUnset)
             val root = Parser.parse(tokens)
             return CrenConfig(root)
         }

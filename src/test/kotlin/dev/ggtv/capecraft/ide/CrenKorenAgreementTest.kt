@@ -43,6 +43,21 @@ class CrenKorenAgreementTest {
             "capeCraft {\n    providers [ { name = \"a\", when = { location.y: \"<= -20\" } } ]\n}",
         "when с несколькими условиями" to
             "capeCraft {\n    providers [ { name = \"a\", when = { weather: \"rain\", time.period: \"day\" } } ]\n}",
+        "if с переменной" to
+            "capeCraft {\n    providers [ { name = \"a\", if = { username: \"Eonixx\" } } ]\n}",
+        "if с env и точкой в имени" to
+            "capeCraft {\n    providers [ { name = \"a\", if = { \$TIER: \"gold\" } } ]\n}",
+        "if с числовым оператором" to
+            "capeCraft {\n    providers [ { name = \"a\", if = { \$PORT: \">8000\" } } ]\n}",
+        "if рядом с when" to
+            "capeCraft {\n    providers [ { name = \"a\", when = { weather: \"rain\" }, if = { username: \"Eonixx\" } } ]\n}",
+        "if с аддонным именем" to
+            "capeCraft {\n    providers [ { name = \"a\", if = { myAddon.level: \">=10\" } } ]\n}",
+        // Синтаксически это законный словарь, и отвергать его на уровне
+        // разбора нельзя: корень мира внутри `if` ловит уже модель
+        // (`VarCondition.parse`) и слой со схемой, каждый со своим тестом.
+        "корень мира в if синтаксически законен" to
+            "capeCraft {\n    providers [ { name = \"a\", if = { weather: \"rain\" } } ]\n}",
         "явный тип" to "capeCraft {\n    limits { maxFrames int = 100 }\n}",
         "запятая в конце строки внутри словаря" to
             "capeCraft {\n    providers [ { name = \"a\", when = { weather: \"rain\", } } ]\n}",
@@ -55,6 +70,11 @@ class CrenKorenAgreementTest {
     private val broken = listOf(
         "when без разделителя" to
             "capeCraft {\n    providers [ { name = \"a\", when { location.y: \"<= -20\" } } ]\n}",
+        // `if` без знака — та же ошибка, что и у `when`, и ловится тем же
+        // слоем со схемой: на синтаксисе `if { ... }` неотличим от законного
+        // `if = { ... }`.
+        "if без разделителя" to
+            "capeCraft {\n    providers [ { name = \"a\", if { username: \"Eonixx\" } } ]\n}",
         "не закрыт массив" to "capeCraft {\n    providers [\n",
         "не закрыт блок" to "capeCraft {\n    limits {\n",
         "нет значения" to "capeCraft {\n    limits { maxFrames = }\n}",
@@ -75,7 +95,12 @@ class CrenKorenAgreementTest {
         for ((name, text) in valid) {
             // Если koren такой файл не берёт, тест врёт: он проверял бы не
             // согласие, а нашу фантазию о том, что игра допускает.
-            korenAccepts(name, text)
+            // Результат обязан проверяться: вызов без утверждения выглядел
+            // как проверка, а на деле ничего не утверждал.
+            assertTrue(
+                korenAccepts(name, text),
+                "игра не читает «$name», а он в valid: перенеси его в broken",
+            )
             val problems = CrenParser.parse(CrenDocument(text)).problems
             assertTrue(
                 problems.isEmpty(),

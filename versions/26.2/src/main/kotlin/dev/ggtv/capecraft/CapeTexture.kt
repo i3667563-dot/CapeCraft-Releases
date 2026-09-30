@@ -4,6 +4,7 @@ import com.mojang.blaze3d.platform.NativeImage
 import net.minecraft.client.Minecraft
 import net.minecraft.client.renderer.texture.DynamicTexture
 import net.minecraft.resources.Identifier
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Регистрация кадров плаща как динамических текстур для рендера.
@@ -24,26 +25,42 @@ object CapeTexture {
     fun idFor(uuid: String): Identifier =
         Identifier.fromNamespaceAndPath("capecraft", "cape/" + sanitize(uuid))
 
+    /**
+     * Текстуры, зарегистрированные нами: id -> текстура.
+     *
+     * Своя карта нужна потому, что `TextureManager.getTexture()` — не «спросить,
+     * есть ли текстура», а операция с побочным эффектом: на отсутствующем id
+     * он создаёт `SimpleTexture`, **регистрирует** его и пытается загрузить
+     * ресурс. Поэтому `getTexture(id)` в проверке «есть ли у нас плащ» сам
+     * порождал `Missing resource capecraft:cape/... referenced from itself`, а
+     * следующий `release(id)` закрывал уже не нашу, сломанную текстуру —
+     * `Failed to close texture`.
+     *
+     * Свой реестр убирает обе проблемы: чужое под нашим id мы не трогаем, а
+     * наличие своей текстуры знаем наверняка, не спрашивая менеджер.
+     * Потокобезопасен: `release` зовут и с сетевого, и с воркерского потока.
+     */
+    private val owned = ConcurrentHashMap<Identifier, DynamicTexture>()
+
     /** Есть ли уже зарегистрированная текстура плаща [uuid] (совпадает ли размер). */
     fun has(uuid: String, w: Int, h: Int): Boolean {
-        val t = Minecraft.getInstance().textureManager.getTexture(idFor(uuid))
-        return t is DynamicTexture && t.getPixels()?.width == w && t.getPixels()?.height == h
+        val img = owned[idFor(uuid)]?.getPixels() ?: return false
+        return img.width == w && img.height == h
     }
 
     /** Уже есть текстура (без проверки размера) — для выбора id в рендере. */
-    fun exists(uuid: String): Boolean =
-        Minecraft.getInstance().textureManager.getTexture(idFor(uuid)) is DynamicTexture
+    fun exists(uuid: String): Boolean = owned.containsKey(idFor(uuid))
 
     /** Зарегистрировать/обновить текстуру кадра [frame] (w×h ARGB) для [uuid]. */
     fun register(uuid: String, w: Int, h: Int, frame: IntArray): Identifier {
         val id = idFor(uuid)
         val tm = Minecraft.getInstance().textureManager
-        val existing = tm.getTexture(id)
+        val existing = owned[id]
 
         // Переиспользуем текстуру, если размер не менялся (все кадры анимации
         // одного холста) — перезаписываем пиксели и перезаливаем, без
         // release/recreate каждый кадр (иначе анимация на 60fps — мусор).
-        if (existing is DynamicTexture) {
+        if (existing != null) {
             val img = existing.getPixels()
             if (img != null && img.width == w && img.height == h) {
                 copyPixels(img, w, h, frame)
@@ -52,12 +69,17 @@ object CapeTexture {
             }
         }
 
+        // id наш, но под ним может лежать текстура прошлой генерации или
+        // сломанная — снимаем. Здесь мы гарантированно на рендер-потоке (зовёт
+        // `animate` из тика), так что освобождение GL-ресурсов законно.
+        owned.remove(id)
         tm.release(id)
         val tex = DynamicTexture("capecraft-cape", w, h, false)
         val img = requireNotNull(tex.getPixels()) { "DynamicTexture не содержит NativeImage" }
         copyPixels(img, w, h, frame)
         tex.upload()
         tm.register(id, tex)
+        owned[id] = tex
         if (!debugLogged) {
             debugLogged = true
             val c = frame[0]
@@ -87,9 +109,24 @@ object CapeTexture {
 
     private var debugLogged = false
 
-    /** Освободить текстуру игрока (при clear/forget). */
+    /**
+     * Освободить текстуру игрока (при clear/forget).
+     *
+     * `close()` у текстуры освобождает GL-ресурсы, поэтому это допустимо
+     * только с рендер-потока. Нас зовут и с сетевого (сброс сессии при
+     * переподключении), и с воркерского потока — оттуда такой вызов падал в
+     * `Failed to close texture` и оставлял менеджер в неопределённом
+     * состоянии. С рендер-потока выполняем сразу: отложенный через `execute`
+     * `release` успел бы снести текстуру, которую следующий же `register` уже
+     * пересоздал.
+     */
     fun release(uuid: String) {
-        Minecraft.getInstance().textureManager.release(idFor(uuid))
+        val id = idFor(uuid)
+        // Не наша текстура (или её уже нет) — чужое под нашим id не трогаем.
+        if (owned.remove(id) == null) return
+        val mc = Minecraft.getInstance()
+        val drop = Runnable { mc.textureManager.release(id) }
+        if (mc.isSameThread()) drop.run() else mc.execute(drop)
     }
 
     /** Кэш валидных символов для id текстуры (регекс компилируется один раз). */

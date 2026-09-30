@@ -64,7 +64,7 @@ object CapeSyncClient {
             state.onJoin()
             // Реестру нужен мой id до первого объявления: иначе на кадре с
             // собственным плащом он ещё не знает, что этот набор «мой».
-            selfId()?.let { CapeCraftClient.registry.setLocalPlayer(it) }
+            selfId()?.let { CapeCraftClient.registry.setLocalPlayer(it, selfName()) }
             publishOwnedImages()
             announceNow()
         }
@@ -94,6 +94,9 @@ object CapeSyncClient {
 
     /** Мой id — из сессии; сервер берёт id объекта отсюда же. */
     private fun selfId(): String? = MinecraftClient.getInstance().player?.gameProfile?.id?.toString()
+
+    /** Мой ник — из сессии же: `if { username: ... }` должен считаться и для себя. */
+    private fun selfName(): String = MinecraftClient.getInstance().player?.name?.getString().orEmpty()
 
     private fun onServerMessage(bytes: ByteArray) {
         if (bytes.size < 2 || (bytes[0].toInt() and 0xFF) != SyncProtocol.VERSION) return

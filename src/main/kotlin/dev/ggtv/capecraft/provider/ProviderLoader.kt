@@ -1,6 +1,7 @@
 package dev.ggtv.capecraft.provider
 
 import dev.ggtv.capecraft.condition.Condition
+import dev.ggtv.capecraft.condition.VarCondition
 import dev.ggtv.capecraft.api.CapeApiHolder
 import dev.ggtv.capecraft.api.provider.CapeSource
 import dev.ggtv.capecraft.api.provider.CapeValues
@@ -84,7 +85,12 @@ object ProviderLoader {
         } else null
 
         val condition = (kv[ProviderNames.Keys.WHEN] as? Value.VDict)?.let { Condition.parse(it) }
+        val ifCondition = (kv[ProviderNames.Keys.IF] as? Value.VDict)?.let { VarCondition.parse(it) }
         val priority = (kv[ProviderNames.Keys.PRIORITY] as? Value.VInt)?.i?.toInt() ?: 0
+        // `self` — единственный ключ, где важно не «прочиталось ли», а «что
+        // было написано»: `self = false` это не то же самое, что ключа нет,
+        // хотя по умолчанию и выходит одно и то же.
+        val selfOnly = (kv[ProviderNames.Keys.SELF] as? Value.VBool)?.b ?: false
 
         val capeValues = if (addonSource != null) CapeValues(
             name = name,
@@ -96,7 +102,9 @@ object ProviderLoader {
             name = name,
             source = builtSource ?: Source.Url("addon://${type}/${name}"),
             condition = condition,
+            ifCondition = ifCondition,
             priority = priority,
+            selfOnly = selfOnly,
             addonSource = addonSource,
             values = capeValues,
         )

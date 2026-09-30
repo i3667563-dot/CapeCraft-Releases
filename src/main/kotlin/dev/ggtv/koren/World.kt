@@ -12,7 +12,10 @@ enum class WorldRoot(val segment: String) {
     WEATHER("weather"),
     TIME("time"),
     DIMENSION("dimension"),
-    LOCATION("location");
+    LOCATION("location"),
+    ARMOR("armor"),
+    HEALTH("health"),
+    STATE("state");
 
     companion object {
         fun bySegment(segment: String): WorldRoot? =

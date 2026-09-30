@@ -2,6 +2,8 @@ package dev.ggtv.capecraft
 
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Test
@@ -43,7 +45,7 @@ class CapeConfigFilesTest {
     @Test
     @DisplayName("существующий .kn НЕ перезаписывается — это и был баг")
     fun existingKnIsNotRecreated(@TempDir dir: Path) {
-        val mine = "capeCraft { providers [ { name = \"мой\", type = \"file\" } ] }"
+        val mine = "capeCraft { providers [ { name = \"мой\", type = \"file\", path = \"capes/мой.png\" } ] }"
         write(dir, CapeConfigFiles.KN_NAME, mine)
 
         val active = CapeConfigFiles.active(dir)
@@ -76,7 +78,7 @@ class CapeConfigFilesTest {
     @Test
     @DisplayName("legacy .crn читается и тоже не перезаписывается")
     fun legacyCrnIsNotOverwritten(@TempDir dir: Path) {
-        val legacy = "capeCraft { providers [ { name = \"старый\" } ] }"
+        val legacy = "capeCraft { providers [ { name = \"старый\", type = \"file\", path = \"capes/старый.png\" } ] }"
         write(dir, CapeConfigFiles.CRN_NAME, legacy)
 
         val active = CapeConfigFiles.active(dir)
@@ -139,8 +141,7 @@ class CapeConfigFilesTest {
     }
 
     @Test
-    fun `дефолтный шаблон парсится и даёт дефолтные настройки v2`(@TempDir dir: Path) {
-        val path = dir.resolve(CapeConfigFiles.KN_NAME)
+    fun `дефолтный шаблон парсится и даёт дефолтные настройки v2`(@TempDir dir: Path) {        val path = dir.resolve(CapeConfigFiles.KN_NAME)
         Files.writeString(path, DEFAULT_KN_TEXT)
 
         val cfg = KorenConfig.load(path)
@@ -154,5 +155,73 @@ class CapeConfigFilesTest {
         assertFalse(sync.shareLocalProviders, "раздача своих файлов по умолчанию выключена")
         assertFalse(sync.allowForeignUrls, "чужие адреса по умолчанию выключены")
         assertTrue(sync.backoff)
+    }
+
+    // ─── CAPECRAFT_CONFIG: откат вместо отказа ───────────────────────────────
+
+    @Test
+    @DisplayName("файл из CAPECRAFT_CONFIG читается, дефолт в папке config не создаётся")
+    fun envFileWins(@TempDir dir: Path) {
+        val alt = write(dir, "alt.kn", "capeCraft { }")
+
+        val r = CapeConfigFiles.resolve(CapeConfigEnv.ConfigFile(alt.toString(), null), dir)
+        assertEquals(alt, r.file)
+        assertFalse(r.createDefault, "пользователь задал свой источник — лезть в config незачем")
+        assertNull(r.warning)
+        assertTrue(r.fromEnv)
+    }
+
+    @Test
+    @DisplayName("недоступный CAPECRAFT_CONFIG НЕ выключает мод, а откатывается на обычный конфиг")
+    fun brokenEnvFileFallsBackToOrdinaryConfig(@TempDir dir: Path) {
+        // Регресс на UX: переменная задана, файла нет → раньше reload() писал
+        // строку в лог и выходил, оставляя ноль провайдеров. Плащей нет, в чате
+        // ничего, разгадать можно только по логу.
+        val mine = "capeCraft { providers [ { name = \"мой\", type = \"file\", path = \"capes/мой.png\" } ] }"
+        write(dir, CapeConfigFiles.KN_NAME, mine)
+        val bad = CapeConfigEnv.ConfigFile(dir.resolve("нет-такого.kn").toString(), "нет-такого.kn: файл не найден")
+
+        val r = CapeConfigFiles.resolve(bad, dir)
+        assertEquals(CapeConfigFiles.KN_NAME, r.file.fileName.toString(), "читаем обычный конфиг")
+        assertFalse(r.createDefault, "обычный конфиг существует — создавать дефолт нельзя")
+        assertFalse(r.fromEnv, "файл из окружения не прочитан")
+        assertNotNull(r.warning, "откат обязан быть объяснён, иначе он неотличим от работы по умолчанию")
+        assertTrue(r.warning!!.contains("нет-такого.kn"), "в предупреждении должен быть сам путь: ${r.warning}")
+        // Главное: провайдеры из обычного конфига не теряются.
+        assertEquals(1, ProviderLoader.load(KorenConfig.load(r.file)).size)
+    }
+
+    @Test
+    @DisplayName("откат с битым CAPECRAFT_CONFIG всё равно создаёт дефолт, если файлов нет")
+    fun brokenEnvFileCreatesDefaultWhenNothingExists(@TempDir dir: Path) {
+        val bad = CapeConfigEnv.ConfigFile("/нет/такого.kn", "нечитаемый путь")
+
+        val r = CapeConfigFiles.resolve(bad, dir)
+        assertEquals(CapeConfigFiles.KN_NAME, r.file.fileName.toString())
+        assertTrue(r.createDefault, "ни одного конфига нет — дефолт должен появиться, иначе мод без конфига")
+        assertNotNull(r.warning)
+    }
+
+    @Test
+    @DisplayName("откат предпочитает legacy .crn, если .kn нет")
+    fun brokenEnvFileFallsBackToLegacy(@TempDir dir: Path) {
+        val legacy = "capeCraft { providers [ { name = \"старый\", type = \"file\", path = \"capes/старый.png\" } ] }"
+        write(dir, CapeConfigFiles.CRN_NAME, legacy)
+        val bad = CapeConfigEnv.ConfigFile("/нет.kn", "файл не найден")
+
+        val r = CapeConfigFiles.resolve(bad, dir)
+        assertEquals(CapeConfigFiles.CRN_NAME, r.file.fileName.toString())
+        assertFalse(r.createDefault)
+        assertEquals(1, ProviderLoader.load(KorenConfig.load(r.file)).size)
+    }
+
+    @Test
+    @DisplayName("без переменной окружения поведение прежнее: .kn, дефолт при отсутствии")
+    fun noEnvKeepsOldBehaviour(@TempDir dir: Path) {
+        val r = CapeConfigFiles.resolve(null, dir)
+        assertEquals(CapeConfigFiles.KN_NAME, r.file.fileName.toString())
+        assertTrue(r.createDefault)
+        assertNull(r.warning)
+        assertFalse(r.fromEnv)
     }
 }

@@ -92,7 +92,7 @@ class Chunk(
 // ─────────────────────────────── кодек ───────────────────────────────
 
 /**
- * Бинарный кодек CapeCraft Sync v2. Без Minecraft API — чистые байты,
+ * Бинарный кодек CapeCraft Sync v3. Без Minecraft API — чистые байты,
  * поэтому тестируется без запуска игры.
  *
  * ## Модель
@@ -123,7 +123,7 @@ class Chunk(
  *
  * Общий заголовок (оба направления):
  * ```
- * u8  версия протокола (2)
+ * u8  версия протокола (3)
  * u8  тип сообщения
  * ```
  * Сообщение C2S:
@@ -154,14 +154,25 @@ class Chunk(
  * str  имя
  * str  основной   (у file — пусто: путь наружу не отдаётся)
  * str  extract
- * u8   есть условие; [условие] — u16 предикатов, предикат × K
+ * u8   есть условие when; [условие] — u16 предикатов, предикат × K
+ * u8   есть условие if;   [условие-if] — u16 предикатов, предикат-if × L
  * u8   есть хэш;   [32 bytes]
  * ```
- * Предикат:
+ * Предикат `when`:
  * ```
  * str поле, u8 корень, u8 операция, u8 тип ожидаемого
  *   (0=str: str значение; 1=num: f64; 2=range: f64, f64)
  * ```
+ * Предикат `if` — то же, но вместо «поле + корень» одна строка с именем
+ * переменной (точка в имени значащая, `$FOO` едет как есть):
+ * ```
+ * str имя переменной, u8 операция, u8 тип ожидаемого
+ *   (0=str: str значение; 1=num: f64; 2=range: f64, f64)
+ * ```
+ * У `if` нет байта корня намеренно: набор имён переменных открытый (аддоны
+ * приезжают и уезжают вместе с установкой), и перечислять его на проводе
+ * означало бы, что клиент без чужого аддона не сможет отличить «переменной
+ * нет» от «условие нарушено».
  *
  * Целые — big-endian (`DataOutputStream`), длины строк — в байтах UTF-8.
  *
@@ -441,6 +452,12 @@ object SyncCodec {
         val cond = p.condition
         writeByte(if (cond == null) 0 else 1)
         if (cond != null) writeCondition(cond)
+        // v3: условие `if`. Пишется строго между `when` и хэшем — порядок
+        // полей в проводе и есть формат, а «optional в конце» здесь означало
+        // бы, что старый клиент примет v3-пакет и молча сдвинет разбор.
+        val condIf = p.ifCondition
+        writeByte(if (condIf == null) 0 else 1)
+        if (condIf != null) writeIfCondition(condIf)
         writeByte(if (p.imageHash == null) 0 else 1)
         if (p.imageHash != null) write(p.imageHash.toBytes())
     }
@@ -453,8 +470,20 @@ object SyncCodec {
         val primary = readString(SyncProtocol.MAX_STRING_BYTES, "параметр провайдера")
         val extract = readString(SyncProtocol.MAX_STRING_BYTES, "extract провайдера")
         val condition = if (readUnsignedByte() != 0) readCondition() else null
+        val ifCondition = if (readUnsignedByte() != 0) readIfCondition() else null
         val hash = if (readUnsignedByte() != 0) readHash() else null
-        return ActiveCape(name, kind, primary, extract, priority, condition, hash)
+        // Именованными: у ActiveCape два соседних nullable-поля, и позиционная
+        // передача молча отдала бы ifCondition-у хэш картинки.
+        return ActiveCape(
+            name = name,
+            kind = kind,
+            primary = primary,
+            extract = extract,
+            priority = priority,
+            condition = condition,
+            ifCondition = ifCondition,
+            imageHash = hash,
+        )
     }
 
     private fun DataOutputStream.writeCondition(c: WireCondition) {
@@ -518,6 +547,67 @@ object SyncCodec {
             out += WirePredicate(root, field, op, expected)
         }
         return WireCondition(out)
+    }
+
+    private fun DataOutputStream.writeIfCondition(c: WireIfCondition) {
+        // Лимит на записи обязателен, как и в writeCondition: свой же клиент не
+        // должен уметь собрать announce, который сам же не сумеет прочитать.
+        if (c.predicates.size > SyncProtocol.MAX_PREDICATES) {
+            throw SyncProtocolException(
+                "${c.predicates.size} предикатов в if, максимум ${SyncProtocol.MAX_PREDICATES}",
+            )
+        }
+        writeShort(c.predicates.size)
+        for (p in c.predicates) {
+            // Имя переменной целиком, точкой в том числе: `$FOO` и
+            // аддонное `myAddon.level` — одна строка, а не путь по корням.
+            writeString(p.name, SyncProtocol.MAX_FIELD_BYTES, "имя переменной в if")
+            writeByte(p.op.tag)
+            when (val e = p.expected) {
+                is WireExpected.Str -> {
+                    writeByte(TAG_STR)
+                    writeString(e.s, SyncProtocol.MAX_EXPECTED_STR_BYTES, "значение условия if")
+                }
+
+                is WireExpected.Num -> {
+                    writeByte(TAG_NUM)
+                    writeDouble(e.d)
+                }
+
+                is WireExpected.Range -> {
+                    writeByte(TAG_RANGE)
+                    writeDouble(e.from)
+                    writeDouble(e.to)
+                }
+            }
+        }
+    }
+
+    private fun DataInputStream.readIfCondition(): WireIfCondition {
+        val n = readUnsignedShort()
+        if (n > SyncProtocol.MAX_PREDICATES) {
+            throw SyncProtocolException("$n предикатов в if, максимум ${SyncProtocol.MAX_PREDICATES}")
+        }
+        val out = ArrayList<WireVarPredicate>(minOf(n, 8))
+        repeat(n) {
+            val name = readString(SyncProtocol.MAX_FIELD_BYTES, "имя переменной в if")
+            val op = WireOp.byTag(readUnsignedByte())
+                ?: throw SyncProtocolException("неизвестная операция в if")
+            val expected = when (val tag = readUnsignedByte()) {
+                TAG_STR -> WireExpected.Str(readString(SyncProtocol.MAX_EXPECTED_STR_BYTES, "значение условия if"))
+                TAG_NUM -> WireExpected.Num(readDouble())
+                TAG_RANGE -> {
+                    val from = readDouble()
+                    val to = readDouble()
+                    if (from > to) throw SyncProtocolException("диапазон $from..$to в if перевёрнут")
+                    WireExpected.Range(from, to)
+                }
+
+                else -> throw SyncProtocolException("неизвестный тип ожидаемого значения в if: $tag")
+            }
+            out += WireVarPredicate(name, op, expected)
+        }
+        return WireIfCondition(out)
     }
 
     // ── мелочи разбора ──

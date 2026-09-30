@@ -54,5 +54,10 @@ jobs:
           body_path: release-notes/lsp/${{ steps.meta.outputs.version }}.md
           files: artifacts/capecraft-lsp.jar
           draft: false
-          # Тег с дефисом (lsp-v0.1-beta) — пре-релиз; без дефиса — стабильный.
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          # Дефис в ВЕРСИИ (`0.1-beta`) — пре-релиз; без него — стабильный.
+          # Именно в версии, а не в теге: любой тег начинается с `lsp-v`, то
+          # есть с дефиса, и проверка `github.ref_name` считала бы
+          # пре-релизом ещё и `lsp-v1.0.0`. Сейчас это спасает поведение
+          # самого action, но полагаться на него — значит одна смена версии
+          # action'а тихо помечает стабильный релиз как пре-релизный.
+          prerelease: ${{ contains(steps.meta.outputs.version, '-') }}

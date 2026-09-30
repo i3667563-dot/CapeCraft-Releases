@@ -1,5 +1,6 @@
 package dev.ggtv.capecraft.ide
 
+import dev.ggtv.kjen.EnvName
 import dev.ggtv.kjen.Span
 import dev.ggtv.kjen.TextRange
 
@@ -49,7 +50,7 @@ sealed interface StrPart {
      *
      * @property name имя переменной без доллара и фигурных скобок
      * @property braced была ли форма в фигурных скобках
-     * @property hasDefault был ли дефолт после `:-` или `-`
+     * @property hasDefault был ли дефолт после `:-`
      */
     data class Substitution(
         override val range: TextRange,
@@ -166,6 +167,13 @@ object CrenLexer {
 
                     c == '-' && i + 1 < len && text[i + 1] in '0'..'9' -> lexNumber()
                     c in '0'..'9' -> lexNumber()
+                    // `$NAME` в позиции ключа — ссылка на переменную
+                    // окружения, и разбирает её владелец ключа (например
+                    // `if`), а не лексер. Поэтому это слово, а не мусор.
+                    // Только когда за `$` идёт имя: одинокий `$` и `${...}`
+                    // в значениях остаются как были — их подстановку
+                    // показывают отдельно.
+                    c == '$' && i + 1 < len && EnvName.isStart(text[i + 1]) -> lexWord()
                     isWordStart(c) -> lexWord()
                     else -> {
                         i += 1
@@ -347,11 +355,11 @@ object CrenLexer {
                         if (k < to && text[k] == '}') k += 1
                     }
 
-                    next != null && (next.isLetterOrDigit() || next == '_') -> {
+                    next != null && EnvName.isStart(next) -> {
                         braced = false
                         k += 1
                         val nameFrom = k
-                        while (k < to && (text[k].isLetterOrDigit() || text[k] == '_')) k += 1
+                        while (k < to && EnvName.isContinue(text[k])) k += 1
                         raw = text.substring(nameFrom, k)
                     }
 
@@ -362,11 +370,12 @@ object CrenLexer {
                         continue
                     }
                 }
+                val (name, default) = EnvName.splitDefault(raw)
                 parts += StrPart.Substitution(
                     range = TextRange(posOf(subFrom), posOf(k)),
-                    name = raw.substringBefore(':').substringBefore('-').trim(),
+                    name = name.trim(),
                     braced = braced,
-                    hasDefault = ':' in raw || '-' in raw,
+                    hasDefault = default != null,
                 )
                 litFrom = k
             }

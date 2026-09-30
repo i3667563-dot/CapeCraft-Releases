@@ -223,6 +223,26 @@ class KorenResolverTest {
     }
 
     @Test
+    fun `ambiguous error names where the duplicates are`() {
+        // Редактор обязан говорить ровно то же, что игра: то же сообщение,
+        // те же строки. Иначе пользователь чинит одно, а ругается другое.
+        val e = assertFailsWith<CrenError.Ambiguous> {
+            cfg("""
+                capeCraft { a = 1 }
+                b = 2
+                capeCraft { a = 3 }
+            """).get("capeCraft.a")
+        }
+        assertEquals(listOf(1, 3), e.locations.map { it.line })
+        assertEquals(
+            "неоднозначная ссылка: «capeCraft» встречается 2 раза (строки 1 и 3). " +
+                "Укажите номер: «capeCraft1» или «capeCraft2». " +
+                "Либо переименуйте один из них.",
+            e.message,
+        )
+    }
+
+    @Test
     fun `unique key plain and numbered both work`() {
         val c = cfg("server { host = \"x\" }")
         assertEquals("x", c.getStr("server.host"))

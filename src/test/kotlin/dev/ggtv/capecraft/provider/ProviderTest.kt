@@ -1,7 +1,10 @@
 package dev.ggtv.capecraft.provider
 
+import dev.ggtv.capecraft.condition.Expected
+import dev.ggtv.capecraft.condition.Op
 import dev.ggtv.capecraft.schema.Placeholders
 import dev.ggtv.koren.KorenConfig
+import dev.ggtv.koren.WorldRoot
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -226,5 +229,148 @@ class ProviderLoaderTest {
         val p = ProviderLoader.load(cfg).single()
         assertEquals(null, p.condition)
         assertEquals(0, p.priority)
+    }
+
+    /**
+     * Реальный конфиг BedWarsV11 должен переживать проверку значений.
+     *
+     * Написано копией файла, а не ссылкой на него: тест обязан падать в репозитории
+     * и на чужой машине, где инстанса нет. `$SECRET` заменён на обычный URL —
+     * unset-переменная отвергается токенизатором ещё до разбора условий, и
+     * проверяла бы не то. Смысл — в том, что условия здесь
+     * настоящие, а не выдуманные под проверку: `dimension.type` берёт значение из
+     * закрытого списка, а `location.y = "<= -20"` — числовое поле с оператором.
+     * Обе формы проходят через разные ветки проверки, и потеря любой из них
+     * выглядела бы как «мод сломался у пользователя на живом конфиге».
+     */
+    @Test
+    fun `боевой конфиг BedWarsV11 грузится без ошибок`() {
+        val kn = """
+            |capeCraft {
+            |    providers [
+            |        { name = "secret", type = "url", url = "https://secret.invalid/cape.png", priority = 9 },
+            |        { name = "animated", type = "json", url = "https://skins.ggshnikk.online/api/animated/v1/skins/{username}/cape.json", extract = "${'$'}.cape" },
+            |        { name = "hero", type = "url", url = "https://skins.ggshnikk.online/api/v3/skin-file/72.png",
+            |          when = { dimension.type = "nether" }, priority = 11 },
+            |        { name = "warden", type = "url", url = "https://skins.ggshnikk.online/api/v3/skin-file/73.png",
+            |          when = { location.y = "<= -20" }, priority = 10 },
+            |    ]
+            |}
+        """.trimMargin()
+        val providers = ProviderLoader.load(KorenConfig.fromString(kn))
+        assertEquals(4, providers.size)
+
+        val hero = providers.first { it.name == "hero" }
+        val heroCond = hero.condition!!.predicates.single()
+        assertEquals(WorldRoot.DIMENSION, heroCond.root)
+        assertEquals("type", heroCond.field)
+        assertEquals(Expected.Str("nether"), heroCond.expected)
+
+        val warden = providers.first { it.name == "warden" }
+        val wardenCond = warden.condition!!.predicates.single()
+        assertEquals(WorldRoot.LOCATION, wardenCond.root)
+        assertEquals("y", wardenCond.field)
+        // Отрицательный порог в глубине: «<= -20» — это Le(-20.0), а не строка.
+        assertEquals(Op.Le, wardenCond.op)
+        assertEquals(Expected.Num(-20.0), wardenCond.expected)
+    }
+
+    @Test
+    fun `незаданная переменная не роняет конфиг целиком`() {
+        // Требование: `$HOST` без переменной окружения — это пустой адрес, а не
+        // падение. Раньше один такой провайдер ронял весь файл, и игрок оставался
+        // без плащей вообще, хотя три других адреса были в порядке.
+        val unset = mutableListOf<String>()
+        val cfg = KorenConfig.fromString(
+            """
+            capeCraft {
+                providers [
+                    { name = "ok", type = "url", url = "https://a.example/c.png" },
+                    { name = "broken", type = "url", url = "${'$'}NO_SUCH_HOST/c.png" },
+                    { name = "ok2", type = "url", url = "https://b.example/c.png" },
+                ]
+            }
+            """.trimIndent(),
+            onUnset = { unset += it },
+        )
+
+        val providers = ProviderLoader.load(cfg)
+        assertEquals(listOf("ok", "broken", "ok2"), providers.map { it.name })
+        assertEquals(listOf("NO_SUCH_HOST"), unset)
+    }
+
+    @Test
+    fun `пустой дефолт не считается незаданной переменной`() {
+        // `${NAME:-}` — это «адреса нет», и в onUnset имя попасть не должно:
+        // иначе в лог сыпалось бы предупреждение о том, чего человек не
+        // забывал, а сам так и просил.
+        val unset = mutableListOf<String>()
+        val cfg = KorenConfig.fromString(
+            """
+            capeCraft {
+                providers [
+                    { name = "empty", type = "url", url = "${'$'}{NO_SUCH_HOST:-}/c.png" },
+                ]
+            }
+            """.trimIndent(),
+            onUnset = { unset += it },
+        )
+
+        val providers = ProviderLoader.load(cfg)
+        assertEquals(listOf("empty"), providers.map { it.name })
+        assertEquals(Source.Url("/c.png"), providers.single().source)
+        assertEquals(emptyList<String>(), unset)
+    }
+
+    @Test
+    fun `незаданная переменная без дефолта даёт пустой адрес и попадает в onUnset`() {
+        val unset = mutableListOf<String>()
+        val cfg = KorenConfig.fromString(
+            """
+            capeCraft {
+                providers [
+                    { name = "broken", type = "url", url = "${'$'}NO_SUCH_HOST/c.png" },
+                ]
+            }
+            """.trimIndent(),
+            onUnset = { unset += it },
+        )
+
+        val providers = ProviderLoader.load(cfg)
+        assertEquals(listOf("broken"), providers.map { it.name })
+        assertEquals(listOf("NO_SUCH_HOST"), unset)
+    }
+
+    @Test
+    fun `имя с дефисом и подчёркиванием доезжает до адреса`() {
+        val cfg = KorenConfig.fromStringWithEnv(
+            """
+            capeCraft {
+                providers [
+                    { name = "d", type = "url", url = "https://${'$'}{BASE-URL}/c.png" },
+                    { name = "u", type = "url", url = "https://${'$'}BASE_URL/c.png" },
+                    { name = "t", type = "url", url = "${'$'}BASE/api/cape.png" },
+                ]
+            }
+            """.trimIndent(),
+            mapOf("BASE-URL" to "d.example", "BASE_URL" to "u.example", "BASE" to "localhost:8080"),
+        )
+
+        val providers = ProviderLoader.load(cfg)
+        assertEquals(Source.Url("https://d.example/c.png"), providers[0].source)
+        assertEquals(Source.Url("https://u.example/c.png"), providers[1].source)
+        assertEquals(Source.Url("localhost:8080/api/cape.png"), providers[2].source)
+    }
+
+    @Test
+    fun `опечатка в значении роняет загрузку конфига`() {
+        // Раньше такой провайдер грузился и просто не срабатывал: ошибки не
+        // было нигде, плащ не появлялся, и причину нельзя было назвать.
+        val cfg = crn("""[{ name = "x", type = "url", url = "https://a", when: { armor.chest: "plate" } }]""")
+        val e = assertThrows(IllegalArgumentException::class.java) { ProviderLoader.load(cfg) }
+        assertTrue(
+            e.message!!.contains("plate"),
+            "сообщение должно называть ошибочное значение: ${e.message}",
+        )
     }
 }

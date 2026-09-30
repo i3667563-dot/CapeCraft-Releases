@@ -188,6 +188,52 @@ class CrenAnalyzerTest {
     }
 
     @Test
+    fun `короткая запись корня без поля по умолчанию это ошибка`() {
+        // `health` и `state` — корни без поля по умолчанию: `health: 20` игра
+        // отвергает при загрузке («нужно указать поле»), поэтому молчать здесь
+        // нельзя — человек увидит падение уже в игре, без редактора рядом.
+        val d = diags(
+            """capeCraft { providers [ { name = "a", type = "url", when = { health: 20 } } ] }""",
+        )
+        val err = d.single { it.code == CrenAnalyzer.CODE_WHEN }
+        assertEquals(CrenSeverity.ERROR, err.severity, err.message)
+        assertTrue(err.message.contains("current"), err.message)
+        assertTrue(err.message.contains("max"), err.message)
+        // Правка должна давать готовый рабочий ключ, а не имя поля.
+        assertTrue(
+            err.fixes.any { it.newText == "health.current" },
+            "ожидалась правка в health.current: ${err.fixes.map { it.newText }}",
+        )
+    }
+
+    @Test
+    fun `короткая запись state без поля это ошибка`() {
+        val d = diags(
+            """capeCraft { providers [ { name = "a", type = "url", when = { state: "standing" } } ] }""",
+        )
+        val err = d.single { it.code == CrenAnalyzer.CODE_WHEN }
+        assertEquals(CrenSeverity.ERROR, err.severity, err.message)
+        assertTrue(err.message.contains("pose"), err.message)
+        assertTrue(
+            err.fixes.any { it.newText == "state.pose" },
+            "ожидалась правка в state.pose: ${err.fixes.map { it.newText }}",
+        )
+    }
+
+    @Test
+    fun `у корня с полем по умолчанию короткая запись не ругается`() {
+        // Обратная сторона предыдущих двух: `armor: "diamond"` — это `chest`,
+        // и ошибкой быть не может.
+        val d = diags(
+            """capeCraft { providers [ { name = "a", type = "url", when = { armor: "diamond" } } ] }""",
+        )
+        assertTrue(
+            d.none { it.severity == CrenSeverity.ERROR },
+            "armor без точки валиден: ${d.map { it.message }}",
+        )
+    }
+
+    @Test
     fun `у location нет короткой записи и это не ругается`() {
         // У `location` поля по умолчанию нет, писать надо `location.y`. Если
         // бы мы проверяли синонимы вслепую, то ругались бы на правильный ключ.
@@ -201,6 +247,130 @@ class CrenAnalyzerTest {
     }
 
     // --------------------------------------------------------- значения и типы
+
+    // Длинная форма `поле: значение` раньше проверялась только подсказкой, и
+    // опечатка в значении выглядела рабочей: в редакторе чисто, в игре провайдер
+    // не срабатывает. Теперь мод падает на таком значении, и подсветка обязана
+    // быть ошибкой, а не hint — иначе редактор врал бы про работоспособность.
+
+    @Test
+    fun `опечатка в значении длинной формы это ошибка`() {
+        val d = diags(
+            """capeCraft { providers [ { name = "a", type = "url", when = { armor.chest: "plate" } } ] }""",
+        )
+        val err = d.single { it.code == CrenAnalyzer.CODE_WHEN && it.severity == CrenSeverity.ERROR }
+        assertEquals(CrenSeverity.ERROR, err.severity, err.message)
+        assertTrue(err.message.contains("plate"), err.message)
+        assertTrue(err.message.contains("netherite"), "ожидался список тиров: ${err.message}")
+        assertTrue(
+            err.fixes.any { it.newText == "diamond" },
+            "ожидались правки со значениями: ${err.fixes.map { it.newText }}",
+        )
+    }
+
+    @Test
+    fun `опечатка в позе и осадках это ошибка`() {
+        for (key in listOf("state.pose", "biome.precipitation", "time.period", "dimension.type")) {
+            val d = diags(
+                """capeCraft { providers [ { name = "a", type = "url", when = { $key: "stаnding" } } ] }""",
+            )
+            val err = d.singleOrNull { it.code == CrenAnalyzer.CODE_WHEN && it.severity == CrenSeverity.ERROR }
+                ?: error("ключ $key не дал диагностику вовсе")
+            assertEquals(CrenSeverity.ERROR, err.severity, "ключ $key: ${err.message}")
+        }
+    }
+
+    @Test
+    fun `не-логическое значение булева поля это ошибка`() {
+        val d = diags(
+            """capeCraft { providers [ { name = "a", type = "url", when = { state.inWater: "yes" } } ] }""",
+        )
+        val err = d.single { it.code == CrenAnalyzer.CODE_WHEN && it.severity == CrenSeverity.ERROR }
+        assertEquals(CrenSeverity.ERROR, err.severity, err.message)
+        assertTrue(err.message.contains("true"), err.message)
+    }
+
+    @Test
+    fun `unknown это не ошибка`() {
+        // Мир отдаёт «unknown» вместо непрочитанного: для брони это способ
+        // поймать нестандартный слот, и ругаться на него нельзя.
+        for (key in listOf("armor.chest", "state.pose", "weather.condition")) {
+            val d = diags(
+                """capeCraft { providers [ { name = "a", type = "url", when = { $key: "unknown" } } ] }""",
+            )
+            assertTrue(
+                d.none { it.code == CrenAnalyzer.CODE_WHEN && it.severity == CrenSeverity.ERROR },
+                "ключ $key: unknown должен быть законным: ${d.map { it.message }}",
+            )
+        }
+    }
+
+    @Test
+    fun `отрицание законного значения не ругается`() {
+        val d = diags(
+            """capeCraft { providers [ { name = "a", type = "url", when = { armor.chest: "!diamond" } } ] }""",
+        )
+        assertTrue(
+            d.none { it.severity == CrenSeverity.ERROR },
+            "«!diamond» валиден: ${d.map { it.message }}",
+        )
+    }
+
+    @Test
+    fun `отрицание опечатки это ошибка`() {
+        val d = diags(
+            """capeCraft { providers [ { name = "a", type = "url", when = { armor.chest: "!plate" } } ] }""",
+        )
+        assertEquals(
+            CrenSeverity.ERROR,
+            d.single { it.code == CrenAnalyzer.CODE_WHEN && it.severity == CrenSeverity.ERROR }.severity,
+        )
+    }
+
+    @Test
+    fun `свободные поля не ограничены списком`() {
+        // `biome.id` приходит из реестра модов — проверять его не на что.
+        for (key in listOf("biome.id", "dimension.id")) {
+            val d = diags(
+                """capeCraft { providers [ { name = "a", type = "url", when = { $key: "some_mod:x" } } ] }""",
+            )
+            assertTrue(
+                d.none { it.severity == CrenSeverity.ERROR },
+                "ключ $key свободен: ${d.map { it.message }}",
+            )
+        }
+    }
+
+    @Test
+    fun `числовое поле со строкой это ошибка`() {
+        val d = diags(
+            """capeCraft { providers [ { name = "a", type = "url", when = { health.current: "низко" } } ] }""",
+        )
+        val err = d.single { it.code == CrenAnalyzer.CODE_WHEN && it.severity == CrenSeverity.ERROR }
+        assertEquals(CrenSeverity.ERROR, err.severity, err.message)
+    }
+
+    @Test
+    fun `числовые операторы на числовом поле не ругаются`() {
+        for (text in listOf("20", ">=20", "<10", "5..15")) {
+            val d = diags(
+                """capeCraft { providers [ { name = "a", type = "url", when = { health.current: "$text" } } ] }""",
+            )
+            assertTrue(
+                d.none { it.severity == CrenSeverity.ERROR },
+                "health.current: \"$text\" валиден: ${d.map { it.message }}",
+            )
+        }
+    }
+
+    @Test
+    fun `оператор сравнения на строковом поле это ошибка`() {
+        val d = diags(
+            """capeCraft { providers [ { name = "a", type = "url", when = { armor.chest: ">diamond" } } ] }""",
+        )
+        val err = d.single { it.code == CrenAnalyzer.CODE_WHEN && it.severity == CrenSeverity.ERROR }
+        assertEquals(CrenSeverity.ERROR, err.severity, err.message)
+    }
 
     @Test
     fun `значение не из списка`() {
@@ -294,6 +464,127 @@ class CrenAnalyzerTest {
 
     // ------------------------------------------------------------- подсказки
 
+    // --------------------------------------------------------------------- if
+
+    @Test
+    fun `условие if из всех форм не даёт ошибок`() {
+        val text = """
+            capeCraft {
+                providers [
+                    { name = "me", type = "url", url = "https://e/a.png",
+                      if = { username: "Eonixx" } },
+                    { name = "tier", type = "url", url = "https://e/b.png",
+                      if = { ${'$'}TIER: "gold" } },
+                    { name = "port", type = "url", url = "https://e/c.png",
+                      if = { ${'$'}PORT: ">8000", ${'$'}HOST: "localhost" } },
+                    { name = "add", type = "url", url = "https://e/d.png",
+                      if = { myAddon.level: ">=10" } },
+                    { name = "both", type = "url", url = "https://e/e.png",
+                      when = { weather: "rain" }, if = { username: "Eonixx" } }
+                ]
+            }
+        """.trimIndent()
+        val errors = diags(text).filter { it.severity == CrenSeverity.ERROR }
+        assertTrue(errors.isEmpty(), "на if не должно быть ошибок: ${errors.map { it.message }}")
+    }
+
+    @Test
+    fun `корень мира в if ругается и говорит чем заменить`() {
+        // Самая частая ошибка: рабочий `when` скопирован в `if`. Молча такое
+        // имя не переменная, и провайдер тихо ушёл бы в fallback.
+        val text = """capeCraft { providers [ { name = "a", type = "url", url = "u", if = { weather: "rain" } } ] }"""
+        val d = diags(text).filter { it.code == CrenAnalyzer.CODE_IF }
+        assertEquals(1, d.size, "ожидалась одна диагностика bad-if, а пришло: ${diags(text).map { it.code to it.message }}")
+        assertTrue(d.single().message.contains("корень мира"), "сообщение должно называть причину: ${d.single().message}")
+    }
+
+    @Test
+    fun `корень мира с полем в if тоже ругается`() {
+        val text = """capeCraft { providers [ { name = "a", type = "url", url = "u", if = { location.y: ">10" } } ] }"""
+        val d = diags(text).filter { it.code == CrenAnalyzer.CODE_IF }
+        assertEquals(1, d.size, "корень распознаётся по первому сегменту: ${diags(text).map { it.message }}")
+    }
+
+    @Test
+    fun `имя с точкой после $ в if ругается как игра`() {
+        // Игра отвергает такое имя при загрузке, и молчать тут нельзя: файл
+        // дойдёт до запуска и упадёт уже без редактора рядом.
+        val text = """capeCraft { providers [ { name = "a", type = "url", url = "u", if = { ${'$'}my.var: "x" } } ] }"""
+        val d = diags(text).filter { it.code == CrenAnalyzer.CODE_IF }
+        assertEquals(1, d.size, "ожидалась одна диагностика bad-if: ${diags(text).map { it.code to it.message }}")
+        assertTrue(d.single().message.contains("не имя переменной окружения"), "${d.single().message}")
+    }
+
+    @Test
+    fun `на живое имя переменной окружения в if не ругаемся`() {
+        val text = """capeCraft { providers [ { name = "a", type = "url", url = "u", if = { ${'$'}TIER: "gold" } } ] }"""
+        val d = diags(text).filter { it.severity == CrenSeverity.ERROR }
+        assertTrue(d.isEmpty(), "${'$'}TIER — законное имя: ${d.map { it.message }}")
+    }
+
+    @Test
+    fun `в if не ругаемся на имена которые заранее неизвестны`() {
+        // Аддонных плейсхолдеров и произвольных env нет в списке модных имён,
+        // и ругаться на них как на опечатки нельзя: подсветка сломала бы
+        // конфиг с аддоном, а человек закрыл бы её и не вернулся.
+        val text = """capeCraft { providers [ { name = "a", type = "url", url = "u", if = { my.deeply.nested: "1" } } ] }"""
+        val errors = diags(text).filter { it.severity == CrenSeverity.ERROR }
+        assertTrue(errors.isEmpty(), "чужие имена в if — не ошибка: ${errors.map { it.message }}")
+    }
+
+    @Test
+    fun `в if не путаем переменную с корнем того же слова`() {
+        // `root` — это {root} в пути к файлу, настоящая переменная, а не
+        // «корень мира». Отвергать её было бы ложной ошибкой.
+        val text = """capeCraft { providers [ { name = "a", type = "file", path = "{root}/c.png", if = { root: "/tmp" } } ] }"""
+        val errors = diags(text).filter { it.severity == CrenSeverity.ERROR }
+        assertTrue(errors.isEmpty(), "root в if — переменная, а не корень мира: ${errors.map { it.message }}")
+    }
+
+    @Test
+    fun `подсказки внутри if предлагают имена переменных`() {
+        val text = """capeCraft { providers [ { name = "a", type = "url", url = "u", if = {| } } ] }"""
+        val labels = CrenAnalyzer.complete(CrenDocument(text), text.indexOf('|')).map { it.label }
+        assertTrue(
+            labels.containsAll(listOf("username", "uuid", "root")),
+            "подсказки в if: $labels",
+        )
+    }
+
+    @Test
+    fun `подсказки в if не предлагают непечатаемое имя`() {
+        // `$*` в списке известных имён нужен для текста ошибки, но вставить
+        // его в конфиг нельзя — подсказка обязана состоять из печатных имён.
+        val text = """capeCraft { providers [ { name = "a", type = "url", url = "u", if = {| } } ] }"""
+        val labels = CrenAnalyzer.complete(CrenDocument(text), text.indexOf('|')).map { it.label }
+        assertFalse(labels.any { it.contains("*") }, "в подсказках не должно быть масок: $labels")
+    }
+
+    @Test
+    fun `подсказки в if не повторяют уже написанные имена`() {
+        val text = """capeCraft { providers [ { name = "a", type = "url", url = "u", if = { username: "x", | } } ] }"""
+        val labels = CrenAnalyzer.complete(CrenDocument(text), text.indexOf('|')).map { it.label }
+        assertFalse(labels.contains("username"), "уже написанное имя нельзя предлагать: $labels")
+    }
+
+    @Test
+    fun `подсказки в providers предлагают ключ if`() {
+        val text = """capeCraft { providers [ {| } ] }"""
+        val labels = CrenAnalyzer.complete(CrenDocument(text), text.indexOf('|')).map { it.label }
+        assertTrue(labels.contains("if"), "if должен предлагаться среди ключей провайдера: $labels")
+        assertTrue(labels.contains("when"), "when должен остаться среди ключей: $labels")
+    }
+
+    @Test
+    fun `if без разделителя ругается как и when`() {
+        val text = """capeCraft { providers [ { name = "a", type = "url", url = "u", if { username: "x" } } ] }"""
+        val d = diags(text).filter { it.severity == CrenSeverity.ERROR }
+        assertTrue(
+            d.any { it.message.contains("разделител") || it.message.contains("«:»") || it.message.contains("«=") },
+            "блок-форма `if { }` без знака не разбирается: ${d.map { it.message }}",
+        )
+    }
+
     @Test
     fun `подсказки внутри providers дают ключи провайдера`() {
         val text = """capeCraft { providers [ {| } ] }"""
@@ -375,6 +666,49 @@ class CrenAnalyzerTest {
         val items = CrenAnalyzer.complete(CrenDocument(text), text.indexOf('|'))
         val labels = items.map { it.label }
         assertTrue(labels.containsAll(listOf("biome", "weather", "time")), "подсказки: $labels")
+    }
+
+    @Test
+    fun `подсказки в when дают новые корни брони здоровья и состояния`() {
+        // Редактор берёт корни из WhenSchema, но «новые корни есть» проверяется
+        // отдельно от их парсинга: забытый в VALUES корень выглядит в
+        // подсказке как рабочий, а в конфиге падает.
+        val text = "capeCraft { providers [ { name = \"a\", type = \"url\", when = { | } } ] }"
+        val labels = CrenAnalyzer.complete(CrenDocument(text), text.indexOf('|')).map { it.label }
+        assertTrue(
+            labels.containsAll(listOf("armor", "health", "state")),
+            "в подсказках нет новых корней: $labels",
+        )
+    }
+
+    @Test
+    fun `подсказки значения брони дают тиры`() {
+        val text =
+            "capeCraft { providers [ { name = \"a\", type = \"url\", when = { armor.chest: | } } ] }"
+        val labels = CrenAnalyzer.complete(CrenDocument(text), text.indexOf('|')).map { it.label }
+        assertTrue(
+            labels.containsAll(listOf("none", "leather", "diamond", "turtle")),
+            "подсказки тиров брони: $labels",
+        )
+    }
+
+    @Test
+    fun `подсказки значения состояния дают позы и логические значения`() {
+        val pose =
+            "capeCraft { providers [ { name = \"a\", type = \"url\", when = { state.pose: | } } ] }"
+        val poses = CrenAnalyzer.complete(CrenDocument(pose), pose.indexOf('|')).map { it.label }
+        assertTrue(
+            poses.containsAll(listOf("standing", "fall_flying", "long_jumping")),
+            "подсказки поз: $poses",
+        )
+
+        val sneak =
+            "capeCraft { providers [ { name = \"a\", type = \"url\", when = { state.sneaking: | } } ] }"
+        val bools = CrenAnalyzer.complete(CrenDocument(sneak), sneak.indexOf('|')).map { it.label }
+        assertTrue(
+            bools.containsAll(listOf("true", "false")),
+            "подсказки логических значений: $bools",
+        )
     }
 
     @Test

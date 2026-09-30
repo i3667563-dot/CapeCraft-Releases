@@ -125,6 +125,29 @@ class CapeConfig {
 
     val path: Path = FabricLoader.getInstance().configDir.resolve(CapeConfigFiles.KN_NAME)
 
+    /**
+     * Файл конфига, который реально прочитан.
+     *
+     * Не путать с [path]: тот — всегда `config/capecraft.kn`, а прочитать можно
+     * файл из `CAPECRAFT_CONFIG`. Команды раньше печатали [path] и тем самым
+     * врали о том, откуда взят конфиг, — при внешнем файле у человека в
+     * `/cp reload` был виден путь, который мод не открывал.
+     */
+    @Volatile
+    var activeSource: String = path.toString()
+        private set
+
+    /**
+     * Почему пришлось откатиться с файла из окружения на обычный, либо `null`.
+     *
+     * Держится отдельно от [lastError]: конфиг-то прочитан, и плащи работают.
+     * `lastError` для этого не годится — он означает «плащей не будет» и
+     * сбрасывается в конце успешной загрузки.
+     */
+    @Volatile
+    var sourceWarning: String? = null
+        private set
+
     /** Старый файл формата `.crn` — читается как fallback, если `.kn` нет. */
     val legacyPath: Path = FabricLoader.getInstance().configDir.resolve(CapeConfigFiles.CRN_NAME)
 
@@ -135,23 +158,31 @@ class CapeConfig {
         reload()
     }
 
-    /** Перечитать конфиг с диска (для `/cp reload`). */
+    /** Пречитать конфиг с диска (для `/cp reload`). */
     fun reload() {
         try {
-            val active = resolveConfigFile()
-            if (active != null) {
-                lastError = active.error
-                if (active.error != null) {
-                    CapeCraftLog.LOGGER.error("CapeCraft: {}", active.error)
-                    providers = emptyList()
-                    limits = Limits()
-                    serverSync = ServerSyncSettings()
-                    return
-                }
+            val resolution = CapeConfigFiles.resolve(resolveConfigFile(), path.parent)
+            activeSource = resolution.file.toString()
+            sourceWarning = resolution.warning
+            // Предупреждение, а не ошибка: конфиг прочитан, плащи работают.
+            // ERROR здесь пугал бы пользователя, у которого всё наоборот — есть
+            // чем пользоваться, но не тот источник, который он просил.
+            resolution.warning?.let { CapeCraftLog.LOGGER.warn("CapeCraft: {}", it) }
+            if (resolution.createDefault) writeDefault()
+            // Незаданная переменная окружения — не поломка конфига: парсер
+            // подставляет пустую строку, а плащ без адреса просто не грузится.
+            // Но молчать об этом нельзя: `url = "$HOST/api"` и `url = ""` в
+            // логе выглядят одинаково, а адрес у провайдера может быть один
+            // на весь конфиг. Один раз на имя — иначе пять тысяч строк на
+            // каждый кадр.
+            val unset = HashSet<String>()
+            val cfg = KorenConfig.load(resolution.file) { unset += it }
+            unset.forEach {
+                CapeCraftLog.LOGGER.warn(
+                    "CapeCraft: переменная окружения ${'$'}{} не задана, подставлена пустая строка",
+                    it,
+                )
             }
-            val file = active?.path?.let { Path.of(it) } ?: CapeConfigFiles.active(path.parent)
-            if (active == null && CapeConfigFiles.mustCreateDefault(file)) writeDefault()
-            val cfg = KorenConfig.load(file)
             providers = ProviderLoader.load(cfg)
             limits = parseLimits(cfg)
             serverSync = ServerSyncSettings.parse(cfg)
@@ -165,8 +196,8 @@ class CapeConfig {
 
     /**
      * Файл конфига из `CAPECRAFT_CONFIG`, либо `null` — читаем обычный
-     * `config/capecraft.kn`. Дефолтный файл при внешнем переопределении не
-     * создаётся: пользователь указал свой источник, лезть в его папку не нужно.
+     * `config/capecraft.kn`. Сам выбор, включая откат с недоступного внешнего
+     * файла, делает [CapeConfigFiles.resolve].
      */
     private fun resolveConfigFile(): CapeConfigEnv.ConfigFile? = CapeConfigEnv.configFile()
 

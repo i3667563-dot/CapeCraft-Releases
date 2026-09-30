@@ -171,7 +171,7 @@ class SyncPipelineTest {
 
         val a = CapeSyncState()
         a.onConfigChanged(listOf(localFileProvider("плащ").toActiveCape(hash)!!))
-        store.announce("A", listOf(ActiveCape("плащ", ActiveCape.Kind.FILE, "", "", 0, null, hash)))
+        store.announce("A", listOf(ActiveCape(name = "плащ", kind = ActiveCape.Kind.FILE, primary = "", extract = "", priority = 0, imageHash = hash)))
         store.announce("B", emptyList())
 
         val b = CapeSyncState()
@@ -248,7 +248,7 @@ when (res) {
 
         val a = CapeSyncState()
         a.onConfigChanged(listOf(localFileProvider("плащ").toActiveCape(hash)!!))
-        store.announce("A", listOf(ActiveCape("плащ", ActiveCape.Kind.FILE, "", "", 0, null, hash)))
+        store.announce("A", listOf(ActiveCape(name = "плащ", kind = ActiveCape.Kind.FILE, primary = "", extract = "", priority = 0, imageHash = hash)))
         store.announce("B", emptyList())
         val snapshot = SyncCodec.decodeRoster(SyncCodec.encodeRoster(store.snapshot()))
         val b = CapeSyncState()
@@ -309,7 +309,7 @@ when (res) {
         store.announce(
             "A",
             listOf(
-                ActiveCape("плащ", ActiveCape.Kind.FILE, "/home/игрок/плащ.png", "", 0, null, hash),
+                ActiveCape(name = "плащ", kind = ActiveCape.Kind.FILE, primary = "/home/игрок/плащ.png", extract = "", priority = 0, imageHash = hash),
             ),
         )
 
@@ -374,7 +374,7 @@ when (res) {
         val bytes = pngOf(1024, 7)
         val hash = ImageHash.compute(bytes)
         val store = RosterStore()
-        store.announce("A", listOf(ActiveCape("плащ", ActiveCape.Kind.FILE, "", "", 0, null, hash)))
+        store.announce("A", listOf(ActiveCape(name = "плащ", kind = ActiveCape.Kind.FILE, primary = "", extract = "", priority = 0, imageHash = hash)))
 
         val b = CapeSyncState()
         b.onRoster(SyncCodec.decodeRoster(SyncCodec.encodeRoster(store.snapshot())))

@@ -388,9 +388,9 @@ class KorenParserTest {
             port = ${'$'}KOREN_PORT
             url = "jdbc://${'$'}{KOREN_HOST}:${'$'}{KOREN_PORT}/db"
             fallback = "${'$'}{KOREN_MISSING:-local}"
-            hyphen_fallback = "${'$'}{KOREN_MISSING-test}"
+            hyphen_name = "${'$'}{KOREN-A-B}"
             empty_default = "${'$'}{KOREN_EMPTY:-fallback}"
-            empty_preserved = "${'$'}{KOREN_EMPTY-test}"
+            empty_literal = "${'$'}{KOREN_EMPTY}"
             escaped = "${'$'}${'$'}{KOREN_HOST}"
             currency = "cost ${'$'}5"
             trailing = "value${'$'}"
@@ -402,6 +402,7 @@ class KorenParserTest {
                 "KOREN_HOST" to "localhost",
                 "KOREN_PORT" to "9000",
                 "KOREN_EMPTY" to "",
+                "KOREN-A-B" to "hyphenated",
                 "KOREN_URL" to "https://example.com/a?x=1&y=2",
                 "KOREN_FUNCTION_ARG" to "42",
                 "KOREN_COMPLEX" to "raw=${'$'}{VALUE};quote=\";brace={}",
@@ -412,9 +413,9 @@ class KorenParserTest {
         assertEquals("9000", config.getStr("port"))
         assertEquals("jdbc://localhost:9000/db", config.getStr("url"))
         assertEquals("local", config.getStr("fallback"))
-        assertEquals("test", config.getStr("hyphen_fallback"))
+        assertEquals("hyphenated", config.getStr("hyphen_name"))
         assertEquals("fallback", config.getStr("empty_default"))
-        assertEquals("", config.getStr("empty_preserved"))
+        assertEquals("", config.getStr("empty_literal"))
         assertEquals("${'$'}{KOREN_HOST}", config.getStr("escaped"))
         assertEquals("cost ${'$'}5", config.getStr("currency"))
         assertEquals("value${'$'}", config.getStr("trailing"))
@@ -429,7 +430,7 @@ class KorenParserTest {
             """
             bare_braced = ${'$'}{KOREN_HOST}
             bare_default = ${'$'}{KOREN_MISSING:-fallback}
-            bare_hyphen = ${'$'}{KOREN_MISSING-other}
+            bare_hyphen = ${'$'}{KOREN-MIXED-Name}
             bare_middle = ${'$'}{KOREN_HOST}/capes/${'$'}{KOREN_PORT}/a.png
             bare_bool = ${'$'}{KOREN_FLAG}
             """.trimIndent(),
@@ -437,12 +438,13 @@ class KorenParserTest {
                 "KOREN_HOST" to "cdn.example.com",
                 "KOREN_PORT" to "8443",
                 "KOREN_FLAG" to "true",
+                "KOREN-MIXED-Name" to "mixed-1",
             ),
         )
 
         assertEquals("cdn.example.com", config.getStr("bare_braced"))
         assertEquals("fallback", config.getStr("bare_default"))
-        assertEquals("other", config.getStr("bare_hyphen"))
+        assertEquals("mixed-1", config.getStr("bare_hyphen"))
         assertEquals("cdn.example.com/capes/8443/a.png", config.getStr("bare_middle"))
         assertEquals("true", config.getStr("bare_bool"))
     }
@@ -455,12 +457,56 @@ class KorenParserTest {
         assertTrue(e.messageText.contains("незакрытая подстановка окружения"))
     }
     @Test
-    fun `missing or malformed environment reference is an error`() {
-        val missing = assertFailsWith<CrenError.Parse> {
-            KorenConfig.fromStringWithEnv("host = \"${'$'}{KOREN_MISSING}\"\n", emptyMap())
-        }
-        assertTrue(missing.messageText.contains("не задана"))
+    fun `unset variable is empty and reported, not an error`() {
+        val unset = mutableListOf<String>()
+        val config = KorenConfig.fromStringWithEnv(
+            "host = \"${'$'}{KOREN_MISSING}\"\nbare = ${'$'}KOREN_ALSO_MISSING\n",
+            emptyMap(),
+        ) { unset += it }
 
+        assertEquals("", config.getStr("host"))
+        assertEquals("", config.getStr("bare"))
+        assertEquals(listOf("KOREN_MISSING", "KOREN_ALSO_MISSING"), unset)
+    }
+
+    @Test
+    fun `name ends at punctuation and the tail is kept`() {
+        val config = KorenConfig.fromStringWithEnv(
+            """
+            base = ${'$'}BASE
+            url = ${'$'}BASE/api/cape.png
+            file = "${'$'}BASE/a.png"
+            comma = "a,${'$'}BASE,b"
+            host_port = "${'$'}HOST:${'$'}PORT"
+            underscore = "${'$'}{BASE_URL}"
+            hyphen = "${'$'}{BASE-URL}"
+            trailing = "${'$'}BASE."
+            literal_digit = "${'$'}1BASE"
+            """.trimIndent(),
+            mapOf(
+                "BASE" to "localhost:8080",
+                "HOST" to "cdn.example.com",
+                "PORT" to "8443",
+                "BASE_URL" to "u",
+                "BASE-URL" to "h",
+            ),
+        )
+
+        assertEquals("localhost:8080", config.getStr("base"))
+        assertEquals("localhost:8080/api/cape.png", config.getStr("url"))
+        assertEquals("localhost:8080/a.png", config.getStr("file"))
+        assertEquals("a,localhost:8080,b", config.getStr("comma"))
+        assertEquals("cdn.example.com:8443", config.getStr("host_port"))
+        assertEquals("u", config.getStr("underscore"))
+        assertEquals("h", config.getStr("hyphen"))
+        assertEquals("localhost:8080.", config.getStr("trailing"))
+        // `$1BASE` — не переменная: имя не может начинаться с цифры, и `$`
+        // остаётся текстом, как и в `cost $5`.
+        assertEquals("${'$'}1BASE", config.getStr("literal_digit"))
+    }
+
+    @Test
+    fun `malformed environment reference is still an error`() {
         for (input in listOf("a = \"${'$'}{1BAD}\"\n", "a = \"${'$'}{OPEN\"\n")) {
             val malformed = assertFailsWith<CrenError.Parse> {
                 KorenConfig.fromStringWithEnv(input, emptyMap())

@@ -85,6 +85,8 @@ object SyncRosterPolicy {
             append(p.imageHash?.let { ImageHash.toHex(it) } ?: "")
             append('')
             append(conditionSignature(p.condition))
+            append('\u0002')
+            append(ifConditionSignature(p.ifCondition))
         }
     }
 
@@ -92,6 +94,17 @@ object SyncRosterPolicy {
         if (c == null) return ""
         return c.predicates.joinToString("") { pr ->
             "${pr.root.tag}:${pr.field}:${pr.op.tag}:" + when (val e = pr.expected) {
+                is WireExpected.Str -> "s${e.s}"
+                is WireExpected.Num -> "n${e.d}"
+                is WireExpected.Range -> "r${e.from}..${e.to}"
+            }
+        }
+    }
+
+    private fun ifConditionSignature(c: WireIfCondition?): String {
+        if (c == null) return ""
+        return c.predicates.joinToString("") { pr ->
+            "${pr.op.tag}:${pr.name}:" + when (val e = pr.expected) {
                 is WireExpected.Str -> "s${e.s}"
                 is WireExpected.Num -> "n${e.d}"
                 is WireExpected.Range -> "r${e.from}..${e.to}"
@@ -132,11 +145,17 @@ object SyncRosterPolicy {
             return null
         }
         val localCondition = cape.condition?.toLocal()
+        val localIf = cape.ifCondition?.toLocal()
+        // Непереведённое условие — не «условие не выполнилось», а повод
+        // отбросить провайдера: иначе чужой набор показался бы шире своего.
+        if (cape.condition != null && localCondition == null) return null
+        if (cape.ifCondition != null && localIf == null) return null
         return when (cape.kind) {
             ActiveCape.Kind.URL -> Provider(
                 name = cape.name,
                 source = Source.Url(cape.primary),
                 condition = localCondition,
+                ifCondition = localIf,
                 priority = cape.priority,
             )
 
@@ -144,6 +163,7 @@ object SyncRosterPolicy {
                 name = cape.name,
                 source = Source.Json(cape.primary, cape.extract),
                 condition = localCondition,
+                ifCondition = localIf,
                 priority = cape.priority,
             )
 
@@ -153,6 +173,7 @@ object SyncRosterPolicy {
                     name = cape.name,
                     source = Source.NetImage(ImageHash.toHex(hash)),
                     condition = localCondition,
+                ifCondition = localIf,
                     priority = cape.priority,
                 )
             }

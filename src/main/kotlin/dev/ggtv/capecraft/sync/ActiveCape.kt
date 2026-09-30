@@ -5,7 +5,7 @@ import dev.ggtv.capecraft.provider.Source
 import java.net.URI
 
 /**
- * Один Cape-провайдер в том виде, в каком он едет по сети в Sync v2.
+ * Один Cape-провайдер в том виде, в каком он едет по сети в Sync v3.
  *
  * Это НЕ [Provider] из конфига: здесь нет addon-объекта
  * [dev.ggtv.capecraft.api.provider.CapeSource] (у клиента он свой, см.
@@ -29,6 +29,13 @@ data class ActiveCape(
     val priority: Int = 0,
     /** Условие `when`, вычисляет его получатель против своего контекста. */
     val condition: WireCondition? = null,
+    /**
+     * Условие `if` по переменным — тоже считает получатель, но против своих
+     * переменных: `username`/`uuid` наблюдаемого игрока плюс локальные `root`
+     * и `$*`. Провод отдельный от [condition], потому что набор имён
+     * переменных открытый, а у `when` закрытый (см. [WireIfCondition]).
+     */
+    val ifCondition: WireIfCondition? = null,
     /** Хэш картинки — только для [Kind.FILE]. */
     val imageHash: ImageHash? = null,
 ) {
@@ -108,6 +115,7 @@ data class ActiveCape(
             }
         }
         condition?.let { out += it.validate().map { p -> "у провайдера «$name»: $p" } }
+        ifCondition?.let { out += it.validate().map { p -> "у провайдера «$name» (if): $p" } }
         return out
     }
 
@@ -152,8 +160,11 @@ data class ActiveCape(
  *
  * Звонит **клиент**: в v2 он объявляет свой набор, а не получает чужой.
  *
- * Условие `when` переносится ([WireCondition.from]) — получатель вычислит его
- * против своего контекста наблюдаемого игрока. Локальный путь [Source.File] на
+ * Условия `when` и `if` переносятся ([WireCondition.from], [WireIfCondition.from]) —
+ * получатель вычислит их против своего контекста наблюдаемого игрока. Для `if`
+ * это важно вдвойне: имена переменных разбирает тот, у кого эти аддоны и это
+ * окружение есть, а отправлять посчитанное на чужой машине — значило бы
+ * показать всем плащ, выбранный под чужой `root`. Локальный путь [Source.File] на
  * провод **не уходит**: вместо него [fileHash], который клиент посчитал,
  * прочитав файл. Если хэша нет (файл не нашёлся/не прочитался), возвращается
  * `null` — объявлять `file`-провайдер без хэша бессмысленно, его бы отбросили
@@ -161,50 +172,61 @@ data class ActiveCape(
  *
  * Аддон-тип переносится именем типа: параметры аддона у получателя свои.
  */
-fun Provider.toActiveCape(fileHash: ImageHash? = null): ActiveCape? = when {
-    addonSource != null -> values?.let {
-        ActiveCape(
-            name = name,
-            kind = ActiveCape.Kind.ADDON,
-            primary = it.type,
-            priority = priority,
-            condition = WireCondition.from(condition),
-        )
-    }
-
-    else -> when (val s = source) {
-        is Source.Url -> ActiveCape(
-            name = name,
-            kind = ActiveCape.Kind.URL,
-            primary = s.template,
-            priority = priority,
-            condition = WireCondition.from(condition),
-        )
-
-        is Source.Json -> ActiveCape(
-            name = name,
-            kind = ActiveCape.Kind.JSON,
-            primary = s.template,
-            extract = s.extract,
-            priority = priority,
-            condition = WireCondition.from(condition),
-        )
-
-        is Source.File -> if (fileHash == null) {
-            null
-        } else {
+fun Provider.toActiveCape(fileHash: ImageHash? = null): ActiveCape? {
+    // Self-only провайдер не объявляется вообще. Отправлять его условия
+    // нечего — про другого игрока неизвестно, в воде ли он и крадётся ли, —
+    // а объявить без них значит показать плащ всем, то есть условие молча
+    // перестало бы что-либо решать.
+    if (isSelfOnly) return null
+    return when {
+        addonSource != null -> values?.let {
             ActiveCape(
                 name = name,
-                kind = ActiveCape.Kind.FILE,
-                primary = "",
+                kind = ActiveCape.Kind.ADDON,
+                primary = it.type,
                 priority = priority,
                 condition = WireCondition.from(condition),
-                imageHash = fileHash,
+                ifCondition = WireIfCondition.from(ifCondition),
             )
         }
 
-        // Сетевая картинка уже привязана к хэшу — заново объявлять её как
-        // «свою функцию» незачем: наружу уйдёт тот же хэш, что уже в кэше.
-        is Source.NetImage -> null
+        else -> when (val s = source) {
+            is Source.Url -> ActiveCape(
+                name = name,
+                kind = ActiveCape.Kind.URL,
+                primary = s.template,
+                priority = priority,
+                condition = WireCondition.from(condition),
+                ifCondition = WireIfCondition.from(ifCondition),
+            )
+
+            is Source.Json -> ActiveCape(
+                name = name,
+                kind = ActiveCape.Kind.JSON,
+                primary = s.template,
+                extract = s.extract,
+                priority = priority,
+                condition = WireCondition.from(condition),
+                ifCondition = WireIfCondition.from(ifCondition),
+            )
+
+            is Source.File -> if (fileHash == null) {
+                null
+            } else {
+                ActiveCape(
+                    name = name,
+                    kind = ActiveCape.Kind.FILE,
+                    primary = "",
+                    priority = priority,
+                    condition = WireCondition.from(condition),
+                    ifCondition = WireIfCondition.from(ifCondition),
+                    imageHash = fileHash,
+                )
+            }
+
+            // Сетевая картинка уже привязана к хэшу — заново объявлять её как
+            // «свою функцию» незачем: наружу уйдёт тот же хэш, что уже в кэше.
+            is Source.NetImage -> null
+        }
     }
 }

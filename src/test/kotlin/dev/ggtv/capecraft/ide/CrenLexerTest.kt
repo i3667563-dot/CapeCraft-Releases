@@ -89,6 +89,29 @@ class CrenLexerTest {
     }
 
     @Test
+    fun `имя переменной включает дефис и подчёркивание`() {
+        val text = """a = "${'$'}{BASE-URL}" b = "${'$'}{A_B}" c = "${'$'}A-B""" + "\"\n"
+        val subs = CrenLexer.lex(text)
+            .filter { it.kind == CrenLexKind.STR }
+            .flatMap { it.parts }
+            .filterIsInstance<StrPart.Substitution>()
+        assertEquals(listOf("BASE-URL", "A_B", "A-B"), subs.map { it.name })
+        // Дефис — часть имени, а не разделитель дефолта.
+        assertTrue(subs.none { it.hasDefault }, "одиночный дефис дефолтом не считается")
+        assertRangesConsistent(text, CrenLexer.lex(text))
+    }
+
+    @Test
+    fun `имя обрывается точкой и слэшем, хвост остаётся текстом`() {
+        val text = """url = "${'$'}BASE/api/cape.png""" + "\"\n"
+        val str = CrenLexer.lex(text).last { it.kind == CrenLexKind.STR }
+        val sub = str.parts.filterIsInstance<StrPart.Substitution>().single()
+        assertEquals("BASE", sub.name)
+        assertEquals("/api/cape.png", slice(text, str.parts.filterIsInstance<StrPart.Literal>().single().range))
+        assertRangesConsistent(text, CrenLexer.lex(text))
+    }
+
+    @Test
     fun `две подстановки подряд дают две части и литерал между ними`() {
         val text = """name = "a${'$'}{A}b${'$'}{B}c""" + "\"\n"
         val str = CrenLexer.lex(text).last { it.kind == CrenLexKind.STR }

@@ -3,6 +3,7 @@ package dev.ggtv.capecraft
 import dev.ggtv.capecraft.api.CapeApiHolder
 import dev.ggtv.capecraft.api.event.CapeEvent
 import dev.ggtv.capecraft.condition.ProviderSelector
+import dev.ggtv.capecraft.condition.SelectionReport
 import dev.ggtv.capecraft.image.AnimatedImage
 import dev.ggtv.capecraft.image.ImageDecoder
 import dev.ggtv.capecraft.image.ImageDecodeException
@@ -109,6 +110,16 @@ class CapeRegistry(
     private val firstSeenAt = ConcurrentHashMap<String, Long>()
 
     /**
+     * Когда объект последний раз попадал в кадр, мс.
+     *
+     * Единственный сигнал «игрок ушёл», доступный без подписки на события
+     * сущностей: [ensureLoading] зовётся из рендер-миксина для каждого видимого
+     * игрока, и исчезновение из кадра — единственный признак, по которому
+     * видно, что рендерить больше нечего.
+     */
+    private val lastSeenAt = ConcurrentHashMap<String, Long>()
+
+    /**
      * У каких объектов вообще есть условия.
      *
      * Нужно, чтобы не пересчитывать условия у всех подряд: без условий порядок
@@ -133,9 +144,23 @@ class CapeRegistry(
     var localPlayerId: String? = null
         private set
 
-    /** Сообщить реестру свой id при входе на сервер. */
-    fun setLocalPlayer(id: String) {
+    /**
+     * Свой ник — для `if`, считаемого против себя.
+     *
+     * Отдельное поле, а не чтение [usernames]: `refreshLocked` зовёт [orderFor]
+     * для себя раньше, чем миксин рендера успеет позвать [ensureLoading], и в
+     * этот момент карты ещё пусты. Пустой ник ознал бы, что `if { username:
+     * "..." }` молча не срабатывает для самого владельца конфига — ровно тот
+     * случай, который проверяют руками и не замечают.
+     */
+    @Volatile
+    var localUsername: String = ""
+        private set
+
+    /** Сообщить реестру свой id и ник при входе на сервер. */
+    fun setLocalPlayer(id: String, username: String = localUsername) {
         localPlayerId = id
+        localUsername = username
     }
     private val usernames = ConcurrentHashMap<String, String>()
 
@@ -270,7 +295,7 @@ class CapeRegistry(
             val gen = (objectGeneration[local] ?: 0) + 1
             objectGeneration[local] = gen
             // Последняя задача с новым поколением победит.
-            val ordered = orderFor(local, world)
+            val ordered = orderFor(local, world, localUsername)
             lastObjectFingerprint[local] = fingerprint(ordered)
             if (ordered.isNotEmpty()) {
                 loading.add(local)
@@ -314,15 +339,6 @@ class CapeRegistry(
     }
 
     /**
-     * Порядок провайдеров для загрузки.
-     *
-     * Обычный режим — [ProviderSelector] пересчитывает `when`-условия на
-     * живом мире клиента. Режим сервера — список уже отобран и упорядочен
-     * сервером, пересчитывать нечего (и опасно: мир клиента может отличаться).
-     */
-    private fun order(): List<Provider> = ProviderSelector.select(providers, world)
-
-    /**
      * Порядок функций для конкретного объекта в его собственном контексте.
      *
      * Вот ради чего объявленные наборы едут с условиями и приоритетами: сначала
@@ -333,12 +349,15 @@ class CapeRegistry(
      * иначе объявленные условия применялись бы к миру зрителя и были бы
      * не «его» условиями.
      *
+     * @param username ник **этого** объекта: подставляется в `if` того, кого
+     *   видно. Для `uuid` берётся сам [id], а `root` — свой на машине зрителя.
+     *
      * Кто набор получает — целиком в [ObjectCapePolicy]; здесь только учёт
      * момента первого появления объекта. Правило простое: объявился — его
      * набор, не объявился за [ObjectCapePolicy.ANNOUNCE_GRACE_MS] — мой, а
      * между этим ждём.
      */
-    private fun orderFor(id: String, context: WorldContext): List<Provider> {
+    private fun orderFor(id: String, context: WorldContext, username: String): List<Provider> {
         val now = nowMs()
         // putIfAbsent, а не присваивание: пересчёт `when` зовёт orderFor на
         // каждом кадре, и счётчик ожидания обязан считаться от первого
@@ -351,6 +370,15 @@ class CapeRegistry(
             firstSeenMs = firstSeen,
             nowMs = now,
             context = context,
+            vars = Placeholders.Context(
+                username = username,
+                uuid = stripDashes(id),
+                // `name` — про провайдер, а не про игрока, и в `loadInBackground`
+                // он пустой; подставлять имя провайдера сюда значило бы выдумать
+                // переменную, которой ни у кого нет.
+                name = "",
+                root = root,
+            ),
         ).providers
     }
 
@@ -363,7 +391,9 @@ class CapeRegistry(
      * @return `true`, если набор изменился и плащ был перепланирован.
      */
     fun useObjectFunctions(id: String, functions: List<Provider>): Boolean {
-        val hasCond = functions.any { it.condition != null }
+        // `if` — тоже условие: объект, у которого только `if`, обязан
+        // перечитываться, иначе появившееся позже окружение/-D его бы не включило.
+        val hasCond = functions.any { it.condition != null || it.ifCondition != null }
         // Отпечаток именно ОБЪЯВЛЕННОГО набора: он отсекает повторы, когда
         // сервер шлёт тот же ростер целиком (ревизия изменилась, а набор нет).
         val declaredFp = functions.joinToString("\u0000") { describe(it) }
@@ -474,6 +504,9 @@ class CapeRegistry(
             objectGeneration.remove(id)
             firstSeenAt.remove(id)
         }
+        usernames.clear()
+        appliedOrder.clear()
+        lastSeenAt.clear()
         synchronized(lock) {
             for (key in memory.keys) CapeTexture.release(key)
             memory.clear()
@@ -486,6 +519,7 @@ class CapeRegistry(
         loading.clear()
         lastConditionsFingerprint = ""
         localPlayerId = null
+        localUsername = ""
     }
 
 
@@ -508,6 +542,41 @@ class CapeRegistry(
 
     /** Есть ли у объекта набор функций в кадре. */
     fun hasObjectFunctions(id: String): Boolean = objectFunctions.containsKey(id)
+
+    /**
+     * Запомнить порядок, который реально пошёл в загрузку.
+     *
+     * Пишется только там, где порядок действительно применён, а не где
+     * просто посчитан: посчитанный порядок может быть отброшен по отпечатку,
+     * и в `/cp list` это выглядело бы как «применён другой набор».
+     */
+    private fun rememberAppliedOrder(id: String, ordered: List<Provider>) {
+        appliedOrder[id] = ordered.map { it.name }
+    }
+
+    /**
+     * Разбор отбора для своего плаща: тот же расчёт, что делает рендер, плюс
+     * объяснение по каждому провайдеру.
+     *
+     * Контекст — [world] (передаётся вызывающим), а не зашитый
+     * [MinecraftWorldContext]: иначе диагностика в 26.2 и в 1.21 считала бы
+     * разные миры, и правка ради «просто удобно» разошлась бы с боевой.
+     *
+     * Пересчитывает отбор на текущий момент, а не читает [appliedOrder]:
+     * вопрос «почему показался не тот плащ» — это вопрос «что выберется
+     * сейчас», и применённый порядок рядом нужен для сравнения.
+     */
+    fun explainLocal(providers: List<Provider>, world: WorldContext): SelectionReport =
+        ProviderSelector.evaluate(
+            providers = providers,
+            world = world,
+            vars = Placeholders.Context(
+                username = localUsername,
+                uuid = stripDashes(localPlayerId.orEmpty()),
+                name = "",
+                root = root,
+            ),
+        )
 
     /** Есть ли у объекта функции с условиями — их надо пересчитывать. */
     fun objectNeedsReevaluation(id: String): Boolean = objectHasConditions[id] == true
@@ -546,6 +615,10 @@ class CapeRegistry(
      */
     fun ensureLoading(uuid: String, username: String, context: WorldContext = world) {
         usernames[uuid] = username
+        lastSeenAt[uuid] = nowMs()
+        // Свой ник известен и с рендера, и с входа; берём отсюда, чтобы
+        // `localUsername` не зависел от порядка вызовов на клиенте.
+        if (uuid == localPlayerId) localUsername = username
 
         // Проверка переоценки идёт ДО ранних выходов. Иначе объект, у которого
         // уже готова текстура, навсегда сохранил бы плащ, выбранный в момент
@@ -559,7 +632,7 @@ class CapeRegistry(
         if (ready) return                       // в CPU-кэше — текстуру создаст animate
         // Порядок провайдеров вычисляем ЗДЕСЬ (рендер-поток), где безопасно
         // читать живой мир; воркеру передаём уже готовый список.
-        val ordered = orderFor(uuid, context)
+        val ordered = orderFor(uuid, context, username)
         // Набора нет — грузить нечего: объект ещё ждёт объявления
         // (ObjectCapePolicy.WAIT) либо объявление пришло пустым. Раньше здесь
         // всё равно планировалась задача, и она падала в воркере с «нет
@@ -569,6 +642,7 @@ class CapeRegistry(
         if (loading.add(uuid)) {
             val fp = fingerprint(ordered)
             lastObjectFingerprint[uuid] = fp
+            rememberAppliedOrder(uuid, ordered)
             lastReevaluatedAt[uuid] = nowMs()
             val gen = objectGeneration[uuid] ?: 0
             executor.execute { loadInBackground(uuid, ordered, gen) }
@@ -601,11 +675,12 @@ class CapeRegistry(
      * результат чужого пересчёта.
      */
     private fun reevaluate(uuid: String, context: WorldContext) {
-        val ordered = orderFor(uuid, context)
+        val ordered = orderFor(uuid, context, usernames[uuid].orEmpty())
         val fp = fingerprint(ordered)
         if (fp == lastObjectFingerprint[uuid]) return // порядок тот же — не трогаем
 
         lastObjectFingerprint[uuid] = fp
+        rememberAppliedOrder(uuid, ordered)
         val gen = (objectGeneration[uuid] ?: 0) + 1
         objectGeneration[uuid] = gen
 
@@ -644,6 +719,10 @@ class CapeRegistry(
             else -> append(s::class.simpleName.orEmpty())
         }
         append('\u0001').append(p.condition?.toString() ?: "-")
+        // `if` тоже в отпечаток: иначе смена `if` в конфиге была бы не видна
+        // и плащ остался бы со старой текстурой — ровно тот баг, ради которого
+        // сюда попал `when`.
+        append('\u0001').append(p.ifCondition?.toString() ?: "-")
         append('\u0001').append(p.addonSource != null)
     }
 
@@ -687,6 +766,33 @@ class CapeRegistry(
         }
     }
 
+    /**
+     * Освободить ресурсы игроков, которых больше нет в кадре.
+     *
+     * Раньше текстура плаща жила до конца процесса: игрок уходил с сервера, а
+     * GPU-текстура и `NativeImage` оставались. На длинной сессии с большим
+     * онлайном это копится до тех пор, пока видеодрайвер не начнёт отдавать
+     * нехватку видеопамяти.
+     *
+     * Порог не «нет в кадре», а «нет в кадре давно»: игрок за стеной или вне
+     * экрана не рисуется кадр-другой, и мгновенная проверка выкидывала бы
+     * текстуры у живых. [goneTimeoutMs] заведомо больше времени между кадрами,
+     * в которое игрок может быть не виден ни разу.
+     */
+    fun forgetAbsentObjects(now: Long = nowMs(), goneTimeoutMs: Long = ABSENT_TIMEOUT_MS) {
+        for (uuid in LinkedHashSet(firstSeenAt.keys)) {
+            val seen = lastSeenAt[uuid] ?: continue
+            if (now - seen < goneTimeoutMs) continue
+            // Локального игрока не трогаем: его плащ нужен в любом кадре, а
+            // между выходом в инвентарь и следующим показом его не видно.
+            if (uuid == localPlayerId) {
+                lastSeenAt[uuid] = now
+                continue
+            }
+            forget(uuid)
+        }
+    }
+
     /** Удалить плащ игрока из памяти. */
     fun forget(uuid: String) {
         if (localPlayerId == uuid) localPlayerId = null
@@ -697,6 +803,12 @@ class CapeRegistry(
         lastReevaluatedAt.remove(uuid)
         objectGeneration.remove(uuid)
         firstSeenAt.remove(uuid)
+        // `usernames` и `appliedOrder` тоже живут по uuid. Оставлять их — значит
+        // держать по одной строке на каждого, кого мод видел за сессию; при
+        // переподключении на другой аккаунт старые остаются навсегда.
+        usernames.remove(uuid)
+        appliedOrder.remove(uuid)
+        lastSeenAt.remove(uuid)
         synchronized(lock) {
             memory.remove(uuid)
             CapeTexture.release(uuid)
@@ -728,6 +840,9 @@ class CapeRegistry(
             uploadedFrame.clear()
         }
         firstSeenAt.clear()
+        usernames.clear()
+        appliedOrder.clear()
+        lastSeenAt.clear()
     }
 
     /** Число закэшированных плащей. */
@@ -835,7 +950,7 @@ class CapeRegistry(
      */
     fun refreshConditions(world: WorldContext) {
         // Троттлинг: раньше это пересчитывалось каждый тик. Порядок меняется
-        // максимум раз в 20 тиков (смена времени суток), а `order()` дёргает
+        // максимум раз в 20 тиков (смена времени суток), а [orderFor] дёргает
         // биом — 20 раз в секунду на пустом месте вместо 1.
         val now = nowMs()
         if (now - lastLocalRecheckedAt < LOCAL_RECHECK_INTERVAL_MS) return
@@ -847,10 +962,11 @@ class CapeRegistry(
         // известные игроки локальным порядком — то есть чужие плащи
         // выбирались по моему биому, а это ровно то, что чинится.
         val local = localPlayerId ?: return
-        val ordered = orderFor(local, world)
+        val ordered = orderFor(local, world, localUsername)
         val fp = fingerprint(ordered)
         if (fp == lastObjectFingerprint[local]) return
         lastObjectFingerprint[local] = fp
+        rememberAppliedOrder(local, ordered)
 
         val gen = (objectGeneration[local] ?: 0) + 1
         objectGeneration[local] = gen
@@ -870,6 +986,16 @@ class CapeRegistry(
 
     /** Отпечаток применённого набора функций по каждому объекту. */
     private val lastObjectFingerprint = ConcurrentHashMap<String, String>()
+
+    /**
+     * Имена провайдеров в порядке, реально применённом к объекту.
+     *
+     * Отдельное от отпечатка поле, а не разбор отпечатка: нужно показать в
+     * `/cp list`, какой плащ на экране **прямо сейчас**, и сравнить с тем,
+     * что отбор выбрал бы сейчас же. Отпечаток для этого не годится — он
+     * хранит ещё и источник, и текстуру, и молчит о причинах отказа.
+     */
+    val appliedOrder: ConcurrentHashMap<String, List<String>> = ConcurrentHashMap()
 
     /**
      * Счётчик поколений на объект — свой, а не общий [generation].
@@ -899,6 +1025,15 @@ class CapeRegistry(
 
     /** Частота пересчёта собственных условий локального игрока, мс. */
     private val LOCAL_RECHECK_INTERVAL_MS = 250L
+
+    /**
+     * Сколько объект может не попадать в кадр, прежде чем его ресурсы снимут, мс.
+     *
+     * 10 секунд с запасом: игрок вне экрана или за стеной не рисуется кадр-другой,
+     * а на серверах с TPS ниже 20 кадров в секунду меньше. Раньше порога не было
+     * вовсе — плащ жил до конца процесса.
+     */
+    private val ABSENT_TIMEOUT_MS = 10_000L
 
     private var lastLocalRecheckedAt = 0L
 

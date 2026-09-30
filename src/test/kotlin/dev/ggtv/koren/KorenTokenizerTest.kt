@@ -20,6 +20,14 @@ class KorenTokenizerTest {
     private fun kindsWithoutNewlines(input: String): List<KorenTokenKind> =
         kinds(input).filterNot { it == Newline }
 
+    private fun envKinds(
+        input: String,
+        env: Map<String, String>,
+        onUnset: (String) -> Unit = {},
+    ): List<KorenTokenKind> =
+        KorenTokenizer.tokenizeWithEnv(input, env, onUnset)
+            .map { it.kind }.filterNot { it == Newline }
+
     @Test
     fun `comment is saved`() {
         val tokens = KorenTokenizer.tokenize("# привет, я коммент\n")
@@ -224,5 +232,113 @@ class KorenTokenizerTest {
         assertEquals(Str("😀"), tokens[2].kind)
         assertEquals(Word("port"), tokens[4].kind)
         assertEquals(Int(8080), tokens[6].kind)
+    }
+
+    // ─── `$` в ключе против `$` в значении ─────────────────────────────────
+    //
+    // Подстановка окружения жадная и случается на разборе: незаданная
+    // переменная — ошибка загрузки. Для значения так правильно, а вот ключ
+    // `if = { $TIER: "gold" }` подстановка бы убила: имя исчезло бы, и условие
+    // стало бы сравнением плейсхолдера по имени, совпавшему со значением
+    // переменной.
+    //
+    // Поэтому ключ отдаётся как [EnvRef] и разбирается позже — тем, кто знает,
+    // что это условие, когда переменная уже может появиться.
+
+    @Test
+    fun `env key is not substituted even when it is set`() {
+        val k = envKinds("if = { ${'$'}TIER: \"gold\" }\n", mapOf("TIER" to "prod"))
+        assertEquals(listOf(Word("if"), Assign, LBrace, EnvRef("${'$'}TIER"), Colon, Str("gold"), RBrace), k)
+    }
+
+    @Test
+    fun `env key survives when variable is missing`() {
+        val k = envKinds("if = { ${'$'}TIER: \"gold\" }\n", emptyMap())
+        assertEquals(EnvRef("${'$'}TIER"), k[3])
+    }
+
+    @Test
+    fun `env key with hyphen and underscore is one name`() {
+        val hyphen = envKinds("if = { ${'$'}TIER-ONE: \"gold\" }\n", emptyMap())
+        assertEquals(EnvRef("${'$'}TIER-ONE"), hyphen[3])
+        val underscore = envKinds("if = { ${'$'}TIER_ONE: \"gold\" }\n", emptyMap())
+        assertEquals(EnvRef("${'$'}TIER_ONE"), underscore[3])
+    }
+
+    @Test
+    fun `env key in braces is not substituted`() {
+        val k = envKinds("if = { ${'$'}{TIER}: \"gold\" }\n", mapOf("TIER" to "prod"))
+        assertEquals(EnvRef("${'$'}{TIER}"), k[3])
+    }
+
+    @Test
+    fun `env key accepts equals as separator`() {
+        val k = envKinds("if = { ${'$'}TIER = \"gold\" }\n", emptyMap())
+        assertEquals(listOf(Word("if"), Assign, LBrace, EnvRef("${'$'}TIER"), Assign, Str("gold"), RBrace), k)
+    }
+
+    @Test
+    fun `env key accepts spaces around separator`() {
+        val k = envKinds("if = { ${'$'}TIER : \"gold\" }\n", emptyMap())
+        assertEquals(listOf(Word("if"), Assign, LBrace, EnvRef("${'$'}TIER"), Colon, Str("gold"), RBrace), k)
+    }
+
+    @Test
+    fun `env key may be followed by another entry`() {
+        val k = envKinds("if = { ${'$'}TIER: \"gold\", username: \"Eonixx\" }\n", emptyMap())
+        assertEquals(EnvRef("${'$'}TIER"), k[3])
+        assertEquals(Word("username"), k[7])
+    }
+
+    @Test
+    fun `env key on its own line is still a key`() {
+        val k = envKinds(
+            "if = {\n    ${'$'}TIER: \"gold\",\n    username: \"Eonixx\",\n}\n",
+            emptyMap(),
+        )
+        assertEquals(EnvRef("${'$'}TIER"), k[3])
+        assertEquals(Word("username"), k[7])
+    }
+
+    @Test
+    fun `env in value is still substituted`() {
+        val k = envKinds("url = ${'$'}HOST\n", mapOf("HOST" to "caps.example.com"))
+        assertEquals(Str("caps.example.com"), k[2])
+    }
+
+    @Test
+    fun `missing env in value is an empty string and not an error`() {
+        val unset = mutableListOf<String>()
+        val k = envKinds(
+            "url = ${'$'}NOT_SET_ANYWHERE\n",
+            emptyMap(),
+            onUnset = { unset += it },
+        )
+        assertEquals(Str(""), k[2])
+        assertEquals(listOf("NOT_SET_ANYWHERE"), unset)
+    }
+
+    @Test
+    fun `env in value with colon is one value`() {
+        // Регрессия: `:` не разрывает `$`-кусок, иначе документированный
+        // `url = $HOST:8080/capes/x.png` рассыпался бы на три токена.
+        val k = envKinds("url = ${'$'}HOST:8080/capes/x.png\n", mapOf("HOST" to "example.com"))
+        assertEquals(Str("example.com:8080/capes/x.png"), k[2])
+    }
+
+    @Test
+    fun `env at end of line is a value not a key`() {
+        // `$NAME` в конце строки — почти всегда значение: новая строка после
+        // `$` намеренно не разрывает «ключ», иначе любая следующая строка
+        // могла бы превратить значение в ключ.
+        val k = envKinds("a = ${'$'}HOST\nb = 1\n", mapOf("HOST" to "h"))
+        assertEquals(Str("h"), k[2])
+        assertEquals(Word("b"), k[3])
+    }
+
+    @Test
+    fun `env ref with trailing text is a value`() {
+        val k = envKinds("url = ${'$'}HOST/p.png\n", mapOf("HOST" to "example.com"))
+        assertEquals(Str("example.com/p.png"), k[2])
     }
 }

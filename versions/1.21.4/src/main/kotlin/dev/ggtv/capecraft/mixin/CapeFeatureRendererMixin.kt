@@ -49,8 +49,8 @@ abstract class CapeFeatureRendererMixin {
 
         val registry = CapeCraftClient.registry
         // Условия `when` считаем против ЭТОГО игрока, а не против моего мира:
-        // объявленный набор функций принадлежит ему, и «джунглевый» плащ должен
-        // показаться только тем, кто смотрит действительно из джунглей.
+        // объявленный набор функций принадлежит ему, поэтому его «джунглевый»
+        // плащ оценивается по его джунглям, а не по тому, где стою я.
         registry.ensureLoading(uuid, player.name.string, EntityWorldContext(player))
 
         val defaultTexture: Identifier = registry.textureId(uuid) ?: return

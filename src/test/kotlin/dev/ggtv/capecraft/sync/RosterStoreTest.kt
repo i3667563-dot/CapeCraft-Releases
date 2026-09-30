@@ -180,7 +180,7 @@ class RosterStoreTest {
         store.announce(
             "a",
             listOf(
-                ActiveCape("файл", ActiveCape.Kind.FILE, "", "", 0, null, hash),
+                ActiveCape(name = "файл", kind = ActiveCape.Kind.FILE, primary = "", extract = "", priority = 0, imageHash = hash),
                 url("чужая-ссылка"),
             ),
         )

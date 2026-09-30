@@ -87,7 +87,7 @@ fun resolveCapeResult(
     root: String,
     fetcher: CapeFetcher,
     world: WorldContext = EmptyWorldContext,
-): CapeFetchResult = resolveCapeOrdered(ProviderSelector.select(providers, world), ctx, root, fetcher)
+): CapeFetchResult = resolveCapeOrdered(ProviderSelector.select(providers, world, ctx), ctx, root, fetcher)
 
 /**
  * Как [resolveCapeResult], но порядок выбора уже вычислен и передан явно.
