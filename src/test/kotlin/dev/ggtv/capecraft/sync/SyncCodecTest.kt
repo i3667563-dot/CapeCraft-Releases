@@ -6,7 +6,10 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /**
- * Wire-формат Sync v2 и его защита от битых пакетов.
+ * Wire-формат Sync и его защита от битых пакетов.
+ *
+ * Версия формата — [SyncProtocol.VERSION]: сетка корней и сам формат
+ * менялись, и тест, написанный под v2, проверял бы не тот байтовый порядок.
  *
  * Второе важнее первого. Кодеку приходит всё, что прислал клиент, а клиент
  * может быть чем угодно, поэтому каждая длина проверяется **до** аллокации:
@@ -184,6 +187,39 @@ class SyncCodecTest {
         }
         val cape = url("a").copy(condition = WireCondition(preds))
         assertFailsWith<Exception> { SyncCodec.encodeAnnounce(Announce(listOf(cape))) }
+    }
+
+    @Test
+    fun `armor и health переживают круг по сети`() {
+        // Новые публичные корни обязаны пережить байтовый круг: тег в enum и
+        // длина строки в WirePredicate покрывают только половину пути, вторую
+        // половину (разбор обратно в Predicate) проверяет именно этот тест.
+        val cases = listOf(
+            Triple(WireRoot.ARMOR, "chest", WireExpected.Str("diamond")),
+            Triple(WireRoot.HEALTH, "current", WireExpected.Num(12.0)),
+            Triple(WireRoot.ARMOR, "feet", WireExpected.Str("none")),
+        )
+        for ((root, field, expected) in cases) {
+            val local = WirePredicate(root, field, WireOp.EQ, expected)
+            val cape = url("a").copy(condition = WireCondition(listOf(local)))
+            val decoded = SyncCodec.decodeAnnounce(SyncCodec.encodeAnnounce(Announce(listOf(cape))))
+            val back = decoded.functions.single().condition!!.predicates.single()
+            assertEquals(root, back.root, "корень $root")
+            assertEquals(field, back.field, "поле $field")
+            assertEquals(expected, back.expected, "значение $expected")
+            assertTrue(back.validate().isEmpty(), "подтверждённое условие должно быть валидным")
+        }
+    }
+
+    @Test
+    fun `health с диапазоном переживает круг по сети`() {
+        val local = WirePredicate(
+            WireRoot.HEALTH, "max", WireOp.RANGE, WireExpected.Range(20.0, 40.0),
+        )
+        val cape = url("a").copy(condition = WireCondition(listOf(local)))
+        val decoded = SyncCodec.decodeAnnounce(SyncCodec.encodeAnnounce(Announce(listOf(cape))))
+        val back = decoded.functions.single().condition!!.predicates.single()
+        assertEquals(WireExpected.Range(20.0, 40.0), back.expected)
     }
 
     @Test

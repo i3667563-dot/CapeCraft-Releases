@@ -23,8 +23,19 @@ class WorldContextAgreementTest {
      * `biome.precipitation` сюда не входит: оно приходит из
      * `Biome.Precipitation` и переводится в нижний регистр, литералов в
      * исходнике нет — его сверяет [осадки совпадают с enum Minecraft].
+     *
+     * Про `armor` и `state` стоит сказать отдельно: они тоже приходят не из
+     * enum Minecraft напрямую, а собираются вручную — тир выводится из id
+     * предмета через белый список `ARMOR_TIERS`, поза — явным `when` по
+     * `EntityPose`. Поэтому значения обязаны быть литералами в исходнике: если
+     * подсказка обещает `"netherite"`, а рантайм его не отдаст, провайдер
+     * молча перестанет совпадать.
      */
-    private val literalFields = listOf("condition", "period", "type")
+    private val literalFields = listOf(
+        "condition", "period", "type",
+        "head", "chest", "legs", "feet",
+        "inWater", "sneaking", "sprinting", "onGround", "pose",
+    )
 
     @Test
     fun `значения полей when есть в исходнике каждой версии`() {

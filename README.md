@@ -165,6 +165,10 @@ capeCraft {
 | `dimension` | `type` | `overworld` / `nether` / `end` | `type` |
 | `dimension` | `id` | полный id, например `minecraft:the_nether` | — |
 | `location` | `x`, `y`, `z` | координаты, число | нет, писать обязательно |
+| `armor` | `head`, `chest`, `legs`, `feet` | тир надетой брони: `none` / `leather` / `chainmail` / `iron` / `gold` / `diamond` / `netherite` / `turtle` | `chest` |
+| `health` | `current`, `max` | здоровье, число | нет, писать обязательно |
+| `state` | `inWater`, `sneaking`, `sprinting`, `onGround` | `true` / `false` | нет, писать обязательно |
+| `state` | `pose` | `standing` / `crouching` / `swimming` / `fall_flying` / `sleeping` / `spin_attack` / `long_jumping` / `dying` | нет, писать обязательно |
 
 **Операторы** живут в значении:
 
@@ -208,6 +212,35 @@ capeCraft {
 Опечатки, наоборот, ловятся сразу при загрузке конфига: неизвестный корень,
 слишком глубокий путь вроде `time.period.extra` или `location` без поля — понятное
 сообщение с перечнем доступного.
+
+**Только свои условия: `state` и `self`.** Условие `state` (поза, вода, красться,
+бег, стоять на земле) описывает того, кто *надел* плащ, а не того, кто на него
+смотрит, поэтому оно считается только у владельца и **не уезжает по сети**: чужой
+клиент такого провайдера просто не увидит. Провайдер с любым `state`
+автоматически становится локальным целиком — смешивать в одном провайдере
+публичные и self-only условия бессмысленно, половина всё равно не уедет.
+
+Тот же флаг можно поставить руками, если публичные условия писать не хочется, а
+провайдер нужно оставить себе:
+
+```
+capeCraft {
+    providers [
+        { name = "armored", type = "url", url = "https://example.com/armor.png",
+          when = { armor.chest: "diamond" }, self = true },
+
+        { name = "swimming", type = "url", url = "https://example.com/water.png",
+          when = { state.inWater: true } },
+
+        { name = "default", type = "url", url = "https://example.com/{username}.png" }
+    ]
+}
+```
+
+Здесь `swimming` локален сам собой, из-за `state.inWater`, а `armored` —
+публичное условие, но `self = true` всё равно оставляет плащ себе. Флаг работает
+и совсем без `when`: такой провайдер считается условным (то есть побеждает
+провайдеров «просто на всякий случай»), но в сети не объявляется.
 
 **Кто выигрывает.** Сначала провайдеры, чьи условия выполнились. Потом
 провайдеры вовсе без `when`. Поэтому дефолтный провайдер с `when` не нужен:
@@ -482,6 +515,33 @@ Description  Stacked PNG: 13 frames 256x128, order=down
 - GPU-текстуры обновляются ~10 раз/сек, а не на каждый кадр
 - UMA-память под контролем: LRU-кэш с жёсткими лимитами
 - Адаптивная деградация: слишком большие плащи сжимаются, не убивая FPS
+
+## Аддоны
+
+CapeCraft расширяется сторонними модами: свой тип провайдера, свой формат
+картинки, свои плейсхолдеры, свой конфиг, свои события и модификаторы рендера.
+
+Аддон — обычный Fabric-мод, который регистрируется через entrypoint
+`capecraft:addons` и реализует `CapeAddon`. Версию API аддон проверяет сам при
+загрузке, чтобы не разойтись с модом:
+
+```json
+{ "entrypoints": { "capecraft:addons": ["com.example.MyAddon"] } }
+```
+
+```kotlin
+class MyAddon : CapeAddon {
+    override fun register(api: CapeApi) {
+        api.sourceTypes.register(CapeSourceType("github") { values ->
+            CapeSource { fetchCape(values.entries["repo"] as String) }
+        })
+    }
+}
+```
+
+**Документация: [API.md](API.md)** — все реестры, entrypoint, конфиг аддона,
+события, модификаторы рендера и миграция. Готовый рабочий пример — в
+`versions/<mc>/src/test/kotlin/dev/ggtv/capecraft/examples/ExampleCapeAddon.kt`.
 
 ## Лицензия
 

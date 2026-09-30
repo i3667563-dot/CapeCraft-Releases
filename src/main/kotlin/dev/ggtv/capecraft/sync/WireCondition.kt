@@ -115,6 +115,12 @@ data class WirePredicate(
  *
  * Порядок и набор — часть формата, поэтому добавление корня = бамп
  * [SyncProtocol.VERSION]. Связь с koren — только по [segment].
+ *
+ * `state` на проводе нет намеренно: это self-only корень, про который
+ * наблюдатель ничего не знает, и провайдер с таким условием не доходит до
+ * сети вовсе (`Provider.isSelfOnly`). Пустой набор тегов для него означал бы
+ * «это состояние одинаково у всех», а это ровно то поведение, от которого
+ * отказывались: условие должно быть видно только мне, а не всем.
  */
 enum class WireRoot(val tag: Int, val segment: String) {
     BIOME(0, "biome"),
@@ -122,11 +128,22 @@ enum class WireRoot(val tag: Int, val segment: String) {
     TIME(2, "time"),
     DIMENSION(3, "dimension"),
     LOCATION(4, "location"),
+    ARMOR(5, "armor"),
+    HEALTH(6, "health"),
     ;
 
     companion object {
         fun byTag(tag: Int): WireRoot? = entries.firstOrNull { it.tag == tag }
-        fun of(root: WorldRoot): WireRoot? = entries.firstOrNull { it.segment == root.segment }
+
+        /**
+         * `null`, если корень self-only: он не переводится в провод, и
+         * [WireCondition.from] на таком условии вернёт `null`, то есть
+         * провайдер целиком выпадет из объявления.
+         */
+        fun of(root: WorldRoot): WireRoot? {
+            if (Condition.isSelfOnlyRoot(root)) return null
+            return entries.firstOrNull { it.segment == root.segment }
+        }
     }
 
     fun toKoren(): WorldRoot? = WorldRoot.bySegment(segment)

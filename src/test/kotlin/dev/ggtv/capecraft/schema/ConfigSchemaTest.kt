@@ -13,6 +13,7 @@ import dev.ggtv.koren.KorenConfig
 import dev.ggtv.koren.WorldRoot
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -79,7 +80,8 @@ class ConfigSchemaTest {
                     { name = "b", type = "file", url = "https://ex.invalid/b.png",
                       extract = "$.b", path = "/tmp/b.png", priority = 7,
                       when = { biome: "snowy" },
-                      if = { username: "Steve" } },
+                      if = { username: "Steve" },
+                      self = true },
 
                     { name = "c", type = "json", url = "https://ex.invalid/c",
                       extract = "$.c", path = "/tmp/c.png", priority = 7,
@@ -99,6 +101,8 @@ class ConfigSchemaTest {
         assertEquals("username", url.ifCondition?.predicates?.single()?.name)
 
         assertEquals(Source.File("/tmp/b.png"), loaded[1].source)
+        assertTrue(loaded[1].selfOnly, "self = true обязан читаться загрузчиком")
+        assertFalse(loaded[0].selfOnly, "без self провайдер остаётся публичным")
         assertEquals(Source.Json("https://ex.invalid/c", "$.c"), loaded[2].source)
     }
 

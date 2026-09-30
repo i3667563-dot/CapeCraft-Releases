@@ -41,6 +41,11 @@ class KorenWorldTest {
                 "z" -> Value.VFloat(x * 2) // выдумано для второго поля
                 else -> throw CrenError.NotFound(path)
             }
+            // Armor, health и state — корни CapeCraft, а не koren: в koren
+            // попадают только через `WorldRoot`, и проверять их значения здесь
+            // нечем, фейковый мир про них ничего не знает.
+            WorldRoot.ARMOR, WorldRoot.HEALTH, WorldRoot.STATE ->
+                throw CrenError.NotFound(path)
         }
     }
 

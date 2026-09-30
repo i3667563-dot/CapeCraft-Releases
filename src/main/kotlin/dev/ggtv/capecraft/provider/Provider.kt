@@ -59,6 +59,7 @@ sealed interface Source {
  * @param condition условие, при котором провайдер активен (null = всегда).
  * @param ifCondition условие по переменным (null = не проверять).
  * @param priority приоритет выбора — по умолчанию 0 (порядок в списке).
+ * @param selfOnly `self = true`: не объявлять провайдер по сети.
  * @param addonSource non-null для аддон-провайдера (fetch определён аддоном).
  * @param values параметры из словаря .kn для аддон-провайдера (null для встроенного).
  */
@@ -68,12 +69,29 @@ class Provider(
     val condition: Condition? = null,
     val ifCondition: VarCondition? = null,
     val priority: Int = 0,
+    val selfOnly: Boolean = false,
     val addonSource: CapeSource? = null,
     val values: CapeValues? = null,
 ) {
 
     /** Есть ли хоть одно условие: без них провайдер работает всегда. */
-    val hasConditions: Boolean get() = condition != null || ifCondition != null
+    val hasConditions: Boolean
+        get() = condition != null || ifCondition != null || selfOnly
+
+    /**
+     * Провайдер не объявляется по сети: его плащ видно только себе.
+     *
+     * Ставится автоматически, если в `when` есть self-only условие
+     * ([Condition.hasSelfOnly]) — такие поля про другого игрока неизвестны,
+     * отправлять их нечего. Плюс ключ `self = true` в конфиге, которым
+     * помечается провайдер с публичными условиями: он остаётся в списке
+     * владельца, но никому больше не объявляется.
+     *
+     * [hasConditions] учитывает и его: провайдер с `self = true` без
+     * единого условия иначе попал бы в группу «без условий» наравне с
+     * обычными и выигрывал бы только за счёт приоритета.
+     */
+    val isSelfOnly: Boolean get() = selfOnly || condition?.hasSelfOnly == true
 
 
     /**

@@ -122,9 +122,14 @@ data class Field(
  * Схема условий `when`.
  *
  * Отдельный объект, а не вложенные [Field], потому что форма у `when`
- * не как у обычного словаря: ключ корня принимает **или** короткую запись
- * (`biome = "snowy"`), **или** словарь с полями (`biome { id = "..." }`).
+ * не как у обычного словаря: один корень живёт в двух видах — короткой
+ * записью (`biome = "snowy"`, только если у корня есть поле по умолчанию)
+ * и плоским ключом с точкой (`biome.precipitation = "snow"`, всегда).
  * Внутри одного уровня это два разных смысла, и [Field] их не выражает.
+ *
+ * Именно плоский ключ с точкой, а не вложенный словарь: значение условия —
+ * строка, число или диапазон ([dev.ggtv.capecraft.condition.Condition.parseValueFor]),
+ * и `biome { id = "..." }` игра отвергает при загрузке.
  */
 object WhenSchema {
     /**
@@ -149,7 +154,13 @@ object WhenSchema {
         WorldRoot.BIOME to listOf("temperature"),
         WorldRoot.TIME to listOf("tick"),
         WorldRoot.LOCATION to listOf("x", "y", "z"),
+        // И текущее, и максимальное здоровье — числа, поэтому `health.max`
+        // пишется как `">=20"`, а `health.current: "<10"`.
+        WorldRoot.HEALTH to listOf("current", "max"),
     )
+
+    /** Значения булевых полей: мир отдаёт их строкой, а не `Value.VBool`. */
+    private val BOOLEANS = listOf("true", "false")
 
     /**
      * Поля со списком значений: всё, что мир отдаёт, — и больше ничего.
@@ -168,7 +179,36 @@ object WhenSchema {
         // Порядок — как в `timeField`: сначала то, что человек ищет чаще.
         WorldRoot.TIME to mapOf("period" to listOf("day", "sunrise", "sunset", "night")),
         WorldRoot.DIMENSION to mapOf("type" to listOf("overworld", "nether", "end")),
+        // Тир брони одинаков для всех слотов — список один, а не на слот.
+        WorldRoot.ARMOR to mapOf(
+            "head" to Condition.ARMOR_TIERS,
+            "chest" to Condition.ARMOR_TIERS,
+            "legs" to Condition.ARMOR_TIERS,
+            "feet" to Condition.ARMOR_TIERS,
+        ),
+        // Булевы поля отдаются строками "true"/"false", а не `Value.VBool`:
+        // тогда `state.sneaking: true` разбирается в равенство строке и работает
+        // тем же кодом сравнения, что остальные поля, без отдельной ветки.
+        WorldRoot.STATE to mapOf(
+            "inWater" to BOOLEANS,
+            "sneaking" to BOOLEANS,
+            "sprinting" to BOOLEANS,
+            "onGround" to BOOLEANS,
+            "pose" to listOf(
+                "standing", "crouching", "swimming", "fall_flying",
+                "sleeping", "spin_attack", "long_jumping", "dying",
+            ),
+        ),
     )
+
+    /**
+     * Self-only корни — те, что не уезжают по сети.
+     *
+     * Дублирует [Condition.SELF_ONLY_ROOTS] как источник правды для редактора:
+     * подсказка не должна предлагать синхронизируемое поле, если провайдер с
+     * ним всё равно не объявляется.
+     */
+    fun isSelfOnlyRoot(root: WorldRoot): Boolean = Condition.isSelfOnlyRoot(root)
 
     /** Поле по умолчанию для корня без точки — из рантайма, не второй раз. */
     fun defaultFieldOf(root: WorldRoot): String? = Condition.DEFAULT_FIELDS[root]
@@ -222,6 +262,10 @@ object WhenSchema {
         ),
         // У координат коротких записей нет: сравнивать не с чем.
         WorldRoot.LOCATION to linkedMapOf(),
+        // Короткая запись брони — всегда нагрудник, поле по умолчанию.
+        WorldRoot.ARMOR to Condition.ARMOR_TIERS.associateWith { "chest = $it" },
+        WorldRoot.HEALTH to linkedMapOf(),
+        WorldRoot.STATE to linkedMapOf(),
     )
 
     /** Поля корня — из [Condition.LIVE_FIELDS], чтобы совпадало с рантаймом. */
@@ -273,9 +317,45 @@ object WhenSchema {
                 "z" -> "Координата Z плаща."
                 else -> return null
             }
+
+            WorldRoot.ARMOR -> when (field) {
+                "head" -> armorDoc("Шлем")
+                "chest" -> armorDoc("Нагрудник")
+                "legs" -> armorDoc("Поножи")
+                "feet" -> armorDoc("Ботинки")
+                else -> return null
+            }
+
+            WorldRoot.HEALTH -> when (field) {
+                "current" -> "Текущее здоровье: упало после урона, " +
+                    "поэтому `health.current: \">10\"` — «более-менее жив»."
+                "max" -> "Максимальное здоровье. Не меняется от урона, " +
+                    "поэтому подходит для проверки «а сколько у меня вообще»."
+                else -> return null
+            }
+
+            WorldRoot.STATE -> when (field) {
+                "inWater" -> withValues(root, field, "Касается ли воды")
+                "sneaking" -> withValues(root, field, "Крадётся ли игрок")
+                "sprinting" -> withValues(root, field, "Бежит ли игрок")
+                "onGround" -> withValues(root, field, "Стоит ли игрок на земле")
+                "pose" -> withValues(root, field, "Поза игрока")
+                else -> return null
+            }
         }
         return described
     }
+
+    /**
+     * Описание тира брони.
+     *
+     * `armor` — публичный корень: надетую броню видно и другим, поэтому
+     * условие по нему считает каждый клиент сам. Слот назван словом, а не
+     * полем `head/chest/...`, потому что в подсказке «нагрудник» понятнее.
+     */
+    private fun armorDoc(caption: String): String = withValues(
+        WorldRoot.ARMOR, "chest", "Тир $caption",
+    )
 
     /**
      * Описание с перечислением из [VALUES].
@@ -342,7 +422,18 @@ object ConfigSchema {
             name = ProviderNames.Keys.WHEN,
             type = SchemaType.DICT,
             doc = "Условия проверки по миру того, кто смотрит. Пустое условие " +
-                "совпадает всегда.",
+                "совпадает всегда. Условие с полем `state` делает провайдер " +
+                "self-only: такой плащ виден только вам.",
+        ),
+        Field(
+            name = ProviderNames.Keys.SELF,
+            type = SchemaType.BOOL,
+            doc = "Не отдавать этот провайдер другим игрокам. Плащ остаётся " +
+                "вашим, но в сетевом объявлении его не будет. Ставится " +
+                "автоматически, если в `when` есть self-only поле `state`. " +
+                "Смешивать в одном провайдере публичные и self-only условия " +
+                "бессмысленно: половина всё равно не уедет.",
+            def = "false",
         ),
         Field(
             name = ProviderNames.Keys.IF,

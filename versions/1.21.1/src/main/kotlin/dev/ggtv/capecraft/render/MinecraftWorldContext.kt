@@ -5,6 +5,11 @@ import dev.ggtv.koren.WorldContext
 import dev.ggtv.koren.WorldRoot
 import net.minecraft.client.MinecraftClient
 import net.minecraft.entity.Entity
+import net.minecraft.entity.EntityPose
+import net.minecraft.entity.EquipmentSlot
+import net.minecraft.entity.LivingEntity
+import net.minecraft.item.ItemStack
+import net.minecraft.registry.Registries
 import net.minecraft.world.World
 
 /**
@@ -33,6 +38,9 @@ object MinecraftWorldContext : WorldContext {
                 WorldRoot.TIME -> timeField(world, field)
                 WorldRoot.DIMENSION -> dimensionField(world, field)
                 WorldRoot.LOCATION -> locationField(player, field)
+                WorldRoot.ARMOR -> armorField(player, field)
+                WorldRoot.HEALTH -> healthField(player, field)
+                WorldRoot.STATE -> stateField(player, field)
             }
         } catch (_: Exception) {
             Value.VStr("unknown")
@@ -59,6 +67,12 @@ class EntityWorldContext(private val entity: Entity?) : WorldContext {
                 WorldRoot.TIME -> timeField(world, field)
                 WorldRoot.DIMENSION -> dimensionField(world, field)
                 WorldRoot.LOCATION -> locationField(entity, field)
+                WorldRoot.ARMOR -> armorField(entity, field)
+                WorldRoot.HEALTH -> healthField(entity, field)
+                // Self-only: про чужого игрока это неизвестно, поэтому условие
+                // не совпадает. Провайдер с таким условием и не объявляется —
+                // см. `Provider.isSelfOnly`.
+                WorldRoot.STATE -> Value.VStr("unknown")
             }
         } catch (_: Exception) {
             Value.VStr("unknown")
@@ -127,4 +141,119 @@ private fun locationField(entity: Entity?, field: String): Value {
         "z" -> Value.VFloat(entity.z)
         else -> Value.VStr("unknown")
     }
+}
+
+// ──────────────────── броня, здоровье, состояние ────────────────────
+
+/**
+ * Тиры брони, которые обещает подсказка редактора.
+ *
+ * Дублируется в [dev.ggtv.capecraft.condition.Condition.ARMOR_TIERS] намеренно:
+ * именно литералами в этом файле сверяет его `WorldContextAgreementTest`, и
+ * ссылка на общий список сделала бы проверку совпадением с самим собой.
+ */
+private val ARMOR_TIERS = setOf(
+    "none", "leather", "chainmail", "iron", "gold", "diamond", "netherite", "turtle",
+)
+
+/** Части тела, для которых id предмета разбирается на тир и слот. */
+private val ARMOR_PIECES = setOf("helmet", "chestplate", "leggings", "boots")
+
+/**
+ * Тир брони в слоте.
+ *
+ * Тир берётся из id предмета: `diamond_chestplate` → `diamond`. Через
+ * `ArmorMaterial` не вышло бы: в 1.21 это `RegistryEntry<ArmorMaterial>`, а
+ * в 26.2 материал стал записью без имени вовсе, и общего у них нет ничего.
+ * Зато id предмета — данные, а не API, и одинаковы во всех версиях.
+ *
+ * `unknown`, а не `none`, для не-брони и для брони с тиром, которого нет в
+ * [ARMOR_TIERS]: различать «пусто» и «не то» нужно, иначе аддон с
+ * нестандартной бронёй тихо выглядел бы как `none`.
+ */
+private fun armorTier(stack: ItemStack): String {
+    if (stack.isEmpty) return "none"
+    val id = Registries.ITEM.getId(stack.item).path
+    val tier = id.substringBefore('_')
+    val piece = id.substringAfter('_', "")
+    if (piece !in ARMOR_PIECES) return "unknown"
+    return if (tier in ARMOR_TIERS) tier else "unknown"
+}
+
+/**
+ * Броня в слоте: `head`, `chest`, `legs`, `feet`.
+ *
+ * Публичное условие: надетую броню видно и со стороны, поэтому его считает
+ * каждый клиент сам, против своего наблюдаемого игрока.
+ */
+private fun armorField(entity: Entity?, field: String): Value {
+    val living = entity as? LivingEntity ?: return Value.VStr("unknown")
+    val slot = when (field) {
+        "head" -> EquipmentSlot.HEAD
+        "chest" -> EquipmentSlot.CHEST
+        "legs" -> EquipmentSlot.LEGS
+        "feet" -> EquipmentSlot.FEET
+        else -> return Value.VStr("unknown")
+    }
+    return Value.VStr(armorTier(living.getEquippedStack(slot)))
+}
+
+/**
+ * Здоровье: `current` и `max`.
+ *
+ * Тоже публичное: здоровье чужого игрока видно над его головой. `current`
+ * падает от урона, `max` — нет, поэтому для «а сколько у меня вообще
+ * здоровья» нужен `max`, а для «сколько осталось» — `current`.
+ */
+private fun healthField(entity: Entity?, field: String): Value {
+    val living = entity as? LivingEntity ?: return Value.VStr("unknown")
+    return when (field) {
+        "current" -> Value.VFloat(living.health.toDouble())
+        "max" -> Value.VFloat(living.maxHealth.toDouble())
+        else -> return Value.VStr("unknown")
+    }
+}
+
+/**
+ * Состояние: `inWater`, `sneaking`, `sprinting`, `onGround`, `pose`.
+ *
+ * Self-only. Про чужого игрока всё это неизвестно — в воде ли он, на земле ли,
+ * — поэтому у наблюдаемого [EntityWorldContext] эти поля отдают `unknown`, и
+ * условие не совпадает. Владелец же считает их про себя и видит свой плащ.
+ *
+ * Булевы поля отдаются строками, а не `Value.VBool`, чтобы работал тот же код
+ * сравнения, что у строк: `state.sneaking: true` разбирается в равенство строке
+ * `"true"`, а `!true` — в «не равно», без отдельной ветки в `Op`.
+ */
+private fun stateField(entity: Entity?, field: String): Value {
+    if (entity == null) return Value.VStr("unknown")
+    return when (field) {
+        "inWater" -> Value.VStr(if (entity.isTouchingWater) "true" else "false")
+        "sneaking" -> Value.VStr(if (entity.isSneaking) "true" else "false")
+        "sprinting" -> Value.VStr(if (entity.isSprinting) "true" else "false")
+        "onGround" -> Value.VStr(if (entity.isOnGround) "true" else "false")
+        "pose" -> Value.VStr(poseName(entity.pose))
+        else -> Value.VStr("unknown")
+    }
+}
+
+/**
+ * Поза как стабильная строка.
+ *
+ * [dev.ggtv.capecraft.schema.WhenSchema] обещает `fall_flying`, а Minecraft
+ * называет эту позу по-разному: в 1.21.1 это `FALL_FLYING`, дальше — `GLIDING`.
+ * Поэтому перечисление здесь явное, а не `name.lowercase()`: так строка в
+ * конфиге одинакова во всех версиях, а переименование позы в игре не выдаст
+ * себя молчаливым обещанием нового значения, которого в подсказке нет.
+ */
+private fun poseName(pose: EntityPose): String = when (pose) {
+    EntityPose.STANDING -> "standing"
+    EntityPose.CROUCHING -> "crouching"
+    EntityPose.SWIMMING -> "swimming"
+    EntityPose.FALL_FLYING -> "fall_flying"
+    EntityPose.SLEEPING -> "sleeping"
+    EntityPose.SPIN_ATTACK -> "spin_attack"
+    EntityPose.LONG_JUMPING -> "long_jumping"
+    EntityPose.DYING -> "dying"
+    else -> "unknown"
 }

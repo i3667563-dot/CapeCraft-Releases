@@ -618,9 +618,31 @@ object CrenAnalyzer {
         return out
     }
 
-    /** Короткая запись `weather: "rain"`: значение должно быть синонимом. */
+    /**
+     * Короткая запись `weather: "rain"`.
+     *
+     * Сначала проверяется «у корня есть поле по умолчанию», и только потом —
+     * значение-синоним. Порядок не случайный: так же разбирает и игра
+     * ([dev.ggtv.capecraft.condition.Condition.parsePredicate] требует поле до
+     * того, как посмотрит на синонимы), поэтому редактор и рантайм должны
+     * отвергать одно и то же — иначе подсветка обещает то, чего не будет.
+     */
     private fun checkWhenShortForm(child: CrenEntry, root: WorldRoot): CrenDiagnostic? {
         val leaf = child.value as? CrenLeaf ?: return null
+        if (WhenSchema.defaultFieldOf(root) == null) {
+            val fields = WhenSchema.fieldsOf(root)
+            return CrenDiagnostic(
+                child.keyRange,
+                "у «${root.segment}» нет поля по умолчанию — нужно указать поле: " +
+                    fields.joinToString(", "),
+                CrenSeverity.ERROR,
+                CODE_WHEN,
+                fields.map {
+                    val key = "${root.segment}.$it"
+                    CrenFix("заменить на «$key»", key, child.keyRange)
+                },
+            )
+        }
         val text = leaf.lexeme.value
         val aliases = WhenSchema.aliasesOf(root)
         if (aliases.isEmpty() || text in aliases) return null

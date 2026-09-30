@@ -31,6 +31,7 @@ object ProviderNames {
         const val WHEN = "when"
         const val IF = "if"
         const val PRIORITY = "priority"
+        const val SELF = "self"
     }
 
     /** Типы провайдеров, как в `type = ...`. */

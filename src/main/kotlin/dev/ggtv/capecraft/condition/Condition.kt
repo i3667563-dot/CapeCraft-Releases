@@ -27,6 +27,17 @@ data class Condition(val predicates: List<Predicate>) {
     /** Выполняется ли условие на живом мире (AND по всем предикатам). */
     fun matches(world: WorldContext): Boolean = predicates.all { it.matches(world) }
 
+    /**
+     * Есть ли в условии хотя бы один self-only предикат.
+     *
+     * Провайдер с таким условием целиком остаётся локальным: остальные
+     * клиенты не знают ни про этот набор, ни про то, какое именно условие
+     * сработало. Смешивать в одном провайдере публичные и self-only условия
+     * бессмысленно — половина всё равно не уедет, поэтому такое срабатывает
+     * как пометка «локальный».
+     */
+    val hasSelfOnly: Boolean get() = predicates.any { it.root in SELF_ONLY_ROOTS }
+
     companion object {
         /** Поле по умолчанию для корня без точки (`when { weather: "rain" }`). */
         val DEFAULT_FIELDS = mapOf(
@@ -34,6 +45,12 @@ data class Condition(val predicates: List<Predicate>) {
             WorldRoot.WEATHER to "condition",
             WorldRoot.TIME to "period",
             WorldRoot.DIMENSION to "type",
+            // У брони есть осмысленное поле по умолчанию: нагрудник — тот слот,
+            // про который чаще всего и спрашивают («а в чём я?»).
+            WorldRoot.ARMOR to "chest",
+            // У `health` поля по умолчанию нет намеренно: оба поля числовые,
+            // а короткая запись разворачивается в сравнение со строкой и
+            // никогда бы не совпала. Пишут `health.current` и `health.max`.
         )
 
         /**
@@ -50,7 +67,26 @@ data class Condition(val predicates: List<Predicate>) {
             WorldRoot.TIME to listOf("period", "tick"),
             WorldRoot.DIMENSION to listOf("type", "id"),
             WorldRoot.LOCATION to listOf("x", "y", "z"),
+            WorldRoot.ARMOR to listOf("head", "chest", "legs", "feet"),
+            WorldRoot.HEALTH to listOf("current", "max"),
+            WorldRoot.STATE to listOf("inWater", "sneaking", "sprinting", "onGround", "pose"),
         )
+
+        /**
+         * Корни, которые не уезжают по сети.
+         *
+         * `state` описывает то, чего про другого игрока не узнать: в воде ли
+         * он, крадётся ли, на земле ли. Владелец считает это про себя, а
+         * чужой клиент про такого игрока не знает ничего — поэтому условие с
+         * таким корнем делает провайдера локальным целиком.
+         *
+         * Само свойство живёт здесь, а не в koren: [WorldRoot] — вендоренный
+         * формат, и продуктовое решение о синхронизации в него тащить нельзя.
+         */
+        val SELF_ONLY_ROOTS = setOf(WorldRoot.STATE)
+
+        /** Что отдаёт только владелец, а что видят все. */
+        fun isSelfOnlyRoot(root: WorldRoot): Boolean = root in SELF_ONLY_ROOTS
 
         /** Разобрать блок `when { ... }` из словаря. Пустой словарь — пустое условие. */
         fun parse(dict: Value.VDict): Condition {
@@ -117,9 +153,29 @@ data class Condition(val predicates: List<Predicate>) {
                     "end", "the_end" -> Triple("type", Op.Eq, Expected.Str("end"))
                     else -> null
                 }
+                // `armor: "netherite"` — нагрудник, поле по умолчанию.
+                WorldRoot.ARMOR -> ARMOR_TIERS
+                    .takeIf { v in it }
+                    ?.let { Triple("chest", Op.Eq, Expected.Str(v)) }
+                // У `health` и `state` поля по умолчанию нет, а значит нет и
+                // смысла в короткой записи: сравнивать не с чем.
+                WorldRoot.HEALTH, WorldRoot.STATE -> null
                 else -> null
             }
         }
+
+        /**
+         * Тиры брони — обещание, а не описание Minecraft.
+         *
+         * Имя достаётся из id предмета (`diamond_chestplate` → `diamond`),
+         * а не из `ArmorMaterial`: в 1.21 это `RegistryEntry` по id, в 26.2
+         * материал вообще стал записью без имени, и общего у них ничего нет.
+         * Список нужен ещё и для того, чтобы `unknown` отличался от настоящего
+         * тира: без него подошло бы что угодно с подстрокой до `_`.
+         */
+        val ARMOR_TIERS = listOf(
+            "none", "leather", "chainmail", "iron", "gold", "diamond", "netherite", "turtle",
+        )
 
         /**
          * Строка → операция + ожидаемое значение.

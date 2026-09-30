@@ -188,6 +188,52 @@ class CrenAnalyzerTest {
     }
 
     @Test
+    fun `короткая запись корня без поля по умолчанию это ошибка`() {
+        // `health` и `state` — корни без поля по умолчанию: `health: 20` игра
+        // отвергает при загрузке («нужно указать поле»), поэтому молчать здесь
+        // нельзя — человек увидит падение уже в игре, без редактора рядом.
+        val d = diags(
+            """capeCraft { providers [ { name = "a", type = "url", when = { health: 20 } } ] }""",
+        )
+        val err = d.single { it.code == CrenAnalyzer.CODE_WHEN }
+        assertEquals(CrenSeverity.ERROR, err.severity, err.message)
+        assertTrue(err.message.contains("current"), err.message)
+        assertTrue(err.message.contains("max"), err.message)
+        // Правка должна давать готовый рабочий ключ, а не имя поля.
+        assertTrue(
+            err.fixes.any { it.newText == "health.current" },
+            "ожидалась правка в health.current: ${err.fixes.map { it.newText }}",
+        )
+    }
+
+    @Test
+    fun `короткая запись state без поля это ошибка`() {
+        val d = diags(
+            """capeCraft { providers [ { name = "a", type = "url", when = { state: "standing" } } ] }""",
+        )
+        val err = d.single { it.code == CrenAnalyzer.CODE_WHEN }
+        assertEquals(CrenSeverity.ERROR, err.severity, err.message)
+        assertTrue(err.message.contains("pose"), err.message)
+        assertTrue(
+            err.fixes.any { it.newText == "state.pose" },
+            "ожидалась правка в state.pose: ${err.fixes.map { it.newText }}",
+        )
+    }
+
+    @Test
+    fun `у корня с полем по умолчанию короткая запись не ругается`() {
+        // Обратная сторона предыдущих двух: `armor: "diamond"` — это `chest`,
+        // и ошибкой быть не может.
+        val d = diags(
+            """capeCraft { providers [ { name = "a", type = "url", when = { armor: "diamond" } } ] }""",
+        )
+        assertTrue(
+            d.none { it.severity == CrenSeverity.ERROR },
+            "armor без точки валиден: ${d.map { it.message }}",
+        )
+    }
+
+    @Test
     fun `у location нет короткой записи и это не ругается`() {
         // У `location` поля по умолчанию нет, писать надо `location.y`. Если
         // бы мы проверяли синонимы вслепую, то ругались бы на правильный ключ.
@@ -496,6 +542,49 @@ class CrenAnalyzerTest {
         val items = CrenAnalyzer.complete(CrenDocument(text), text.indexOf('|'))
         val labels = items.map { it.label }
         assertTrue(labels.containsAll(listOf("biome", "weather", "time")), "подсказки: $labels")
+    }
+
+    @Test
+    fun `подсказки в when дают новые корни брони здоровья и состояния`() {
+        // Редактор берёт корни из WhenSchema, но «новые корни есть» проверяется
+        // отдельно от их парсинга: забытый в VALUES корень выглядит в
+        // подсказке как рабочий, а в конфиге падает.
+        val text = "capeCraft { providers [ { name = \"a\", type = \"url\", when = { | } } ] }"
+        val labels = CrenAnalyzer.complete(CrenDocument(text), text.indexOf('|')).map { it.label }
+        assertTrue(
+            labels.containsAll(listOf("armor", "health", "state")),
+            "в подсказках нет новых корней: $labels",
+        )
+    }
+
+    @Test
+    fun `подсказки значения брони дают тиры`() {
+        val text =
+            "capeCraft { providers [ { name = \"a\", type = \"url\", when = { armor.chest: | } } ] }"
+        val labels = CrenAnalyzer.complete(CrenDocument(text), text.indexOf('|')).map { it.label }
+        assertTrue(
+            labels.containsAll(listOf("none", "leather", "diamond", "turtle")),
+            "подсказки тиров брони: $labels",
+        )
+    }
+
+    @Test
+    fun `подсказки значения состояния дают позы и логические значения`() {
+        val pose =
+            "capeCraft { providers [ { name = \"a\", type = \"url\", when = { state.pose: | } } ] }"
+        val poses = CrenAnalyzer.complete(CrenDocument(pose), pose.indexOf('|')).map { it.label }
+        assertTrue(
+            poses.containsAll(listOf("standing", "fall_flying", "long_jumping")),
+            "подсказки поз: $poses",
+        )
+
+        val sneak =
+            "capeCraft { providers [ { name = \"a\", type = \"url\", when = { state.sneaking: | } } ] }"
+        val bools = CrenAnalyzer.complete(CrenDocument(sneak), sneak.indexOf('|')).map { it.label }
+        assertTrue(
+            bools.containsAll(listOf("true", "false")),
+            "подсказки логических значений: $bools",
+        )
     }
 
     @Test
