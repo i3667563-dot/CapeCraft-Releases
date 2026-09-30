@@ -93,6 +93,10 @@ class CapeCraftClient : ClientModInitializer {
             // провайдер, и при смене — бесшовно подгружаем новый плащ.
             if (tick % 20 == 0) {
                 registry.refreshConditions(dev.ggtv.capecraft.render.MinecraftWorldContext)
+                // Ресурсы ушедших игроков. Здесь, а не по событию удаления
+                // сущности: события в клиентском мире у Fabric нет, а игрок,
+                // исчезнувший из кадра, больше не зовёт `ensureLoading`.
+                registry.forgetAbsentObjects()
             }
         }
     }

@@ -1,8 +1,8 @@
 # capecraft-lsp
 
-> **Статус: бета (0.1-beta).** Релизы — в GitHub-релизах репозитория
-> `CapeCraft-Releases` (теги `lsp-v*`), обновления частые; как поставить —
-> см. «Релиз».
+> **Статус: стабильный (1.0.0).** Проверен на реальном конфиге: ноль ошибок.
+> Релизы — в GitHub-релизах репозитория `CapeCraft-Releases` (теги `lsp-v*`);
+> как поставить — см. «Релиз».
 
 Language Server для `.kn`/`.crn` — конфигов CapeCraft на языке
 [KoreN](https://github.com/i3667563-dot/koren) (Minecraft-aware `.kn`) поверх
@@ -62,7 +62,9 @@ LSP-сервер — отдельный артефакт в этом же реп
 
 Процедура:
 
-1. Поднять `lsp_version` в `gradle.properties` (например `0.1-beta` → `0.1.1-beta`).
+1. Поднять `lsp_version` в `gradle.properties` (например `1.0.0` → `1.0.1`) и
+   продублировать в `LspServer.version` — это то, что сервер отдаёт клиенту в
+   `serverInfo`.
 2. Написать заметки релиза в `release-notes/lsp/<версия>.md` — без этого файла
    workflow упадёт намеренно, список изменений не должен теряться.
 3. `git tag lsp-v<версия>` и `git push releases lsp-v<версия>` (remote `releases`,

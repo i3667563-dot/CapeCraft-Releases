@@ -10,9 +10,14 @@ package dev.ggtv.kjen
 object Tokenizer {
 
     /** Разобрать входной текст на токены. */
-    fun tokenize(input: String): List<Token> = tokenizeWithEnv(input, System.getenv())
+    fun tokenize(input: String, onUnset: (String) -> Unit = {}): List<Token> =
+        tokenizeWithEnv(input, System.getenv(), onUnset)
 
-    internal fun tokenizeWithEnv(input: String, env: Map<String, String>): List<Token> {
+    internal fun tokenizeWithEnv(
+        input: String,
+        env: Map<String, String>,
+        onUnset: (String) -> Unit = {},
+    ): List<Token> {
         val tokens = mutableListOf<Token>()
         var line = 1
         var col = 1
@@ -106,7 +111,7 @@ object Tokenizer {
                             }
                         }
                     }
-                    val value = interpolateEnvironment(s.toString(), env, start)
+                    val value = interpolateEnvironment(s.toString(), env, start, onUnset)
                     emit(TokenKind.Str(value))
                 }
 
@@ -201,7 +206,7 @@ object Tokenizer {
                         raw.appendCodePoint(next)
                         advance(next)
                     }
-                    val value = interpolateEnvironment(raw.toString(), env, start)
+                    val value = interpolateEnvironment(raw.toString(), env, start, onUnset)
                     emit(TokenKind.Str(value))
                 }
 
@@ -236,12 +241,11 @@ object Tokenizer {
     private fun Int.isWordStart(): Boolean =
         Character.isLetter(this) || this == '_'.code
 
-    private data class EnvironmentDefault(val value: String, val useIfEmpty: Boolean)
-
     private fun interpolateEnvironment(
         input: String,
         env: Map<String, String>,
         span: Span,
+        onUnset: (String) -> Unit,
     ): String {
         val output = StringBuilder(input.length)
         var i = 0
@@ -264,16 +268,16 @@ object Tokenizer {
                     }
                     val expression = input.substring(i + 2, end)
                     val (name, default) = splitEnvironmentExpression(expression, span)
-                    pushEnvironmentValue(output, name, default, env, span)
+                    pushEnvironmentValue(output, name, default, env, span, onUnset)
                     i = end + 1
                 }
                 else -> {
-                    if (next != null && isEnvironmentNameStart(next)) {
-                        var end = i + 2
-                        while (end < input.length && isEnvironmentNameContinue(input[end])) end += 1
-                        val name = input.substring(i + 1, end)
-                        pushEnvironmentValue(output, name, null, env, span)
-                        i = end
+                    val afterDollar = input.substring(i + 1)
+                    val nameLength = EnvName.lengthAt(afterDollar)
+                    if (nameLength > 0) {
+                        val name = afterDollar.substring(0, nameLength)
+                        pushEnvironmentValue(output, name, null, env, span, onUnset)
+                        i += 1 + nameLength
                     } else {
                         output.append('$')
                         if (next != null) {
@@ -292,17 +296,9 @@ object Tokenizer {
     private fun splitEnvironmentExpression(
         expression: String,
         span: Span,
-    ): Pair<String, EnvironmentDefault?> {
-        val separator = expression.indexOf(":-").takeIf { it >= 0 }
-            ?: expression.indexOf('-').takeIf { it >= 0 }
-        val name = if (separator == null) expression else expression.substring(0, separator)
-        val default = if (separator == null) null else EnvironmentDefault(
-            value = expression.substring(separator + if (expression.startsWith(":-", separator)) 2 else 1),
-            useIfEmpty = expression.startsWith(":-", separator),
-        )
-        if (name.isEmpty() || !isEnvironmentNameStart(name[0]) ||
-            name.drop(1).any { !isEnvironmentNameContinue(it) }
-        ) {
+    ): Pair<String, String?> {
+        val (name, default) = EnvName.splitDefault(expression)
+        if (!EnvName.isValid(name)) {
             throw CrenError.Parse("неверное имя переменной окружения в «\${$expression}»", span)
         }
         return name to default
@@ -311,27 +307,23 @@ object Tokenizer {
     private fun pushEnvironmentValue(
         output: StringBuilder,
         name: String,
-        default: EnvironmentDefault?,
+        default: String?,
         env: Map<String, String>,
         span: Span,
+        onUnset: (String) -> Unit,
     ) {
         val value = env[name]
         if (value != null) {
-            output.append(if (default != null && default.useIfEmpty && value.isEmpty()) default.value else value)
+            output.append(if (default != null && value.isEmpty()) default else value)
             return
         }
         if (default != null) {
-            output.append(default.value)
+            output.append(default)
             return
         }
-        throw CrenError.Parse("переменная окружения «$name» не задана", span)
+        onUnset(name)
     }
 
-    private fun isEnvironmentNameStart(value: Char): Boolean =
-        value in 'A'..'Z' || value in 'a'..'z' || value == '_'
-
-    private fun isEnvironmentNameContinue(value: Char): Boolean =
-        isEnvironmentNameStart(value) || value in '0'..'9'
 }
 
 /** Виды токенов. */

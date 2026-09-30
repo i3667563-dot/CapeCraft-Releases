@@ -276,6 +276,93 @@ class ProviderLoaderTest {
     }
 
     @Test
+    fun `незаданная переменная не роняет конфиг целиком`() {
+        // Требование: `$HOST` без переменной окружения — это пустой адрес, а не
+        // падение. Раньше один такой провайдер ронял весь файл, и игрок оставался
+        // без плащей вообще, хотя три других адреса были в порядке.
+        val unset = mutableListOf<String>()
+        val cfg = KorenConfig.fromString(
+            """
+            capeCraft {
+                providers [
+                    { name = "ok", type = "url", url = "https://a.example/c.png" },
+                    { name = "broken", type = "url", url = "${'$'}NO_SUCH_HOST/c.png" },
+                    { name = "ok2", type = "url", url = "https://b.example/c.png" },
+                ]
+            }
+            """.trimIndent(),
+            onUnset = { unset += it },
+        )
+
+        val providers = ProviderLoader.load(cfg)
+        assertEquals(listOf("ok", "broken", "ok2"), providers.map { it.name })
+        assertEquals(listOf("NO_SUCH_HOST"), unset)
+    }
+
+    @Test
+    fun `пустой дефолт не считается незаданной переменной`() {
+        // `${NAME:-}` — это «адреса нет», и в onUnset имя попасть не должно:
+        // иначе в лог сыпалось бы предупреждение о том, чего человек не
+        // забывал, а сам так и просил.
+        val unset = mutableListOf<String>()
+        val cfg = KorenConfig.fromString(
+            """
+            capeCraft {
+                providers [
+                    { name = "empty", type = "url", url = "${'$'}{NO_SUCH_HOST:-}/c.png" },
+                ]
+            }
+            """.trimIndent(),
+            onUnset = { unset += it },
+        )
+
+        val providers = ProviderLoader.load(cfg)
+        assertEquals(listOf("empty"), providers.map { it.name })
+        assertEquals(Source.Url("/c.png"), providers.single().source)
+        assertEquals(emptyList<String>(), unset)
+    }
+
+    @Test
+    fun `незаданная переменная без дефолта даёт пустой адрес и попадает в onUnset`() {
+        val unset = mutableListOf<String>()
+        val cfg = KorenConfig.fromString(
+            """
+            capeCraft {
+                providers [
+                    { name = "broken", type = "url", url = "${'$'}NO_SUCH_HOST/c.png" },
+                ]
+            }
+            """.trimIndent(),
+            onUnset = { unset += it },
+        )
+
+        val providers = ProviderLoader.load(cfg)
+        assertEquals(listOf("broken"), providers.map { it.name })
+        assertEquals(listOf("NO_SUCH_HOST"), unset)
+    }
+
+    @Test
+    fun `имя с дефисом и подчёркиванием доезжает до адреса`() {
+        val cfg = KorenConfig.fromStringWithEnv(
+            """
+            capeCraft {
+                providers [
+                    { name = "d", type = "url", url = "https://${'$'}{BASE-URL}/c.png" },
+                    { name = "u", type = "url", url = "https://${'$'}BASE_URL/c.png" },
+                    { name = "t", type = "url", url = "${'$'}BASE/api/cape.png" },
+                ]
+            }
+            """.trimIndent(),
+            mapOf("BASE-URL" to "d.example", "BASE_URL" to "u.example", "BASE" to "localhost:8080"),
+        )
+
+        val providers = ProviderLoader.load(cfg)
+        assertEquals(Source.Url("https://d.example/c.png"), providers[0].source)
+        assertEquals(Source.Url("https://u.example/c.png"), providers[1].source)
+        assertEquals(Source.Url("localhost:8080/api/cape.png"), providers[2].source)
+    }
+
+    @Test
     fun `опечатка в значении роняет загрузку конфига`() {
         // Раньше такой провайдер грузился и просто не срабатывал: ошибки не
         // было нигде, плащ не появлялся, и причину нельзя было назвать.

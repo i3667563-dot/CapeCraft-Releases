@@ -260,7 +260,15 @@ class KorenResolver(
                     }
                 }
                 1 -> block.get(segment, 1) ?: throw CrenError.NotFound(pathLabel)
-                else -> throw CrenError.Ambiguous(segment, count)
+                // Позиции всех совпадений обязательны: без них сообщение
+                // отвечает «сколько», но не «где», а это ровно то, что нужно
+                // человеку, чтобы починить конфиг. Игра и редактор обязаны
+                // говорить одно и то же, поэтому текст ошибки общий.
+                else -> throw CrenError.Ambiguous(
+                    segment,
+                    count,
+                    block.entries.filter { it.key == segment }.map { it.span },
+                )
             }
         }
 

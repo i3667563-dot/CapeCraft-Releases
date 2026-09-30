@@ -381,6 +381,63 @@ private fun Predicate.matches(world: WorldContext): Boolean {
     return op.apply(actual, expected)
 }
 
+/**
+ * Разбор одного предиката: что в мире на самом деле против чего ждали.
+ *
+ * Отдельный тип, а не строка, потому что `/cp list` должен показать не
+ * «условие не выполнилось», а пару значений: иначе провайдер, который
+ * справедливо отсеялся, выглядит так же, как тот, который не проверили.
+ */
+data class PredicateReport(
+    /** `armor.chest` — корни и поле, как их пишут в конфиге. */
+    val path: String,
+    /** Значение из мира, как его вернул контекст. */
+    val actual: String,
+    /** Ожидание с оператором: `= netherite`, `<= -20`, `= rain`. */
+    val expected: String,
+    val ok: Boolean,
+)
+
+/**
+ * Разбор [Condition] по предикатам — для диагностики выбора провайдера.
+ *
+ * Значения берутся тем же [WorldContext] и тем же правилом «поле недоступно —
+ * не подошло», что и в [matches]. Отдельный обход нужен именно ради
+ * отчёта: сам `matches` отдаёт один `Boolean` на всё условие, а разбирать
+ * надо, **какая** из четырёх проверок не сошлась.
+ */
+fun Condition.explain(world: WorldContext): List<PredicateReport> = predicates.map { p ->
+    val actual = try {
+        world.field(p.root, p.field, "${p.root.segment}.${p.field}")
+    } catch (_: CrenError.NotFound) {
+        // Ровно как в `Predicate.matches`: неизвестное поле = «не подошло».
+        // Только здесь это ещё и видно в отчёте, а не теряется внутри AND.
+        Value.VStr("unknown")
+    }
+    PredicateReport(
+        path = "${p.root.segment}.${p.field}",
+        actual = renderValue(actual),
+        expected = "${p.op.symbol()} ${renderExpected(p.expected)}",
+        ok = p.op.apply(actual, p.expected),
+    )
+}
+
+/** Значение поля мира строкой, как его показывает отчёт. */
+internal fun renderValue(v: Value): String = when (v) {
+    is Value.VStr -> v.s
+    is Value.VInt -> v.i.toString()
+    is Value.VFloat -> v.f.toString()
+    is Value.VBool -> v.b.toString()
+    else -> v.toString()
+}
+
+/** Ожидание предиката строкой: `netherite`, `-20`, `63..80`. */
+internal fun renderExpected(e: Expected): String = when (e) {
+    is Expected.Str -> e.s
+    is Expected.Num -> e.d.toString()
+    is Expected.Range -> "${e.from}..${e.to}"
+}
+
 /** Операция сравнения для предиката. */
 sealed interface Op {
     data object Eq : Op

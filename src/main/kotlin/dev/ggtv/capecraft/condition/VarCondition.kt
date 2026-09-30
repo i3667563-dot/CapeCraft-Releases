@@ -141,6 +141,39 @@ data class VarPredicate(
 }
 
 /**
+ * Разбор одного `if`-предиката: что за переменная и против чего ждали.
+ *
+ * Отдельно от [PredicateReport] потому, что у переменных есть случай, которого
+ * у полей мира нет: переменной **нет вообще**. Это не «пусто» и не «не равно»
+ * — просто условие не выполнилось, и сказать об этом прямо полезнее, чем
+ * показывать пустую строку, которую ещё и можно принять за значение.
+ */
+data class VarPredicateReport(
+    /** Имя переменной как в конфиге: `username`, `$DEPLOY_ENV`. */
+    val name: String,
+    val actual: String,
+    val expected: String,
+    val ok: Boolean,
+)
+
+/**
+ * Разбор [VarCondition] по предикатам — для диагностики выбора провайдера.
+ *
+ * Значения берутся тем же [VarSource], что и в [VarPredicate.matches], и
+ * несуществующая переменная так же означает «не подошло» — но в отчёте это
+ * видно прямо (`не задана`), а не теряется внутри AND.
+ */
+fun VarCondition.explain(ctx: Placeholders.Context): List<VarPredicateReport> = predicates.map { p ->
+    val raw = VarSource.resolve(p.name, ctx)
+    VarPredicateReport(
+        name = p.name,
+        actual = if (raw == null) "не задана" else renderValue(VarSource.asValue(raw)),
+        expected = "${p.op.symbol()} ${renderExpected(p.expected)}",
+        ok = raw != null && p.op.apply(VarSource.asValue(raw), p.expected),
+    )
+}
+
+/**
  * Источник значений переменных для `if`.
  *
  * Отдельный объект, а не код внутри [VarPredicate], потому что резолв должен

@@ -3,6 +3,7 @@ package dev.ggtv.capecraft
 import dev.ggtv.capecraft.api.CapeApiHolder
 import dev.ggtv.capecraft.api.event.CapeEvent
 import dev.ggtv.capecraft.condition.ProviderSelector
+import dev.ggtv.capecraft.condition.SelectionReport
 import dev.ggtv.capecraft.image.AnimatedImage
 import dev.ggtv.capecraft.image.ImageDecoder
 import dev.ggtv.capecraft.image.ImageDecodeException
@@ -107,6 +108,16 @@ class CapeRegistry(
      * бы на каждого вошедшего и держала память до конца сессии.
      */
     private val firstSeenAt = ConcurrentHashMap<String, Long>()
+
+    /**
+     * Когда объект последний раз попадал в кадр, мс.
+     *
+     * Единственный сигнал «игрок ушёл», доступный без подписки на события
+     * сущностей: [ensureLoading] зовётся из рендер-миксина для каждого видимого
+     * игрока, и исчезновение из кадра — единственный признак, по которому
+     * видно, что рендерить больше нечего.
+     */
+    private val lastSeenAt = ConcurrentHashMap<String, Long>()
 
     /**
      * У каких объектов вообще есть условия.
@@ -493,6 +504,9 @@ class CapeRegistry(
             objectGeneration.remove(id)
             firstSeenAt.remove(id)
         }
+        usernames.clear()
+        appliedOrder.clear()
+        lastSeenAt.clear()
         synchronized(lock) {
             for (key in memory.keys) CapeTexture.release(key)
             memory.clear()
@@ -528,6 +542,41 @@ class CapeRegistry(
 
     /** Есть ли у объекта набор функций в кадре. */
     fun hasObjectFunctions(id: String): Boolean = objectFunctions.containsKey(id)
+
+    /**
+     * Запомнить порядок, который реально пошёл в загрузку.
+     *
+     * Пишется только там, где порядок действительно применён, а не где
+     * просто посчитан: посчитанный порядок может быть отброшен по отпечатку,
+     * и в `/cp list` это выглядело бы как «применён другой набор».
+     */
+    private fun rememberAppliedOrder(id: String, ordered: List<Provider>) {
+        appliedOrder[id] = ordered.map { it.name }
+    }
+
+    /**
+     * Разбор отбора для своего плаща: тот же расчёт, что делает рендер, плюс
+     * объяснение по каждому провайдеру.
+     *
+     * Контекст — [world] (передаётся вызывающим), а не зашитый
+     * [MinecraftWorldContext]: иначе диагностика в 26.2 и в 1.21 считала бы
+     * разные миры, и правка ради «просто удобно» разошлась бы с боевой.
+     *
+     * Пересчитывает отбор на текущий момент, а не читает [appliedOrder]:
+     * вопрос «почему показался не тот плащ» — это вопрос «что выберется
+     * сейчас», и применённый порядок рядом нужен для сравнения.
+     */
+    fun explainLocal(providers: List<Provider>, world: WorldContext): SelectionReport =
+        ProviderSelector.evaluate(
+            providers = providers,
+            world = world,
+            vars = Placeholders.Context(
+                username = localUsername,
+                uuid = stripDashes(localPlayerId.orEmpty()),
+                name = "",
+                root = root,
+            ),
+        )
 
     /** Есть ли у объекта функции с условиями — их надо пересчитывать. */
     fun objectNeedsReevaluation(id: String): Boolean = objectHasConditions[id] == true
@@ -566,6 +615,7 @@ class CapeRegistry(
      */
     fun ensureLoading(uuid: String, username: String, context: WorldContext = world) {
         usernames[uuid] = username
+        lastSeenAt[uuid] = nowMs()
         // Свой ник известен и с рендера, и с входа; берём отсюда, чтобы
         // `localUsername` не зависел от порядка вызовов на клиенте.
         if (uuid == localPlayerId) localUsername = username
@@ -592,6 +642,7 @@ class CapeRegistry(
         if (loading.add(uuid)) {
             val fp = fingerprint(ordered)
             lastObjectFingerprint[uuid] = fp
+            rememberAppliedOrder(uuid, ordered)
             lastReevaluatedAt[uuid] = nowMs()
             val gen = objectGeneration[uuid] ?: 0
             executor.execute { loadInBackground(uuid, ordered, gen) }
@@ -629,6 +680,7 @@ class CapeRegistry(
         if (fp == lastObjectFingerprint[uuid]) return // порядок тот же — не трогаем
 
         lastObjectFingerprint[uuid] = fp
+        rememberAppliedOrder(uuid, ordered)
         val gen = (objectGeneration[uuid] ?: 0) + 1
         objectGeneration[uuid] = gen
 
@@ -714,6 +766,33 @@ class CapeRegistry(
         }
     }
 
+    /**
+     * Освободить ресурсы игроков, которых больше нет в кадре.
+     *
+     * Раньше текстура плаща жила до конца процесса: игрок уходил с сервера, а
+     * GPU-текстура и `NativeImage` оставались. На длинной сессии с большим
+     * онлайном это копится до тех пор, пока видеодрайвер не начнёт отдавать
+     * нехватку видеопамяти.
+     *
+     * Порог не «нет в кадре», а «нет в кадре давно»: игрок за стеной или вне
+     * экрана не рисуется кадр-другой, и мгновенная проверка выкидывала бы
+     * текстуры у живых. [goneTimeoutMs] заведомо больше времени между кадрами,
+     * в которое игрок может быть не виден ни разу.
+     */
+    fun forgetAbsentObjects(now: Long = nowMs(), goneTimeoutMs: Long = ABSENT_TIMEOUT_MS) {
+        for (uuid in LinkedHashSet(firstSeenAt.keys)) {
+            val seen = lastSeenAt[uuid] ?: continue
+            if (now - seen < goneTimeoutMs) continue
+            // Локального игрока не трогаем: его плащ нужен в любом кадре, а
+            // между выходом в инвентарь и следующим показом его не видно.
+            if (uuid == localPlayerId) {
+                lastSeenAt[uuid] = now
+                continue
+            }
+            forget(uuid)
+        }
+    }
+
     /** Удалить плащ игрока из памяти. */
     fun forget(uuid: String) {
         if (localPlayerId == uuid) localPlayerId = null
@@ -724,6 +803,12 @@ class CapeRegistry(
         lastReevaluatedAt.remove(uuid)
         objectGeneration.remove(uuid)
         firstSeenAt.remove(uuid)
+        // `usernames` и `appliedOrder` тоже живут по uuid. Оставлять их — значит
+        // держать по одной строке на каждого, кого мод видел за сессию; при
+        // переподключении на другой аккаунт старые остаются навсегда.
+        usernames.remove(uuid)
+        appliedOrder.remove(uuid)
+        lastSeenAt.remove(uuid)
         synchronized(lock) {
             memory.remove(uuid)
             CapeTexture.release(uuid)
@@ -755,6 +840,9 @@ class CapeRegistry(
             uploadedFrame.clear()
         }
         firstSeenAt.clear()
+        usernames.clear()
+        appliedOrder.clear()
+        lastSeenAt.clear()
     }
 
     /** Число закэшированных плащей. */
@@ -878,6 +966,7 @@ class CapeRegistry(
         val fp = fingerprint(ordered)
         if (fp == lastObjectFingerprint[local]) return
         lastObjectFingerprint[local] = fp
+        rememberAppliedOrder(local, ordered)
 
         val gen = (objectGeneration[local] ?: 0) + 1
         objectGeneration[local] = gen
@@ -897,6 +986,16 @@ class CapeRegistry(
 
     /** Отпечаток применённого набора функций по каждому объекту. */
     private val lastObjectFingerprint = ConcurrentHashMap<String, String>()
+
+    /**
+     * Имена провайдеров в порядке, реально применённом к объекту.
+     *
+     * Отдельное от отпечатка поле, а не разбор отпечатка: нужно показать в
+     * `/cp list`, какой плащ на экране **прямо сейчас**, и сравнить с тем,
+     * что отбор выбрал бы сейчас же. Отпечаток для этого не годится — он
+     * хранит ещё и источник, и текстуру, и молчит о причинах отказа.
+     */
+    val appliedOrder: ConcurrentHashMap<String, List<String>> = ConcurrentHashMap()
 
     /**
      * Счётчик поколений на объект — свой, а не общий [generation].
@@ -926,6 +1025,15 @@ class CapeRegistry(
 
     /** Частота пересчёта собственных условий локального игрока, мс. */
     private val LOCAL_RECHECK_INTERVAL_MS = 250L
+
+    /**
+     * Сколько объект может не попадать в кадр, прежде чем его ресурсы снимут, мс.
+     *
+     * 10 секунд с запасом: игрок вне экрана или за стеной не рисуется кадр-другой,
+     * а на серверах с TPS ниже 20 кадров в секунду меньше. Раньше порога не было
+     * вовсе — плащ жил до конца процесса.
+     */
+    private val ABSENT_TIMEOUT_MS = 10_000L
 
     private var lastLocalRecheckedAt = 0L
 

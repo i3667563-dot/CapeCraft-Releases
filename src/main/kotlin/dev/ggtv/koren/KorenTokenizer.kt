@@ -1,6 +1,7 @@
 package dev.ggtv.koren
 
 import dev.ggtv.kjen.CrenError
+import dev.ggtv.kjen.EnvName
 import dev.ggtv.kjen.Span
 import dev.ggtv.kjen.TextRange
 
@@ -10,9 +11,14 @@ import dev.ggtv.kjen.TextRange
  */
 object KorenTokenizer {
 
-    fun tokenize(input: String): List<KorenToken> = tokenizeWithEnv(input, System.getenv())
+    fun tokenize(input: String, onUnset: (String) -> Unit = {}): List<KorenToken> =
+        tokenizeWithEnv(input, System.getenv(), onUnset)
 
-    internal fun tokenizeWithEnv(input: String, env: Map<String, String>): List<KorenToken> {
+    internal fun tokenizeWithEnv(
+        input: String,
+        env: Map<String, String>,
+        onUnset: (String) -> Unit = {},
+    ): List<KorenToken> {
         val tokens = mutableListOf<KorenToken>()
         var line = 1
         var col = 1
@@ -91,7 +97,7 @@ object KorenTokenizer {
                     emit(KorenTokenKind.EnvRef(text))
                     return
                 }
-                emit(KorenTokenKind.Str(interpolateEnvironment(text, env, start)))
+                emit(KorenTokenKind.Str(interpolateEnvironment(text, env, start, onUnset)))
             }
 
             val c = peek()
@@ -163,7 +169,7 @@ object KorenTokenizer {
                         }
                     }
                     emit(
-                        KorenTokenKind.Str(interpolateEnvironment(value.toString(), env, start))
+                        KorenTokenKind.Str(interpolateEnvironment(value.toString(), env, start, onUnset))
                     )
                 }
 
@@ -304,12 +310,11 @@ object KorenTokenizer {
     private fun Int.isWordStart(): Boolean =
         Character.isLetter(this) || this == '_'.code
 
-    private data class EnvironmentDefault(val value: String, val useIfEmpty: Boolean)
-
     private fun interpolateEnvironment(
         input: String,
         env: Map<String, String>,
         span: Span,
+        onUnset: (String) -> Unit,
     ): String {
         val output = StringBuilder(input.length)
         var i = 0
@@ -332,16 +337,16 @@ object KorenTokenizer {
                     }
                     val expression = input.substring(i + 2, end)
                     val (name, default) = splitEnvironmentExpression(expression, span)
-                    pushEnvironmentValue(output, name, default, env, span)
+                    pushEnvironmentValue(output, name, default, env, span, onUnset)
                     i = end + 1
                 }
                 else -> {
-                    if (next != null && isEnvironmentNameStart(next)) {
-                        var end = i + 2
-                        while (end < input.length && isEnvironmentNameContinue(input[end])) end += 1
-                        val name = input.substring(i + 1, end)
-                        pushEnvironmentValue(output, name, null, env, span)
-                        i = end
+                    val afterDollar = input.substring(i + 1)
+                    val nameLength = EnvName.lengthAt(afterDollar)
+                    if (nameLength > 0) {
+                        val name = afterDollar.substring(0, nameLength)
+                        pushEnvironmentValue(output, name, null, env, span, onUnset)
+                        i += 1 + nameLength
                     } else {
                         output.append('$')
                         if (next != null) {
@@ -357,53 +362,40 @@ object KorenTokenizer {
         return output.toString()
     }
 
+    private fun pushEnvironmentValue(
+        output: StringBuilder,
+        name: String,
+        default: String?,
+        env: Map<String, String>,
+        span: Span,
+        onUnset: (String) -> Unit,
+    ) {
+        val value = env[name]
+        if (value != null) {
+            // `:-` отличается от голого дефолта только на пустой переменной:
+            // пустая строка в окружении — это «задано, но значения нет», и
+            // молча отдать вместо неё пустую строку значило бы не отличить
+            // одно от другого. Именно поэтому одиночный `-` и не оставлен.
+            output.append(if (default != null && value.isEmpty()) default else value)
+            return
+        }
+        if (default != null) {
+            output.append(default)
+            return
+        }
+        onUnset(name)
+    }
+
     private fun splitEnvironmentExpression(
         expression: String,
         span: Span,
-    ): Pair<String, EnvironmentDefault?> {
-        val separator = expression.indexOf(":-").takeIf { it >= 0 }
-            ?: expression.indexOf('-').takeIf { it >= 0 }
-        val name = if (separator == null) expression else expression.substring(0, separator)
-        val default = if (separator == null) null else EnvironmentDefault(
-            value = expression.substring(
-                separator + if (expression.startsWith(":-", separator)) 2 else 1,
-            ),
-            useIfEmpty = expression.startsWith(":-", separator),
-        )
-        if (name.isEmpty() || !isEnvironmentNameStart(name[0]) ||
-            name.drop(1).any { !isEnvironmentNameContinue(it) }
-        ) {
+    ): Pair<String, String?> {
+        val (name, default) = EnvName.splitDefault(expression)
+        if (!EnvName.isValid(name)) {
             throw CrenError.Parse("неверное имя переменной окружения в «\${$expression}»", span)
         }
         return name to default
     }
-
-    private fun pushEnvironmentValue(
-        output: StringBuilder,
-        name: String,
-        default: EnvironmentDefault?,
-        env: Map<String, String>,
-        span: Span,
-    ) {
-        val value = env[name]
-        if (value != null) {
-            output.append(
-                if (default != null && default.useIfEmpty && value.isEmpty()) default.value else value,
-            )
-            return
-        }
-        if (default != null) {
-            output.append(default.value)
-            return
-        }
-        throw CrenError.Parse("переменная окружения «$name» не задана", span)
-    }
-
-    private fun isEnvironmentNameStart(value: Char): Boolean =
-        value in 'A'..'Z' || value in 'a'..'z' || value == '_'
-
-    private fun isEnvironmentNameContinue(value: Char): Boolean =
-        isEnvironmentNameStart(value) || value in '0'..'9'
 }
 
 sealed interface KorenTokenKind {

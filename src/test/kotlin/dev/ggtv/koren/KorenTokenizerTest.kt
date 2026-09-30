@@ -20,8 +20,13 @@ class KorenTokenizerTest {
     private fun kindsWithoutNewlines(input: String): List<KorenTokenKind> =
         kinds(input).filterNot { it == Newline }
 
-    private fun envKinds(input: String, env: Map<String, String>): List<KorenTokenKind> =
-        KorenTokenizer.tokenizeWithEnv(input, env).map { it.kind }.filterNot { it == Newline }
+    private fun envKinds(
+        input: String,
+        env: Map<String, String>,
+        onUnset: (String) -> Unit = {},
+    ): List<KorenTokenKind> =
+        KorenTokenizer.tokenizeWithEnv(input, env, onUnset)
+            .map { it.kind }.filterNot { it == Newline }
 
     @Test
     fun `comment is saved`() {
@@ -253,6 +258,14 @@ class KorenTokenizerTest {
     }
 
     @Test
+    fun `env key with hyphen and underscore is one name`() {
+        val hyphen = envKinds("if = { ${'$'}TIER-ONE: \"gold\" }\n", emptyMap())
+        assertEquals(EnvRef("${'$'}TIER-ONE"), hyphen[3])
+        val underscore = envKinds("if = { ${'$'}TIER_ONE: \"gold\" }\n", emptyMap())
+        assertEquals(EnvRef("${'$'}TIER_ONE"), underscore[3])
+    }
+
+    @Test
     fun `env key in braces is not substituted`() {
         val k = envKinds("if = { ${'$'}{TIER}: \"gold\" }\n", mapOf("TIER" to "prod"))
         assertEquals(EnvRef("${'$'}{TIER}"), k[3])
@@ -294,11 +307,15 @@ class KorenTokenizerTest {
     }
 
     @Test
-    fun `missing env in value is still an error`() {
-        val e = assertFailsWith<CrenError.Parse> {
-            KorenTokenizer.tokenizeWithEnv("url = ${'$'}NOT_SET_ANYWHERE\n", emptyMap())
-        }
-        assertTrue(e.messageText.contains("NOT_SET_ANYWHERE"))
+    fun `missing env in value is an empty string and not an error`() {
+        val unset = mutableListOf<String>()
+        val k = envKinds(
+            "url = ${'$'}NOT_SET_ANYWHERE\n",
+            emptyMap(),
+            onUnset = { unset += it },
+        )
+        assertEquals(Str(""), k[2])
+        assertEquals(listOf("NOT_SET_ANYWHERE"), unset)
     }
 
     @Test

@@ -216,6 +216,53 @@ class ResolverTest {
     }
 
     @Test
+    fun `ambiguous error names where the duplicates are`() {
+        // Тот самый случай: два объекта с одним именем и ссылка без номера.
+        // Сообщение обязано отвечать не только «сколько», но и «где» — иначе
+        // два одинаковых имени приходится искать глазами по всему конфигу.
+        val e = assertFailsWith<CrenError.Ambiguous> {
+            cfg("""
+                capeCraft { a = 1 }
+                b = 2
+                capeCraft { a = 3 }
+            """).get("capeCraft.a")
+        }
+        assertEquals(listOf(1, 3), e.locations.map { it.line })
+        assertEquals(
+            "неоднозначная ссылка: «capeCraft» встречается 2 раза (строки 1 и 3). " +
+                "Укажите номер: «capeCraft1» или «capeCraft2». " +
+                "Либо переименуйте один из них.",
+            e.message,
+        )
+    }
+
+    @Test
+    fun `ambiguous error counts in Russian correctly`() {
+        // «2 раз» — очевидная нелепость, но именно она была в сообщении.
+        fun messageFor(duplicates: Int): String =
+            assertFailsWith<CrenError.Ambiguous> {
+                cfg((1..duplicates).joinToString("\n") { "k = $it" }).getStr("k")
+            }.message.orEmpty()
+
+        assertTrue(messageFor(2).contains("2 раза"), messageFor(2))
+        assertTrue(messageFor(5).contains("5 раз"), messageFor(5))
+        assertTrue(messageFor(11).contains("11 раз"), messageFor(11))
+        assertTrue(messageFor(21).contains("21 раз"), messageFor(21))
+        assertTrue(messageFor(3).contains("строки 1, 2 и 3"), messageFor(3))
+    }
+
+    @Test
+    fun `ambiguous error lists numbered forms and cuts long lists`() {
+        val many = assertFailsWith<CrenError.Ambiguous> {
+            cfg((1..7).joinToString("\n") { "k = $it" }).getStr("k")
+        }
+        // Показаны первые строки и первые три формы, дальше — многоточие:
+        // семь номеров подряд в одну строку ошибки не помещаются.
+        assertTrue(many.message.orEmpty().contains("строки 1, 2, 3, 4, …"), many.message)
+        assertTrue(many.message.orEmpty().contains("«k1», «k2», «k3», …"), many.message)
+    }
+
+    @Test
     fun `unique key plain and numbered both work`() {
         val c = cfg("server { host = \"x\" }")
         assertEquals("x", c.getStr("server.host"))

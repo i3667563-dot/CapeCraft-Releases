@@ -316,9 +316,9 @@ class ParserTest {
             port = ${'$'}KJEN_PORT
             url = "jdbc://${'$'}{KJEN_HOST}:${'$'}{KJEN_PORT}/db"
             fallback = "${'$'}{KJEN_MISSING:-local}"
-            hyphen_fallback = "${'$'}{KJEN_MISSING-test}"
+            hyphen_name = "${'$'}{KJEN-A-B}"
             empty_default = "${'$'}{KJEN_EMPTY:-fallback}"
-            empty_preserved = "${'$'}{KJEN_EMPTY-test}"
+            empty_literal = "${'$'}{KJEN_EMPTY}"
             escaped = "${'$'}${'$'}{KJEN_HOST}"
             currency = "cost ${'$'}5"
             trailing = "value${'$'}"
@@ -329,6 +329,7 @@ class ParserTest {
                 "KJEN_HOST" to "localhost",
                 "KJEN_PORT" to "9000",
                 "KJEN_EMPTY" to "",
+                "KJEN-A-B" to "hyphenated",
                 "KJEN_URL" to "https://example.com/a?x=1&y=2",
                 "KJEN_COMPLEX" to "raw=${'$'}{VALUE};quote=\";brace={}",
             ),
@@ -338,9 +339,9 @@ class ParserTest {
         assertEquals("9000", config.getStr("port"))
         assertEquals("jdbc://localhost:9000/db", config.getStr("url"))
         assertEquals("local", config.getStr("fallback"))
-        assertEquals("test", config.getStr("hyphen_fallback"))
+        assertEquals("hyphenated", config.getStr("hyphen_name"))
         assertEquals("fallback", config.getStr("empty_default"))
-        assertEquals("", config.getStr("empty_preserved"))
+        assertEquals("", config.getStr("empty_literal"))
         assertEquals("${'$'}{KJEN_HOST}", config.getStr("escaped"))
         assertEquals("cost ${'$'}5", config.getStr("currency"))
         assertEquals("value${'$'}", config.getStr("trailing"))
@@ -354,26 +355,30 @@ class ParserTest {
             """
             bare_braced = ${'$'}{KJEN_HOST}
             bare_default = ${'$'}{KJEN_MISSING:-fallback}
-            bare_hyphen = ${'$'}{KJEN_MISSING-other}
+            bare_hyphen = ${'$'}{KJEN-MIXED-Name}
             bare_middle = ${'$'}{KJEN_HOST}/capes/${'$'}{KJEN_PORT}/a.png
             """.trimIndent(),
             mapOf(
                 "KJEN_HOST" to "cdn.example.com",
                 "KJEN_PORT" to "8443",
+                "KJEN-MIXED-Name" to "mixed-1",
             ),
         )
 
         assertEquals("cdn.example.com", config.getStr("bare_braced"))
         assertEquals("fallback", config.getStr("bare_default"))
-        assertEquals("other", config.getStr("bare_hyphen"))
+        assertEquals("mixed-1", config.getStr("bare_hyphen"))
         assertEquals("cdn.example.com/capes/8443/a.png", config.getStr("bare_middle"))
     }
     @Test
-    fun `missing environment variable is an error`() {
-        val e = assertFailsWith<CrenError.Parse> {
-            CrenConfig.fromStringWithEnv("host = \"${'$'}{KJEN_MISSING}\"\n", emptyMap())
-        }
-        assertTrue(e.messageText.contains("переменная окружения «KJEN_MISSING» не задана"))
+    fun `missing environment variable is empty and reported`() {
+        val unset = mutableListOf<String>()
+        val config = CrenConfig.fromStringWithEnv(
+            "host = \"${'$'}{KJEN_MISSING}\"\n",
+            emptyMap(),
+        ) { unset += it }
+        assertEquals("", config.getStr("host"))
+        assertEquals(listOf("KJEN_MISSING"), unset)
     }
 
     @Test

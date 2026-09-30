@@ -27,9 +27,22 @@ class KorenConfig private constructor(
 ) {
 
     companion object {
-        /** Разобрать конфиг из строки. */
-        fun fromString(input: String, context: WorldContext = EmptyWorldContext): KorenConfig {
-            val tokens = KorenTokenizer.tokenize(input)
+        /**
+         * Разобрать конфиг из строки.
+         *
+         * @param onUnset вызывается для каждой переменной окружения, которой
+         *   нет и у которой нет дефолта `${NAME:-...}`. Сама подстановка не
+         *   падает: на её место встаёт пустая строка, и конфиг продолжает
+         *   разбираться. Обратная связь нужна, потому что пустая строка
+         *   неотличима от `url = ""` и пропавший адрес тихо уезжает на сервер
+         *   запросом в никуда.
+         */
+        fun fromString(
+            input: String,
+            context: WorldContext = EmptyWorldContext,
+            onUnset: (String) -> Unit = {},
+        ): KorenConfig {
+            val tokens = KorenTokenizer.tokenize(input, onUnset)
             val root = KorenParser.parse(tokens)
             return KorenConfig(root, context)
         }
@@ -39,25 +52,33 @@ class KorenConfig private constructor(
             input: String,
             env: Map<String, String>,
             context: WorldContext = EmptyWorldContext,
+            onUnset: (String) -> Unit = {},
         ): KorenConfig {
-            val tokens = KorenTokenizer.tokenizeWithEnv(input, env)
+            val tokens = KorenTokenizer.tokenizeWithEnv(input, env, onUnset)
             val root = KorenParser.parse(tokens)
             return KorenConfig(root, context)
         }
 
         /** Прочитать конфиг из файла `.kn`. */
-        fun load(path: JPath, context: WorldContext = EmptyWorldContext): KorenConfig {
+        fun load(
+            path: JPath,
+            context: WorldContext = EmptyWorldContext,
+            onUnset: (String) -> Unit = {},
+        ): KorenConfig {
             val text = try {
                 Files.readString(path)
             } catch (e: Exception) {
                 throw CrenError.Io("не могу прочитать файл «$path»: ${e.message}")
             }
-            return fromString(text, context)
+            return fromString(text, context, onUnset)
         }
 
         /** Прочитать конфиг из файла `.kn` по строковому пути. */
-        fun load(path: String, context: WorldContext = EmptyWorldContext): KorenConfig =
-            load(JPath.of(path), context)
+        fun load(
+            path: String,
+            context: WorldContext = EmptyWorldContext,
+            onUnset: (String) -> Unit = {},
+        ): KorenConfig = load(JPath.of(path), context, onUnset)
 
         /** Обновить контекст мира без пересборки конфига (динамическая переоценка). */
         fun withContext(config: KorenConfig, context: WorldContext): KorenConfig =

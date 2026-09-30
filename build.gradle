@@ -148,6 +148,14 @@ test {
 	// up-to-date, и проверка примеров молча ничего не проверяет: именно так
 	// в документации и жил неразбираемый `when { ... }`.
 	inputs.file(file('README.md')).withPropertyName('readmeUnderTest')
+	// То же правило для тестов, которые читают исходники версий с диска
+	// (WorldContextAgreementTest, CapeTextureOwnershipTest). Их файлы не
+	// входят в classpath теста, поэтому без явного входа Gradle считает
+	// задачу up-to-date после правки `versions/*/src` и сверка версий молча
+	// проверяет устаревший снимок.
+	inputs.files(fileTree('versions') {
+		include '**/src/main/kotlin/**/*.kt'
+	}).withPropertyName('versionSourcesUnderTest')
 }
 
 // --- Сервер LSP для конфигов .kn ------------------------------------------

@@ -169,7 +169,20 @@ class CapeConfig {
             // чем пользоваться, но не тот источник, который он просил.
             resolution.warning?.let { CapeCraftLog.LOGGER.warn("CapeCraft: {}", it) }
             if (resolution.createDefault) writeDefault()
-            val cfg = KorenConfig.load(resolution.file)
+            // Незаданная переменная окружения — не поломка конфига: парсер
+            // подставляет пустую строку, а плащ без адреса просто не грузится.
+            // Но молчать об этом нельзя: `url = "$HOST/api"` и `url = ""` в
+            // логе выглядят одинаково, а адрес у провайдера может быть один
+            // на весь конфиг. Один раз на имя — иначе пять тысяч строк на
+            // каждый кадр.
+            val unset = HashSet<String>()
+            val cfg = KorenConfig.load(resolution.file) { unset += it }
+            unset.forEach {
+                CapeCraftLog.LOGGER.warn(
+                    "CapeCraft: переменная окружения ${'$'}{} не задана, подставлена пустая строка",
+                    it,
+                )
+            }
             providers = ProviderLoader.load(cfg)
             limits = parseLimits(cfg)
             serverSync = ServerSyncSettings.parse(cfg)
