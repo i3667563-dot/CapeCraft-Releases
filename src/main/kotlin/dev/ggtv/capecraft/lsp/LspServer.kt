@@ -790,7 +790,7 @@ class LspServer(
          * своя линия релизов (`lsp_version` в gradle.properties, теги `lsp-v*`),
          * и поднятие версии мода не должно выглядеть как обновление редактора.
          */
-        const val version = "1.1.2"
+        const val version = "1.1.3"
     }
 }
 

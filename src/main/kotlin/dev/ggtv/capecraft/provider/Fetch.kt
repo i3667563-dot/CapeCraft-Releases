@@ -75,20 +75,11 @@ fun resolveCape(
 ): ByteArray = resolveCapeResult(providers, ctx, root, fetcher, world).bytes
 
 /**
- * Как [resolveCape], но возвращает и провайдера-победителя — реестру нужен он,
- * чтобы при смене мира/времени понять, КАКОЙ плащ сейчас активен и не
+ * Как [resolveCape], но возвращает и имя выигравшего провайдера — реестру нужен
+ * он, чтобы при смене мира/времени понять, КАКОЙ плащ сейчас активен и не
  * перезагружать одинаковый.
- *
- * Провайдер отдаётся именно объектом, а не только именем, потому что по имени
- * его не восстановить однозначно: имена провайдеров уникальностью не
- * защищены, и если провайдер «x» не отдал картинку, победителем мог стать второй
- * «x» — поиск по имени вернул бы флаги первого, и плащ отрисовался бы не так,
- * как его выбрали. Различать такие случаи пришлось бы только здесь.
  */
-data class CapeFetchResult(val bytes: ByteArray, val provider: Provider) {
-    /** Имя провайдера-победителя: для логов и отладки. */
-    val providerName: String get() = provider.name
-}
+data class CapeFetchResult(val bytes: ByteArray, val providerName: String)
 
 fun resolveCapeResult(
     providers: List<Provider>,
@@ -135,17 +126,8 @@ fun resolveCapeOrdered(
             }
         }
         try {
-            // Кто запрашивается — выставляется здесь, а не в композитном фетчере:
-            // только тут известен ctx. Аддон читает CapeApiHolder.subject()
-            // и без этого не может отличить плащ владельца от плаща соседа.
-            val bytes = dev.ggtv.capecraft.api.CapeApiHolder.withSubject(
-                dev.ggtv.capecraft.api.CapeFetchSubject(
-                    uuid = ctx.uuid,
-                    username = ctx.username,
-                    providerName = p.name,
-                ),
-            ) { fetcher.fetch(resolved) }
-            return CapeFetchResult(bytes, p)
+            val bytes = fetcher.fetch(resolved)
+            return CapeFetchResult(bytes, p.name)
         } catch (e: Exception) {
             errors += "провайдер «${p.name}»: ${e.message.orEmpty()}"
         }

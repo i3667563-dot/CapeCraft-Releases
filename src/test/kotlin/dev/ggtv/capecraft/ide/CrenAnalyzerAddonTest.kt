@@ -134,19 +134,41 @@ class CrenAnalyzerAddonTest {
     }
 
     @Test
-    fun `без дескриптора ключи аддона остаются неизвестными`() {
-        // Jar не найден — значит про `gray` сказать нечего, и «неизвестный ключ»
-        // здесь честно. Важно, что молчание появилось только вместе с дескриптором
-        // и не маскируется подсказками от соседнего набора аддонов.
+    fun `без дескриптора про ключи аддона молчат`() {
+        // Набор ключей типа `seed` нам неизвестен, поэтому называть `gray`
+        // «неизвестным ключом» было враньём: список доступных в сообщении
+        // состоял из встроенных ключей и к `seed` отношения не имел.
+        //
+        // Живой пример: аддон вынесли из `mods`, и на строке провайдера
+        // появлялись две ошибки на одну причину — «seed не подходит» и
+        // «неизвестный ключ gray». Причина одна, и про неё уже сказано на
+        // `type`.
         ConfigSchema.clearAddonSchemas()
         val text = config("""{ name = "чужой", type = "seed", gray = true }""")
-        assertTrue(
+        assertFalse(
             errors(text).any { it.code == CrenAnalyzer.CODE_UNKNOWN_KEY },
-            "без дескриптора ожидалась ошибка, а получили: ${diags(text).map { it.message }}",
+            "на ключи типа, о котором ничего не знаем, ругаться нельзя: ${diags(text).map { it.message }}",
         )
         assertFalse(
             warnings(text).any { it.code == CrenAnalyzer.CODE_APPLIES },
             "набор ключей чужого типа неизвестен, ругаться не на что",
+        )
+        // Причина остаётся озвученной один раз — на самом типе.
+        assertTrue(
+            diags(text).any { it.message.contains("«seed»") },
+            "про неизвестный тип сказать надо: ${diags(text).map { it.message }}",
+        )
+    }
+
+    @Test
+    fun `опечатка в ключе встроенного типа по-прежнему ловится`() {
+        // Молчание — только про набор ключей чужого типа. Опечатку рядом с
+        // встроенным типом ловить обязаны, иначе проверка ослепла бы целиком.
+        ConfigSchema.clearAddonSchemas()
+        val text = config("""{ name = "a", type = "url", url = "https://e/a.png", greys = true }""")
+        assertTrue(
+            errors(text).any { it.code == CrenAnalyzer.CODE_UNKNOWN_KEY && it.message.contains("greys") },
+            "опечатка в ключе у встроенного типа — ошибка: ${diags(text).map { it.message }}",
         )
     }
 
@@ -326,12 +348,13 @@ class CrenAnalyzerAddonTest {
             seedType.severity,
             "папка mods найдена и пуста — «seed» не от кого взять, это ошибка",
         )
-        // Две ошибки, и обе настоящие: тип никто не даёт и ключ `gray` не
-        // принадлежит ни одному известному типу. Обе были и до правки — плохо
-        // было то, что про сам тип сообщали подсказкой.
+        // Ровно одна ошибка: про тип. Ключ `gray` в том же провайдере молчит —
+        // набор ключей типа нам неизвестен, и вторая ошибка на одну причину
+        // только мешала.
         assertEquals(
-            setOf(CrenAnalyzer.CODE_VALUE, CrenAnalyzer.CODE_UNKNOWN_KEY),
+            setOf(CrenAnalyzer.CODE_VALUE),
             errors(CONFIG_WITH_SEED).map { it.code }.toSet(),
+            "причина одна, значит и ошибка одна",
         )
         assertTrue(!seedType.message.contains("если это не тип от аддона"), seedType.message)
     }

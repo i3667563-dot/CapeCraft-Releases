@@ -6,8 +6,6 @@ import dev.ggtv.capecraft.schema.Placeholders
 import dev.ggtv.koren.KorenConfig
 import dev.ggtv.koren.WorldRoot
 import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertFalse
-import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -151,49 +149,6 @@ class ResolveCapeTest {
         val result = resolveCapeOrdered(ordered, ctx, "/root", fetch)
         assertEquals(2, result.bytes[0])
         assertEquals("default", result.providerName)
-    }
-
-
-    @Test
-    fun `аддон видит запрашиваемого игрока`() {
-        // Без этого аддон обязан нарисовать всем одно и то же: CapeValues
-        // собирается при чтении конфига и игрока не содержит.
-        var seen: String? = null
-        val ordered = listOf(
-            Provider("p", Source.Url("https://x/a"), addonSource = {
-                seen = dev.ggtv.capecraft.api.CapeApiHolder.subject()?.uuid
-                byteArrayOf(7)
-            }),
-        )
-        // Фетчер повторяет ветку CompositeFetcher для аддона: реально аддон
-        // зовёт фетчер, а не наоборот, иначе проверка была бы пустой.
-        val fetcher = CapeFetcher { r ->
-            when (r) {
-                is Resolved.Addon -> r.source.fetch(r.values)
-                else -> byteArrayOf(7)
-            }
-        }
-        resolveCapeOrdered(ordered, ctx, "/root", fetcher)
-        assertEquals(ctx.uuid, seen, "аддон не увидел UUID наблюдаемого игрока")
-    }
-
-    @Test
-    fun `после вызова аддона игрок не течёт в следующий`() {
-        // Воркер переиспользуется: забытый сброс отдал бы следующему вызову
-        // чужого игрока, и плащ был бы не тот.
-        val ordered = listOf(
-            Provider("p", Source.Url("https://x/a"), addonSource = { byteArrayOf(7) }),
-        )
-        resolveCapeOrdered(ordered, ctx, "/root", CapeFetcher { byteArrayOf(7) })
-        assertNull(
-            dev.ggtv.capecraft.api.CapeApiHolder.subject(),
-            "игрок остался в потоке после вызова аддона",
-        )
-    }
-
-    @Test
-    fun `вне вызова аддона игрока нет`() {
-        assertNull(dev.ggtv.capecraft.api.CapeApiHolder.subject())
     }
 }
 

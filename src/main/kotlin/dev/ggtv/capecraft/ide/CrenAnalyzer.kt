@@ -375,7 +375,8 @@ object CrenAnalyzer {
             return out
         }
 
-        val known = ConfigSchema.childrenOf(loc.path.dropLast(1))
+        val parent = ConfigSchema.fieldAt(loc.path.dropLast(1))
+        val known = parent?.children.orEmpty()
         if (known.isEmpty()) {
             // Уровень схеме не известен: это либо аддонский тип провайдера,
             // либо опечатка в разделе, и опечатку поймает верхний уровень.
@@ -384,6 +385,16 @@ object CrenAnalyzer {
         }
         val field = known.firstOrNull { it.name == key }
         if (field == null) {
+            // Ключ у провайдера, чей тип нам неизвестен: «неизвестный ключ» было
+            // бы враньём. Живой пример — аддон вынесли из `mods`, и на
+            // `gray` у `type = "seed"` появлялось «неизвестный ключ «gray».
+            // Доступны: name, type, priority, ...» — список встроенных ключей,
+            // к типу `seed` отношения не имеющий. Причина одна (нет аддона), и
+            // про неё уже сказано на `type`; второй ошибкой она не станет
+            // понятнее. То же молчание, что и в [checkApplies].
+            if (ConfigSchema.isProviderItem(parent) && typeNotResolvableHere(loc.siblings)) {
+                return out
+            }
             out += unknownKey(e, known)
             return out
         }
@@ -431,6 +442,19 @@ object CrenAnalyzer {
             CrenSeverity.ERROR,
             CODE_TYPE,
         )
+    }
+
+    /**
+     * Тип провайдера, набор ключей которого нам не известен.
+     *
+     * Не аддон он — встроенные типы известны полностью, — и не тот аддон,
+     * чей дескриптор прочитан. В обоих случаях ключи внутри провайдера
+     * проверять не по чему.
+     */
+    private fun typeNotResolvableHere(siblings: List<CrenEntry>): Boolean {
+        val type = siblings.firstOrNull { it.keyText == "type" }?.let { leafText(it) } ?: return false
+        if (Field.isBuiltinProviderType(type)) return false
+        return ConfigSchema.addonForType(type) == null
     }
 
     /**
@@ -551,6 +575,18 @@ object CrenAnalyzer {
     }
 
     /** Проверить содержимое `when`. */
+    /**
+     * Условия внутри `when`.
+     *
+     * Сюда попадают только ошибки: неизвестный корень, неизвестное поле,
+     * значение не из списка, сравнение вместо значения. Пояснения к полям
+     * ([WhenSchema.docFor]) диагностикой **не** отдаются: тот же текст уже
+     * лежит в hover, а в панели проблем он выглядел как баг.
+     *
+     * Живой пример — конфиг на 26 строк с одиннадцатью верными `when` давал
+     * двенадцать проблем в статусной строке, и значок «12 багов» делал
+     * бессмысленным само число.
+     */
     private fun checkWhen(value: CrenDict): List<CrenDiagnostic> {
         val out = ArrayList<CrenDiagnostic>()
         for (child in value.entries) {
@@ -590,9 +626,6 @@ object CrenAnalyzer {
                 continue
             }
             checkWhenValue(root, fieldName, child)?.let { out += it }
-            WhenSchema.docFor(root, fieldName)?.let { doc ->
-                out += CrenDiagnostic(child.keyRange, doc, CrenSeverity.HINT, CODE_WHEN)
-            }
         }
         return out
     }

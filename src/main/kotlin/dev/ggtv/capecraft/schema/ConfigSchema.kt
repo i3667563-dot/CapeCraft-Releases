@@ -191,21 +191,8 @@ object WhenSchema {
         // И текущее, и максимальное здоровье — числа, поэтому `health.max`
         // пишется как `">=20"`, а `health.current: "<10"`.
         WorldRoot.HEALTH to listOf("current", "max"),
-        WorldRoot.FOOD to listOf("level", "saturation"),
-        WorldRoot.XP to listOf("level", "progress"),
-        // У корней эффектов поля не перечисляются: их столько, сколько
-        // эффектов в игре. Числовыми их помечает [Condition.NUMERIC_ROOTS],
-        // а здесь они не нужны и потому отсутствуют.
     )
 
-    /**
-     * Корни, у которых любое поле числовое — копия [Condition.NUMERIC_ROOTS].
-     *
-     * Отдельным списком, а не флагом в [NUMERIC_FIELDS], потому что поля
-     * перечислить нельзя: `effect_amplifier.some_mod_effect` тоже число, а
-     * список ids заморожен был бы на той версии, на которой его написали.
-     */
-    val NUMERIC_ROOTS: Set<WorldRoot> get() = Condition.NUMERIC_ROOTS
 
     /**
      * Поля со списком значений: всё, что мир отдаёт, — и больше ничего.
@@ -244,7 +231,7 @@ object WhenSchema {
 
     /** Принимает ли поле числа, а значит ли [OPERATORS]. */
     fun isNumeric(root: WorldRoot, field: String): Boolean =
-        root in NUMERIC_ROOTS || NUMERIC_FIELDS[root]?.contains(field) == true
+        NUMERIC_FIELDS[root]?.contains(field) == true
 
     /**
      * Короткие записи корня без поля, разобранные в нормализованный вид.
@@ -291,36 +278,14 @@ object WhenSchema {
         WorldRoot.ARMOR to Condition.ARMOR_TIERS.associateWith { "chest = $it" },
         WorldRoot.HEALTH to linkedMapOf(),
         WorldRoot.STATE to linkedMapOf(),
-        // Корням эффектов коротких записей нет: без поля в «${root.segment}»
-        // нечего сравнивать, поле там — сам эффект. Го-го короткая запись
-        // для `fire`/`hand` работает, потому что у них есть поле по умолчанию.
-        WorldRoot.FIRE to linkedMapOf(),
-        WorldRoot.HAND to linkedMapOf(),
-        WorldRoot.FOOD to linkedMapOf(),
-        WorldRoot.XP to linkedMapOf(),
-        WorldRoot.EFFECT to linkedMapOf(),
-        WorldRoot.EFFECT_AMPLIFIER to linkedMapOf(),
-        WorldRoot.EFFECT_DURATION to linkedMapOf(),
     )
 
     /** Поля корня — из [Condition.LIVE_FIELDS], чтобы совпадало с рантаймом. */
-    fun fieldsOf(root: WorldRoot): List<String> = when {
-        hasDynamicFields(root) -> Condition.EFFECT_IDS
-        else -> Condition.LIVE_FIELDS[root].orEmpty()
-    }
+    fun fieldsOf(root: WorldRoot): List<String> =
+        Condition.LIVE_FIELDS[root].orEmpty()
 
-    /** У корня поле свободное: подходит идентификатор любого эффекта. */
-    fun hasDynamicFields(root: WorldRoot): Boolean = Condition.hasDynamicFields(root)
-
-    /**
-     * Корни, у которых вообще есть поля.
-     *
-     * Корни эффектов входят, хотя [Condition.LIVE_FIELDS] о них молчит: поля у
-     * них задаёт пользователь, а [fieldsOf] отдаёт ids как подсказки.
-     */
-    fun roots(): List<WorldRoot> = WorldRoot.entries.filter {
-        fieldsOf(it).isNotEmpty() || hasDynamicFields(it)
-    }
+    /** Корни, у которых вообще есть поля. */
+    fun roots(): List<WorldRoot> = WorldRoot.entries.filter { fieldsOf(it).isNotEmpty() }
 
     /** Короткие записи корня; у [WorldRoot.LOCATION] их нет. */
     fun aliasesOf(root: WorldRoot): List<String> = ALIASES[root]?.keys?.toList().orEmpty()
@@ -389,49 +354,6 @@ object WhenSchema {
                 "pose" -> withValues(root, field, "Поза игрока")
                 else -> return null
             }
-
-            WorldRoot.FIRE -> when (field) {
-                "burning" -> "Горит ли игрок: `true`/`false`, а для не-игрока — " +
-                    "`unknown`. Короткая запись `fire: true`."
-                else -> return null
-            }
-
-            WorldRoot.HAND -> when (field) {
-                "main" -> "Предмет в основной руке по id реестра: " +
-                    "`hand: \"diamond_sword\"`, пустые руки — `hand: \"none\"`."
-                "off" -> "Предмет во второй руке по id реестра; пусто — `\"none\"`."
-                else -> return null
-            }
-
-            WorldRoot.FOOD -> when (field) {
-                "level" -> "Голод, 0..20: 20 — сыт, меньше 10 — начинает падать. " +
-                    "Пишут `food.level: \"<8\"`."
-                "saturation" -> "Сытость, 0..20. Падает вместе с голодом, поэтому " +
-                    "для «сыт» надёжнее `level`."
-                else -> return null
-            }
-
-            WorldRoot.XP -> when (field) {
-                "level" -> "Уровень опыта целым числом: `xp.level: \">=30\"`."
-                "progress" -> "Доля опыта внутри уровня, 0..1: `xp.progress: \">0.9\"`."
-                else -> return null
-            }
-
-            // Поле здесь — сам эффект, поэтому описание одно на любое поле
-            // корня: перечислять `speed`, `poison` и ещё тридцать в подсказке
-            // к каждому не нужно.
-            WorldRoot.EFFECT ->
-                "Есть ли эффект `$field`: `\"active\"` или `\"inactive\"`. " +
-                    "Поле — id эффекта из реестра, у мода может быть своим."
-
-            WorldRoot.EFFECT_AMPLIFIER ->
-                "Усиление эффекта `$field` числом: 0 — первая ступень, 1 — вторая. " +
-                    "Нет эффекта — 0, отличить «нет» от «первой ступени» можно " +
-                    "через `effect.$field`."
-
-            WorldRoot.EFFECT_DURATION ->
-                "Остаток эффекта `$field` в тиках: `effect_duration.$field: \"<100\"` " +
-                    "— «вот-вот спадёт». Нет эффекта — 0."
         }
         return described
     }
@@ -911,6 +833,15 @@ val providerItem: Field
         }
         return cur
     }
+
+    /**
+     * Это поле — один провайдер из `providers`?
+     *
+     * Отдельная проверка вместо сравнения с [providerItem]: поле собирается
+     * заново на каждый вызов, а анализатор спрашивает про каждый ключ каждого
+     * провайдера.
+     */
+    fun isProviderItem(field: Field?): Boolean = field?.name == "$PROVIDERS[]"
 
     /**
      * Ключи, которые можно написать по этому пути.
