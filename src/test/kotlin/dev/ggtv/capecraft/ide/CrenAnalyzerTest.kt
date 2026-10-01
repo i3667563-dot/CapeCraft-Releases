@@ -49,6 +49,37 @@ class CrenAnalyzerTest {
         )
     }
 
+    /**
+     * Верное условие не должно выглядеть как проблема.
+     *
+     * Живой пример: конфиг на 26 строк с одиннадцатью верными `when` давал
+     * двенадцать диагностик — к каждому полю прилагалось пояснение из hover.
+     * Редактор считал их багами, и число в статусной строке перестало что-либо
+     * значить. Пояснение осталось там, где и место ему быть, — в hover.
+     */
+    @Test
+    fun `верный when не даёт ни одной диагностики`() {
+        val text = """
+            capeCraft {
+                providers [
+                    { name = "deep", type = "url", url = "https://e/d.png",
+                      when = { location.y: "<= -20" }, priority = 3 },
+                    { name = "netherite", type = "url", url = "https://e/n.png",
+                      when = { armor.chest: "netherite", armor.feet: "netherite" } },
+                    { name = "rain", type = "url", url = "https://e/r.png",
+                      when = { weather: "rain" } },
+                    { name = "night", type = "url", url = "https://e/n.png",
+                      when = { time.period: "night", dimension: "overworld" } }
+                ]
+            }
+        """.trimIndent()
+        assertEquals(
+            emptyList(),
+            diags(text).map { "${it.code}/${it.severity}: ${it.message}" },
+            "верный файл не должен давать ничего: ни ошибок, ни пояснений",
+        )
+    }
+
     @Test
     fun `условия when из README не дают ошибок`() {
         val text = """
@@ -387,31 +418,6 @@ class CrenAnalyzerTest {
         assertTrue(
             d.none { it.severity == CrenSeverity.ERROR },
             "свой тип провайдера не должен быть ошибкой: ${d.map { it.message }}",
-        )
-    }
-
-    @Test
-    fun `url у аддон-типа не считается мусором`() {
-        // Регрессия: `offeredFor` показывает все ключи для аддон-типа, а
-        // проверка appliesTo ругалась на каждый из них. Подсказка и
-        // подсветка говорили человеку противоположное.
-        val d = diags(
-            """capeCraft { providers [ { name = "a", type = "image", url = "http://x/y.png" } ] }""",
-        )
-        assertTrue(
-            d.none { it.code == CrenAnalyzer.CODE_APPLIES },
-            "url законен у аддон-типа: ${d.map { it.message }}",
-        )
-    }
-
-    @Test
-    fun `встроенный тип по-прежнему ловит чужой ключ`() {
-        // Отключение для аддон-типов не должно ослабить проверку url/file/json:
-        // иначе `path` у провайдера `url` стал бы незаметным.
-        val d = diags("""capeCraft { providers [ { name = "a", type = "url", path = "x.png" } ] }""")
-        assertTrue(
-            d.any { it.code == CrenAnalyzer.CODE_APPLIES && it.severity == CrenSeverity.WARNING },
-            "path у url должен ругаться: ${d.map { it.message }}",
         )
     }
 

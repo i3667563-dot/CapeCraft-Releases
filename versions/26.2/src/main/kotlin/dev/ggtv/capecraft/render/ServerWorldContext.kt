@@ -56,21 +56,10 @@ class ServerWorldContext(private val player: ServerPlayer) : WorldContext {
                 WorldRoot.LOCATION -> locationField(field)
                 WorldRoot.ARMOR -> armorField(field)
                 WorldRoot.HEALTH -> healthField(field)
-                // Self-only: сервер это не решает. Условие считает только
-                // владелец на своей машине — и то, что сервер знает про игрока,
-                // к его собственному состоянию отношения не имеет: серверный
-                // `food.level` не отвечает на вопрос «а что видно на МОЕМ
-                // плащу?», а подмена одного другим сделала бы выбор провайдера
-                // у клиента и на сервере разным без единой ошибки.
-                WorldRoot.STATE,
-                WorldRoot.FIRE,
-                WorldRoot.HAND,
-                WorldRoot.FOOD,
-                WorldRoot.XP,
-                WorldRoot.EFFECT,
-                WorldRoot.EFFECT_AMPLIFIER,
-                WorldRoot.EFFECT_DURATION,
-                -> Value.VStr("unknown")
+                // Self-only: сервер это не решает. Условие по `state` считает
+                // только владелец на своей машине — и то, что сервер знает про
+                // игрока, к его собственному состоянию отношения не имеет.
+                WorldRoot.STATE -> Value.VStr("unknown")
             }
         } catch (_: Exception) {
             Value.VStr("unknown")

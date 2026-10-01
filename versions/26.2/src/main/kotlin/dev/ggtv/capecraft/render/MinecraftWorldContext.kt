@@ -9,9 +9,7 @@ import net.minecraft.world.entity.Entity
 import net.minecraft.world.entity.EquipmentSlot
 import net.minecraft.world.entity.LivingEntity
 import net.minecraft.world.entity.Pose
-import net.minecraft.world.entity.player.Player
 import net.minecraft.world.item.ItemStack
-import net.minecraft.world.effect.MobEffectInstance
 import net.minecraft.world.level.Level
 
 /**
@@ -61,20 +59,7 @@ class EntityWorldContext(private val entity: Entity?) : WorldContext {
                 // Self-only: про чужого игрока это неизвестно, поэтому условие
                 // не совпадает. Провайдер с таким условием и не объявляется —
                 // см. `Provider.isSelfOnly`.
-                //
-                // Перечислены явно, а не через ветку `else`: пропущенный здесь
-                // корень обязан падать компиляцией (`NO_ELSE_IN_WHEN` у when по
-                // enum), иначе условие молча перестало бы совпадать у всех,
-                // кроме владельца, и ошибки не дало бы нигде.
-                WorldRoot.STATE,
-                WorldRoot.FIRE,
-                WorldRoot.HAND,
-                WorldRoot.FOOD,
-                WorldRoot.XP,
-                WorldRoot.EFFECT,
-                WorldRoot.EFFECT_AMPLIFIER,
-                WorldRoot.EFFECT_DURATION,
-                -> Value.VStr("unknown")
+                WorldRoot.STATE -> Value.VStr("unknown")
             }
         } catch (_: Exception) {
             Value.VStr("unknown")
@@ -104,13 +89,6 @@ object MinecraftWorldContext : WorldContext {
                 WorldRoot.ARMOR -> armorField(player, field)
                 WorldRoot.HEALTH -> healthField(player, field)
                 WorldRoot.STATE -> stateField(player, field)
-                WorldRoot.FIRE -> fireField(player, field)
-                WorldRoot.HAND -> handField(player, field)
-                WorldRoot.FOOD -> foodField(player, field)
-                WorldRoot.XP -> xpField(player, field)
-                WorldRoot.EFFECT -> effectActiveField(player, field)
-                WorldRoot.EFFECT_AMPLIFIER -> effectAmplifierField(player, field)
-                WorldRoot.EFFECT_DURATION -> effectDurationField(player, field)
             }
         } catch (_: Exception) {
             Value.VStr("unknown")
@@ -300,124 +278,4 @@ private fun poseName(pose: Pose): String = when (pose) {
     Pose.LONG_JUMPING -> "long_jumping"
     Pose.DYING -> "dying"
     else -> "unknown"
-}
-
-// ─────────────── горючее, руки, еда, опыт, эффекты ───────────────
-
-/**
- * Горение: `fire.burning`.
- *
- * Self-only, как и остальные корни этого раздела. `isOnFire` спрашивает само
- * себя: лава, огонь от зажигалки и подожжённый creeper считаются одинаково, а
- * различать их без отдельного поля незачем — плащу достаточно «горит/не горит».
- */
-private fun fireField(entity: Entity?, field: String): Value {
-    if (entity == null) return Value.VStr("unknown")
-    return when (field) {
-        "burning" -> Value.VStr(if (entity.isOnFire()) "true" else "false")
-        else -> Value.VStr("unknown")
-    }
-}
-
-/**
- * Руки: `hand.main` и `hand.off`.
- *
- * Отдаётся **id предмета**, а не тир и не слот: `hand: "shield"` должен
- * отличать щит от меча, а `armor` для этого уже есть. Хватает ли одной руки
- * (`hand.main: "shield"`) — вопрос пользователя: условие без второго поля
- * считает только основную руку, ровно как его читают.
- *
- * `none`, а не `""`, у пустых рук — по примеру брони: `unknown` значит «не
- * прочитано», и смешивать его с «пусто» нельзя, иначе не-игрок выглядел бы
- * как игрок с пустыми руками.
- */
-private fun handField(entity: Entity?, field: String): Value {
-    val living = entity as? LivingEntity ?: return Value.VStr("unknown")
-    val slot = when (field) {
-        "main" -> EquipmentSlot.MAINHAND
-        "off" -> EquipmentSlot.OFFHAND
-        else -> return Value.VStr("unknown")
-    }
-    val stack = living.getItemBySlot(slot)
-    if (stack.isEmpty) return Value.VStr("none")
-    return Value.VStr(BuiltInRegistries.ITEM.getKey(stack.item).path)
-}
-
-/** Голод и сытость: `food.level`, `food.saturation`. Оба числа 0..20. */
-private fun foodField(entity: Entity?, field: String): Value {
-    val player = entity as? Player ?: return Value.VStr("unknown")
-    val food = player.foodData
-    return when (field) {
-        "level" -> Value.VInt(food.foodLevel.toLong())
-        "saturation" -> Value.VFloat(food.saturationLevel.toDouble())
-        else -> Value.VStr("unknown")
-    }
-}
-
-/**
- * Опыт: `xp.level` целым и `xp.progress` долей уровня.
- *
- * `progress` — это 0..1 **внутри** текущего уровня, а не доля от 30: иначе
- * `">0.9"` означало бы «почти тридцатый уровень» и работало бы только на
- * первых двух. Для «вот-вот уровень» пишут `xp.progress: ">0.9"`.
- */
-private fun xpField(entity: Entity?, field: String): Value {
-    val player = entity as? Player ?: return Value.VStr("unknown")
-    return when (field) {
-        "level" -> Value.VInt(player.experienceLevel.toLong())
-        "progress" -> Value.VFloat(player.experienceProgress.toDouble())
-        else -> Value.VStr("unknown")
-    }
-}
-
-/**
- * Активный эффект по id: `effect.speed`.
- *
- * Поле — сам эффект, поэтому искать приходится по нему, а не наоборот. Нет
- * эффекта — `inactive`, а не `unknown`: различать надо, иначе `!effect.poison`
- * совпало бы и с «не отравлен», и с «прочитать нечем».
- */
-private fun effectActiveField(entity: Entity?, field: String): Value {
-    val instance = activeEffect(entity, field)
-    return when (instance) {
-        null -> if (entity is LivingEntity) Value.VStr("inactive") else Value.VStr("unknown")
-        else -> Value.VStr("active")
-    }
-}
-
-/** Усиление активного эффекта: `effect_amplifier.poison`. 0 — первая ступень. */
-private fun effectAmplifierField(entity: Entity?, field: String): Value {
-    val instance = activeEffect(entity, field)
-    return if (instance == null) {
-        if (entity is LivingEntity) Value.VInt(0) else Value.VStr("unknown")
-    } else {
-        Value.VInt(instance.amplifier.toLong())
-    }
-}
-
-/** Остаток эффекта в тиках: `effect_duration.speed: "<100"`. */
-private fun effectDurationField(entity: Entity?, field: String): Value {
-    val instance = activeEffect(entity, field)
-    return if (instance == null) {
-        if (entity is LivingEntity) Value.VInt(0) else Value.VStr("unknown")
-    } else {
-        Value.VInt(instance.duration.toLong())
-    }
-}
-
-/**
- * Активный эффект по id или `null`.
- *
- * `null` означает «нет такого эффекта» и не различает «игрок не живой» с
- * «эффекта нет»: различает вызывающий, у которого под рукой есть
- * `entity is LivingEntity`.
- */
-private fun activeEffect(entity: Entity?, id: String): MobEffectInstance? {
-    if (id.isBlank()) return null
-    val living = entity as? LivingEntity ?: return null
-    for (instance in living.activeEffects) {
-        val key = instance.effect.unwrapKey()
-        if (key.isPresent && key.get().identifier().path == id) return instance
-    }
-    return null
 }
