@@ -6,6 +6,7 @@ import dev.ggtv.capecraft.ide.CrenDocument
 import dev.ggtv.capecraft.ide.CrenParser
 import dev.ggtv.capecraft.ide.PositionEncoding
 import dev.ggtv.capecraft.ide.SchemaMode
+import dev.ggtv.capecraft.schema.AddonSchema
 import dev.ggtv.capecraft.schema.AddonSchemaFinder
 import dev.ggtv.capecraft.schema.ConfigSchema
 import dev.ggtv.capecraft.schema.J
@@ -14,6 +15,7 @@ import java.io.OutputStream
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 import java.nio.file.Path
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Сервер LSP для конфигов CapeCraft: диагностика, подсказки, наведение.
@@ -40,8 +42,28 @@ class LspServer(
 
     private val transport = RpcTransport(input, output)
 
-    /** Тексты открытых документов: uri -> текст. */
-    private val docs = LinkedHashMap<String, String>()
+    /**
+     * Тексты открытых документов: uri -> текст.
+     *
+     * Не [LinkedHashMap]: список читает ещё и поток наблюдения за папкой
+     * `mods` ([ModsWatcher]), который переиздаёт диагностики, когда аддон
+     * установлен или убран. Обычная коллекция на чтении из чужого потока
+     * отдаёт `ConcurrentModificationException` или, что хуже, повреждённое
+     * содержимое.
+     */
+    private val docs = ConcurrentHashMap<String, String>()
+
+    /**
+     * Какой список аддонов сейчас в схеме.
+     *
+     * Нужен, чтобы отличать «подпись папки не изменилась» от «изменилась»:
+     * [AddonSchemaFinder] в обоих случаях отдаёт список, и без этого сервер
+     * переиздавал бы диагностики на каждый запрос. Ссылочное сравнение вместо
+     * сравнения содержимого: [AddonSchemaFinder.forConfig] возвращает прежний
+     * экземпляр, пока подпись та же.
+     */
+    @Volatile
+    private var appliedAddons: List<AddonSchema> = emptyList()
 
     /**
      * Блок `capeCraft` в начале строки — признак конфига CapeCraft.
@@ -90,6 +112,10 @@ class LspServer(
      * выход, а не падение.
      */
     fun run(): Int {
+        // Наблюдение за папкой `mods` — до чтения первого кадра: событие о
+        // смене состава аддонов приходит в отдельном потоке, и обрабатывать его
+        // надо, когда уже есть открытые документы.
+        ModsWatcher.start(::onModsChanged)
         while (true) {
             val message = try {
                 transport.read() ?: break
@@ -335,26 +361,52 @@ class LspServer(
     /**
      * Подтянуть дескрипторы аддонов для [uri] и положить их в схему.
      *
-     * Вызывается при открытии файла, а не один раз в `initialize`: путь к
-     * конфигу известен из uri, а в `initialize` документов ещё нет. После
-     * установки аддона достаточно переоткрыть файл — перезапуск редактора не
-     * нужен.
+     * Вызывается не только при открытии файла, но и перед каждым запросом по
+     * схеме, и это дешёво: [AddonSchemaFinder.forConfig] сверяет подпись папки
+     * `mods` — пара `stat` на jar — и, если ничего не изменилось, отдаёт
+     * прежний список. Настоящее чтение архивов случается только когда папка
+     * правда поменялась.
+     *
+     * Проверка на каждый запрос нужна как страховка наблюдателю за `mods`
+     * ([ModsWatcher]): событие могло потеряться, а человек в этот раз просто
+     * нажал на букву. Подсказка не должна зависеть от того, дошло ли событие.
      *
      * Ошибка чтения не должна мешать анализу: аддон — необязательная часть
      * конфига, и конфиг без аддонов совершенно обычен.
+     *
+     * @return `true`, если состав аддонов изменился и это стоит переиздать.
      */
-    private fun loadAddons(uri: String) {
+    private fun loadAddons(uri: String): Boolean {
         try {
-            val path = pathOf(uri) ?: return
+            val path = pathOf(uri) ?: return false
+            val mods = AddonSchemaFinder.findModsDir(path)
+            if (mods != null) ModsWatcher.watchFor(path)
             val schemas = AddonSchemaFinder.forConfig(path)
-            if (schemas.isNotEmpty() || ConfigSchema.addons().isNotEmpty()) {
-                ConfigSchema.setAddonSchemas(schemas)
-                if (schemas.isNotEmpty()) {
-                    log("аддоны для ${uri.substringAfterLast('/')}: ${schemas.joinToString(", ") { it.id }}")
-                }
+            // Список отдаётся тем же экземпляром, пока подпись не изменилась,
+            // поэтому сравнение по ссылке — точная проверка «ничего не было».
+            if (schemas === appliedAddons) return false
+            appliedAddons = schemas
+            ConfigSchema.setAddonSchemas(schemas)
+            if (schemas.isNotEmpty()) {
+                log("аддоны для ${uri.substringAfterLast('/')}: ${schemas.joinToString(", ") { it.id }}")
             }
+            return true
         } catch (e: Exception) {
             log("дескрипторы аддонов не прочитаны: $e")
+            return false
+        }
+    }
+
+    /**
+     * Папка `mods` изменилась: перечитать аддонов и переиздать диагностики.
+     *
+     * Издаёт только там, где [loadAddons] увидел новый состав, — событий о
+     * папке `mods` много (правка логов, создание `saves`), а переиздавать
+     * диагностики в ответ на каждое незачем.
+     */
+    private fun onModsChanged() {
+        for (uri in docs.keys.toList()) {
+            if (loadAddons(uri)) publish(uri)
         }
     }
 
@@ -618,6 +670,9 @@ class LspServer(
      *   с нуля: пока блок не напечатан, схема ещё не знает, чего ждать.
      */
     private fun schemaOf(uri: String): SchemaMode {
+        // Перед любым разговором о схеме — сверка с диском: событие могло не
+        // дойти, а подсказка всё равно должна соответствовать папке `mods`.
+        loadAddons(uri)
         val name = uri.substringAfterLast('/').substringBeforeLast('.')
         if (name.equals("capecraft", ignoreCase = true)) return SchemaMode.CAPECRAFT
         val text = docs[uri] ?: return SchemaMode.LANGUAGE_ONLY
@@ -730,7 +785,7 @@ class LspServer(
          * своя линия релизов (`lsp_version` в gradle.properties, теги `lsp-v*`),
          * и поднятие версии мода не должно выглядеть как обновление редактора.
          */
-        const val version = "1.1.0"
+        const val version = "1.1.1"
     }
 }
 

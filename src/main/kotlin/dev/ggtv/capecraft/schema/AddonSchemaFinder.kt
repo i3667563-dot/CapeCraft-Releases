@@ -2,6 +2,7 @@ package dev.ggtv.capecraft.schema
 
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.concurrent.ConcurrentHashMap
 import java.util.zip.ZipFile
 
 /**
@@ -37,12 +38,20 @@ object AddonSchemaFinder {
     const val MODS_DIR = "mods"
 
     /**
-     * Подпись папки `mods`: имя jar'а и его размер.
+     * Подпись папки `mods`: имя jar'а, его размер и время изменения.
      *
-     * Размер вместо времени изменения: `ZipFile` не отдаёт mtime записи
-     * без чтения центрального каталога, а размер меняется при пересборке
-     * аддона и не меняется при простое. Имя и размер вместе — достаточная
-     * подпись для кэша подсказок.
+     * Одного размера мало, и это не теория. Пересборка аддона, в которой
+     * поправили описание ключа, даёт jar'а того же размера: длина строки почти
+     * не меняется, а подсказки уже другие. Проверено подменой — два аддона с
+     * дескрипторами одинаковой длины собираются в jar'ы ровно одного размера, и
+     * сервер, глядя только на размер, показывал тип уже удалённого аддона.
+     *
+     * Время изменения ловит подмену целиком. Оно же меняется при переносе
+     * папки или восстановлении из копии — тогда перечитывание лишнее, но не
+     * вредное.
+     *
+     * Одно время тоже мало: две сборки в одну секунду неразличимы, поэтому
+     * размер остаётся в подписи.
      */
     private fun signature(mods: Path): String {
         val sb = StringBuilder()
@@ -54,7 +63,8 @@ object AddonSchemaFinder {
             stream.use { entries ->
                 for (p in entries.sortedBy { it.fileName.toString() }) {
                     sb.append(p.fileName).append(':')
-                    sb.append(Files.size(p)).append(';')
+                    sb.append(Files.size(p)).append(':')
+                    sb.append(Files.getLastModifiedTime(p).toMillis()).append(';')
                 }
             }
         } catch (e: Exception) {
@@ -65,8 +75,15 @@ object AddonSchemaFinder {
         return sb.toString()
     }
 
-    /** Кэш: путь к папке mods -> (подпись, дескрипторы). */
-    private val cache = HashMap<String, Pair<String, List<AddonSchema>>>()
+    /**
+     * Кэш: путь к папке mods -> (подпись, дескрипторы).
+     *
+     * [ConcurrentHashMap], а не [HashMap]: читает поток наблюдения за папкой
+     * `mods` (см. `ModsWatcher`), и обычная коллекция на чтении из чужого потока
+     * рассинхронизируется. Значения кладём целиком, поэтому читатель видит либо
+     * старый список, либо новый, но не половину.
+     */
+    private val cache = ConcurrentHashMap<String, Pair<String, List<AddonSchema>>>()
 
     /**
      * Дескрипторы аддонов для конфига по [configFile].
@@ -147,6 +164,16 @@ object AddonSchemaFinder {
         LspLog.warn("не удалось прочитать $mods: $e")
         emptyList()
     }
+
+    /**
+     * Забыть всё прочитанное.
+     *
+     * Вызывается наблюдателем за папкой `mods` ([dev.ggtv.capecraft.lsp.ModsWatcher])
+     * при изменении её содержимого: подпись и так изменилась бы, но подписаться
+     * на событие дешевле, чем читать содержимое семидесяти архивов на каждое
+     * нажатие клавиши.
+     */
+    fun invalidateAll() = cache.clear()
 
     /** Сброс кэша — для тестов. */
     fun clearCache() = cache.clear()

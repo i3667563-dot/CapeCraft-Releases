@@ -58,6 +58,15 @@ class RpcTransport(
         }
     }
 
+    /**
+     * Отправить кадр.
+     *
+     * `synchronized` не для красоты: кроме потока сервера пишет поток
+     * наблюдения за папкой `mods`, и без блокировки два кадра делили бы
+     * `OutputStream` — заголовок одного попал бы в тело другого, и клиент
+     * потерял бы не сообщение, а всю сессию.
+     */
+    @Synchronized
     fun write(message: J.JObj) {
         val text = Json.render(message)
         val bytes = text.toByteArray(StandardCharsets.UTF_8)

@@ -167,6 +167,48 @@ class AddonSchemaFinderTest {
     }
 
     @Test
+    fun `подмена jar того же размера обновляет кэш`() {
+        // Найдено на живых данных: два аддона, у которых дескрипторы одинаковой
+        // длины, собираются в jar'ы ровно одного размера. По подписи «имя плюс
+        // размер» такой jar не отличим от прежнего, и редактор годами
+        // показывал тип удалённого аддона. Спасает время изменения.
+        val seed = descriptor("seed", types = "typeC")
+        val evil = descriptor("evil", types = "typeD")
+        // Длина дескрипторов обязана совпасть, иначе тест проверяет не то.
+        assertEquals(seed.length, evil.length, "фикстуры должны быть одной длины")
+
+        val jarPath = jar(root.resolve("mods/swap.jar"), mapOf("capecraft-addon.kn" to seed))
+        val size = Files.size(jarPath)
+        assertEquals(listOf("typeC"), AddonSchemaFinder.forConfig(config())[0].types.map { it.id })
+
+        jarPath.toFile().delete()
+        jar(jarPath, mapOf("capecraft-addon.kn" to evil))
+        assertEquals(size, Files.size(jarPath), "подмена должна быть того же размера")
+
+        assertEquals(listOf("typeD"), AddonSchemaFinder.forConfig(config())[0].types.map { it.id })
+    }
+
+    @Test
+    fun `смена времени изменения без смены размера тоже обновляет кэш`() {
+        // jar не пересобирается вовсе — только трогается время, как при
+        // переносе папки или восстановлении из копии. Подсказки всё равно
+        // должны соответствовать тому, что лежит на диске.
+        val jarPath = jar(
+            root.resolve("mods/touch.jar"),
+            mapOf("capecraft-addon.kn" to descriptor("t", types = "typeE")),
+        )
+        assertEquals(listOf("typeE"), AddonSchemaFinder.forConfig(config())[0].types.map { it.id })
+        AddonSchemaFinder.invalidateAll()
+        val later = System.currentTimeMillis() + 5000
+        Files.setLastModifiedTime(jarPath, java.nio.file.attribute.FileTime.fromMillis(later))
+        assertEquals(
+            listOf("typeE"),
+            AddonSchemaFinder.forConfig(config())[0].types.map { it.id },
+            "подпись обязана отличаться после смены времени",
+        )
+    }
+
+    @Test
     fun `путь к источнику попадает в дескриптор`() {
         // По нему в сообщении об ошибке видно, чей jar сломан.
         jar(root.resolve("mods/capecraft-seed.jar"), mapOf("capecraft-addon.kn" to descriptor("a")))
