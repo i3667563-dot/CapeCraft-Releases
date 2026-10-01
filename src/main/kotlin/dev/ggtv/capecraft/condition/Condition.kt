@@ -51,6 +51,12 @@ data class Condition(val predicates: List<Predicate>) {
             // У `health` поля по умолчанию нет намеренно: оба поля числовые,
             // а короткая запись разворачивается в сравнение со строкой и
             // никогда бы не совпала. Пишут `health.current` и `health.max`.
+            // То же у `food` и `xp`: оба поля числовые.
+            // У `fire` и `hand` короткая запись осмысленна, а у корней
+            // эффектов поля по умолчанию нет — их имя задаёт сам эффект
+            // (`effect.speed`), и угадать его невозможно.
+            WorldRoot.FIRE to "burning",
+            WorldRoot.HAND to "main",
         )
 
         /**
@@ -60,6 +66,11 @@ data class Condition(val predicates: List<Predicate>) {
          * `DEFAULT_FIELDS`: у `biome` поле по умолчанию — `id`, у `location`
          * поля по умолчанию нет вовсе, и без этого списка ошибка советовала
          * несуществующее `location.id`.
+         *
+         * Сверяется с исходниками всех версий тестом `WorldContextAgreementTest`:
+         * поле, которого нет в `MinecraftWorldContext` соответствующей версии,
+         * не сработает никогда, а ошибки не даст — условие просто вернёт
+         * `unknown`. Поэтому список обещаний и список чтений обязаны совпадать.
          */
         val LIVE_FIELDS = mapOf(
             WorldRoot.BIOME to listOf("id", "temperature", "precipitation"),
@@ -70,6 +81,52 @@ data class Condition(val predicates: List<Predicate>) {
             WorldRoot.ARMOR to listOf("head", "chest", "legs", "feet"),
             WorldRoot.HEALTH to listOf("current", "max"),
             WorldRoot.STATE to listOf("inWater", "sneaking", "sprinting", "onGround", "pose"),
+            WorldRoot.FIRE to listOf("burning"),
+            WorldRoot.HAND to listOf("main", "off"),
+            WorldRoot.FOOD to listOf("level", "saturation"),
+            WorldRoot.XP to listOf("level", "progress"),
+        )
+
+        /**
+         * Корни, у которых поле задаёт **сам эффект**, а не его свойство.
+         *
+         * Пишут `effect.speed`, `effect_amplifier.poison`, `effect_duration.jump`.
+         * Не `effect: "speed"` — и это не недоработка, а предел формы
+         * `root.field = "value"`: если эффект лежит в *значении*, то поле
+         * приходится выбирать, а выбирать нечего, кроме как «какой-нибудь один».
+         * Условие «`effect.id = poison`» на игроке с ядом и скоростью было бы
+         * истиной или ложью в зависимости от того, какой эффект выбрал алгоритм,
+         * — то есть молча и непредсказуемо, а это худший вид поломки.
+         *
+         * Поэтому поле — это идентификатор эффекта, а сравнивается его наличие:
+         * `effect.poison: "active"`. Мод со своим эффектом работает без правок
+         * модели, а подсказка редактора отдаёт ids из [EFFECT_IDS] как примеры,
+         * а не как закрытый список.
+         */
+        val DYNAMIC_FIELD_ROOTS = setOf(
+            WorldRoot.EFFECT,
+            WorldRoot.EFFECT_AMPLIFIER,
+            WorldRoot.EFFECT_DURATION,
+        )
+
+        /** У корня поле свободное: подходит любой идентификатор эффекта. */
+        fun hasDynamicFields(root: WorldRoot): Boolean = root in DYNAMIC_FIELD_ROOTS
+
+        /**
+         * Идентификаторы эффектов Minecraft — **подсказки**, а не белый список.
+         *
+         * Нужны только для автодополнения в редакторе: моды добавляют свои
+         * эффекты, и закрытый список сделал бы их невозможными. Сверяется с
+         * реестром classpath тестом `WorldContextAgreementTest`, чтобы
+         * подсказка не предлагала эффекта, которого в игре нет.
+         */
+        val EFFECT_IDS = listOf(
+            "speed", "slowness", "haste", "mining_fatigue", "strength", "instant_health",
+            "instant_damage", "jump_boost", "nausea", "regeneration", "resistance",
+            "fire_resistance", "water_breathing", "invisibility", "blindness", "night_vision",
+            "hunger", "weakness", "poison", "wither", "health_boost", "absorption",
+            "saturation", "glowing", "levitation", "luck", "unluck", "slow_falling",
+            "conduit_power", "dolphins_grace", "bad_omen", "hero_of_the_village", "darkness",
         )
 
         /**
@@ -157,11 +214,26 @@ data class Condition(val predicates: List<Predicate>) {
             // И текущее, и максимальное здоровье — числа, поэтому `health.max`
             // пишется как `">=20"`, а `health.current: "<10"`.
             WorldRoot.HEALTH to listOf("current", "max"),
+            // Голод и сытость — числа 0..20, поэтому пишут `food.level: "<8"`.
+            WorldRoot.FOOD to listOf("level", "saturation"),
+            // `xp.level` — целый уровень, `xp.progress` — доля внутри него (0..1).
+            WorldRoot.XP to listOf("level", "progress"),
         )
+
+        /**
+         * Корни, у которых **любое** поле числовое.
+         *
+         * Отдельный список, потому что перечислить поля нельзя: у корней
+         * эффектов их столько, сколько эффектов в реестре, а он открыт.
+         * Перечисление висящих констант в [NUMERIC_FIELDS] означало бы, что
+         * `effect_amplifier.some_mod_effect` — строка, и `Op` для строк вернул бы
+         * `false` на `>`: условие разобралось бы и не сработало бы никогда.
+         */
+        val NUMERIC_ROOTS = setOf(WorldRoot.EFFECT_AMPLIFIER, WorldRoot.EFFECT_DURATION)
 
         /** Принимает ли поле числа, а значит ли операторы сравнения. */
         fun isNumeric(root: WorldRoot, field: String): Boolean =
-            NUMERIC_FIELDS[root]?.contains(field) == true
+            root in NUMERIC_ROOTS || NUMERIC_FIELDS[root]?.contains(field) == true
 
         /**
          * Значение, которым мир отвечает «не смог прочитать».
@@ -190,8 +262,32 @@ data class Condition(val predicates: List<Predicate>) {
          *
          * Само свойство живёт здесь, а не в koren: [WorldRoot] — вендоренный
          * формат, и продуктовое решение о синхронизации в него тащить нельзя.
+         *
+         * `hand`, `food`, `xp`, `effect`, `fire` — то же самое, что `state`, но
+         * по другой причине. Про чужого игрока не узнать, что у него в руке,
+         * сколько он съел и какие у него эффекты; наблюдатель видит только его
+         * плащ и клетки инвентаря, а не состояние. Выглядит соблазнительно
+         * объявить их публичными — «в руке меч, это и так видно» — но тогда
+         * условие поехало бы к наблюдателю, который считает его против СВОЕГО
+         * игрока и получил бы чужой плащ: у меня меч, а он увидит мой
+         * «мечный» плащ, стоя в пустыне без меча. Правило простое: корневое
+         * поле про **моё** состояние — self-only, а про то, что видно всем
+         * (`armor`, `health`, `location`, `biome`), — публичное.
+         *
+         * Проверяется тестом: у [dev.ggtv.capecraft.sync.WireRoot] нет тегов
+         * для этих корней, и `WireCondition.from` обязан вернуть `null` для
+         * условия с любым из них.
          */
-        val SELF_ONLY_ROOTS = setOf(WorldRoot.STATE)
+        val SELF_ONLY_ROOTS = setOf(
+            WorldRoot.STATE,
+            WorldRoot.FIRE,
+            WorldRoot.HAND,
+            WorldRoot.FOOD,
+            WorldRoot.XP,
+            WorldRoot.EFFECT,
+            WorldRoot.EFFECT_AMPLIFIER,
+            WorldRoot.EFFECT_DURATION,
+        )
 
         /** Что отдаёт только владелец, а что видят все. */
         fun isSelfOnlyRoot(root: WorldRoot): Boolean = root in SELF_ONLY_ROOTS
@@ -211,8 +307,13 @@ data class Condition(val predicates: List<Predicate>) {
                 )
             val field = parts.getOrNull(1) ?: DEFAULT_FIELDS[root]
                 ?: throw IllegalArgumentException(
-                    "условие when: для «${root.segment}» нужно указать поле — " +
-                        "доступны: ${LIVE_FIELDS.getValue(root).joinToString()}",
+                    if (hasDynamicFields(root)) {
+                        "условие when: для «${root.segment}» нужно указать эффект — " +
+                            "например «${root.segment}.speed» (ids: ${EFFECT_IDS.take(3)}…)"
+                    } else {
+                        "условие when: для «${root.segment}» нужно указать поле — " +
+                            "доступны: ${LIVE_FIELDS[root].orEmpty().joinToString()}"
+                    },
                 )
             if (parts.size > 2) {
                 throw IllegalArgumentException(

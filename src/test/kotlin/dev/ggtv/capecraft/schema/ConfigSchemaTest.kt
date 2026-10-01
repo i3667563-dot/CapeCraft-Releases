@@ -87,6 +87,7 @@ class ConfigSchemaTest {
                       extract = "$.c", path = "/tmp/c.png", priority = 7,
                       when = { biome: "snowy" },
                       if = { username: "Steve" } },
+
                 ]
             }
         """.trimIndent()
@@ -136,8 +137,26 @@ class ConfigSchemaTest {
     @Test
     fun `поля when совпадают с живыми полями`() {
         for (root in WhenSchema.roots()) {
+            // У корней эффектов полей в LIVE_FIELDS нет и быть не может: их
+            // столько, сколько эффектов в реестре, а реестр открыт. Подсказка
+            // отдаёт ids из EFFECT_IDS, и сверять тут нечего — вместо этого
+            // проверяется, что они помечены динамическими, иначе редактор
+            // начал бы валидировать `effect.speed` как опечатку.
+            if (WhenSchema.hasDynamicFields(root)) continue
             val live = Condition.LIVE_FIELDS[root].orEmpty()
             assertEquals(live, WhenSchema.fieldsOf(root), "поля корня ${root.segment} разошлись")
+        }
+    }
+
+    @Test
+    fun `у динамических корней в LIVE_FIELDS нет полей`() {
+        for (root in WorldRoot.entries.filter { WhenSchema.hasDynamicFields(it) }) {
+            assertEquals(
+                emptyList(),
+                Condition.LIVE_FIELDS[root].orEmpty(),
+                "корень ${root.segment} динамический, но перечисляет поля: " +
+                    "любой новый эффект мода попал бы в белый список",
+            )
         }
     }
 

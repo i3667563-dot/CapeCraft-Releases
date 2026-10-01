@@ -74,6 +74,36 @@ object CapeApiHolder {
             ),
         )
 
+    /**
+     * Кто сейчас запрашивается — см. [CapeFetchSubject].
+     *
+     * ThreadLocal, а не поле в [CapeValues]: значение собирается при чтении
+     * конфига один раз, а игрок меняется на каждый вызов, и на каждый вызов же
+     * приходится свой поток (загрузка идёт в пуле). Поле в данных конфига
+     * заморозило бы первый UUID на все объекты, а общее поле — отдало бы
+     * перепутанное значение при параллельной загрузке.
+     *
+     * Публикация — [withSubject], который восстанавливает прежнее значение в
+     * `finally`: воркер переиспользуется, и забытый сброс означал бы, что
+     * следующий вызов увидит чужого игрока. Читать можно только внутри
+     * `withSubject`, иначе значение — `null`.
+     */
+    private val subject = ThreadLocal<CapeFetchSubject?>()
+
+    /** Кто запрашивает плащ прямо сейчас, либо `null` вне вызова аддона. */
+    fun subject(): CapeFetchSubject? = subject.get()
+
+    /** Выставить [who] на время [block] и вернуть её результат. */
+    fun <T> withSubject(who: CapeFetchSubject?, block: () -> T): T {
+        val prev = subject.get()
+        subject.set(who)
+        try {
+            return block()
+        } finally {
+            if (prev == null) subject.remove() else subject.set(prev)
+        }
+    }
+
     /** Декодер-мост: возвращает AnimatedImage из байтов через аддон-либо-встроенный декодер. */
     fun decode(data: ByteArray, source: String?): AnimatedImage {
         val spec = api.decoders.decoderFor(data)

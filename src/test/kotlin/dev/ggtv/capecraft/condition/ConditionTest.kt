@@ -612,6 +612,180 @@ class ResolveCapeWorldTest {
         assertTrue(Condition.parse(dictOf("biome.id" to str("minecraft:snowy_plains"))).matches(snowy))
         assertFalse(Condition.parse(dictOf("biome" to str("rain"))).matches(snowy))
     }
+
+    // ─────────────── self-only корни игрока ───────────────
+
+    /**
+     * Горение, руки, еда, опыт и эффекты не уезжают по сети.
+     *
+     * Проверяется на каждом корне: забытый в [Condition.SELF_ONLY_ROOTS] корень
+     * не падает — условие просто начинает ехать к наблюдателю, который считает
+     * его против СВОЕГО игрока, и человек получает чужой плащ без единой ошибки
+     * в логах. Единственная защита — сам список, поэтому он и сверяется целиком.
+     */
+    @Test
+    fun `все корни игрока self-only`() {
+        val mine = listOf(
+            WorldRoot.STATE,
+            WorldRoot.FIRE,
+            WorldRoot.HAND,
+            WorldRoot.FOOD,
+            WorldRoot.XP,
+            WorldRoot.EFFECT,
+            WorldRoot.EFFECT_AMPLIFIER,
+            WorldRoot.EFFECT_DURATION,
+        )
+        assertEquals(mine.toSet(), Condition.SELF_ONLY_ROOTS, "набор self-only корней разошёлся")
+        for (root in mine) {
+            assertTrue(Condition.isSelfOnlyRoot(root), "корень ${root.segment} не self-only")
+            // Значение подбирается под тип поля намеренно: числовое поле со
+            // строкой падает на разборе, и проверка self-only не дошла бы до
+            // смысла — упала бы на чужем основании и замаскировала бы дыру.
+            val value = if (Condition.isNumeric(root, "x")) str("1") else str("y")
+            assertTrue(
+                Condition.parse(dictOf("${root.segment}.x" to value)).hasSelfOnly,
+                "условие с корнем ${root.segment} не помечено self-only",
+            )
+        }
+    }
+
+    /**
+     * Корни, видные всем, не должны случайно стать self-only.
+     *
+     * Обратная проверка: `armor` и `health` видно со стороны, и их объявление
+     * self-only отключило бы чужие плащи у всех, кто не владелец.
+     */
+    @Test
+    fun `публичные корни остаются публичными`() {
+        for (root in listOf(
+            WorldRoot.BIOME, WorldRoot.WEATHER, WorldRoot.TIME, WorldRoot.DIMENSION,
+            WorldRoot.LOCATION, WorldRoot.ARMOR, WorldRoot.HEALTH,
+        )) {
+            assertFalse(Condition.isSelfOnlyRoot(root), "корень ${root.segment} не должен быть self-only")
+        }
+    }
+
+    @Test
+    fun `fire без точки это burning`() {
+        val burning = FakeWorld(mapOf("fire.burning" to str("true")))
+        assertTrue(Condition.parse(dictOf("fire" to str("true"))).matches(burning))
+        assertFalse(Condition.parse(dictOf("fire" to str("false"))).matches(burning))
+    }
+
+    @Test
+    fun `hand без точки это основная рука`() {
+        val world = FakeWorld(mapOf("hand.main" to str("shield"), "hand.off" to str("none")))
+        assertTrue(Condition.parse(dictOf("hand" to str("shield"))).matches(world))
+        // Вторая рука проверяется явно: без точки она не читается никогда.
+        assertFalse(Condition.parse(dictOf("hand" to str("none"))).matches(world))
+        assertTrue(Condition.parse(dictOf("hand.off" to str("none"))).matches(world))
+    }
+
+    @Test
+    fun `food и xp сравниваются числами`() {
+        val world = FakeWorld(
+            mapOf(
+                "food.level" to int(4),
+                "food.saturation" to num(1.5),
+                "xp.level" to int(30),
+                "xp.progress" to num(0.25),
+            ),
+        )
+        assertTrue(Condition.parse(dictOf("food.level" to str("<8"))).matches(world))
+        assertFalse(Condition.parse(dictOf("food.level" to str(">8"))).matches(world))
+        assertTrue(Condition.parse(dictOf("food.saturation" to str("1..2"))).matches(world))
+        assertTrue(Condition.parse(dictOf("xp.level" to str(">=30"))).matches(world))
+        assertTrue(Condition.parse(dictOf("xp.progress" to str("<0.5"))).matches(world))
+    }
+
+    /**
+     * Строка в числовом поле — ошибка загрузки, а не «никогда не совпадёт».
+     *
+     * `food.level: "низко"` разобралось бы в строковое ожидание, для которого
+     * у `Op` нет сравнения: условие не сработало бы никогда и не дало бы ошибки.
+     */
+    @Test
+    fun `строка в числовом поле еды и опыта`() {
+        for (key in listOf("food.level", "food.saturation", "xp.level", "xp.progress")) {
+            val e = assertFailsWith<IllegalArgumentException> {
+                Condition.parse(dictOf(key to str("низко")))
+            }
+            assertTrue(e.message!!.contains(key), "в ошибке нет поля $key")
+        }
+    }
+
+    // ─────────────── эффекты ───────────────
+
+    @Test
+    fun `эффект ищется по своему полю`() {
+        val poisoned = FakeWorld(mapOf("effect.poison" to str("active")))
+        assertTrue(Condition.parse(dictOf("effect.poison" to str("active"))).matches(poisoned))
+        // Другого эффекта нет — поле недоступно, а не «есть ложь».
+        assertFalse(Condition.parse(dictOf("effect.speed" to str("active"))).matches(poisoned))
+        // Отрицание работает как для строк, а не требует отдельной ветки в Op.
+        assertFalse(Condition.parse(dictOf("effect.poison" to str("!active"))).matches(poisoned))
+
+        // Мир отдаёт `inactive`, а не «поля нет»: без этого `!active` нельзя
+        // было бы написать вовсе — NotFound даёт «не подошло», и условие
+        // «нет яда» работало бы только для тех, у кого это поле объявлено.
+        val clean = FakeWorld(
+            mapOf("effect.poison" to str("inactive"), "effect.speed" to str("inactive")),
+        )
+        assertTrue(Condition.parse(dictOf("effect.speed" to str("!active"))).matches(clean))
+
+        // Ключ, которого в мире нет вовсе, обязан давать «не совпало»:
+        // иначе опечатка в конфиге печатала бы плащ тому, у кого эффекта нет.
+        assertFalse(Condition.parse(dictOf("effect.poison" to str("active"))).matches(clean))
+        assertTrue(Condition.parse(dictOf("effect.poison" to str("inactive"))).matches(clean))
+    }
+
+    @Test
+    fun `усиление и остаток эффекта числа`() {
+        val world = FakeWorld(
+            mapOf(
+                "effect_amplifier.poison" to int(1),
+                "effect_duration.jump_boost" to int(40),
+            ),
+        )
+        assertTrue(Condition.parse(dictOf("effect_amplifier.poison" to str(">=1"))).matches(world))
+        assertFalse(Condition.parse(dictOf("effect_amplifier.poison" to str(">1"))).matches(world))
+        assertTrue(Condition.parse(dictOf("effect_duration.jump_boost" to str("<100"))).matches(world))
+    }
+
+    @Test
+    fun `усиление эффекта не строка`() {
+        val e = assertFailsWith<IllegalArgumentException> {
+            Condition.parse(dictOf("effect_amplifier.poison" to str("сильный")))
+        }
+        assertTrue(e.message!!.contains("effect_amplifier"))
+    }
+
+    /**
+     * Эффект мода без правок модели.
+     *
+     * `EFFECT_IDS` — подсказка, а не белый список. Если бы он был белым,
+     * подсказка и валидация разошлись бы при первом же моде со своим эффектом,
+     * а условие по нему перестало бы работать молча.
+     */
+    @Test
+    fun `эффект из мода принимается`() {
+        val world = FakeWorld(mapOf("effect.some_mod_effect" to str("active")))
+        assertTrue(
+            Condition.parse(dictOf("effect.some_mod_effect" to str("active"))).matches(world),
+        )
+    }
+
+    @Test
+    fun `корень эффекта без поля объясняет что делать`() {
+        val e = assertFailsWith<IllegalArgumentException> {
+            Condition.parse(dictOf("effect" to str("active")))
+        }
+        assertTrue(e.message!!.contains("effect."), "в ошибке нет примера: ${e.message}")
+        assertFalse(
+            e.message!!.contains("null"),
+            "в ошибке просочился внутренний null: ${e.message}",
+        )
+    }
 }
 
 /** [WorldContext], где ничего нет. */

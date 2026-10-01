@@ -1,5 +1,6 @@
 package dev.ggtv.capecraft
 
+import dev.ggtv.capecraft.condition.Condition
 import dev.ggtv.capecraft.schema.WhenSchema
 import dev.ggtv.koren.WorldRoot
 import org.junit.jupiter.api.Test
@@ -78,6 +79,11 @@ class WorldContextAgreementTest {
         for (version in versions()) {
             val text = worldContext(version).readText()
             for (root in WhenSchema.roots()) {
+                // У корней эффектов поля задаёт пользователь (`effect.speed`),
+                // перечислять их нельзя, а сверять нечего. Их проверяет
+                // [эффекты в подсказке есть в реестре] и отдельный тест в
+                // ConditionTest на то, что корень помечен динамическим.
+                if (WhenSchema.hasDynamicFields(root)) continue
                 for (field in WhenSchema.fieldsOf(root)) {
                     assertTrue(
                         text.contains("\"$field\""),
@@ -86,6 +92,59 @@ class WorldContextAgreementTest {
                 }
             }
         }
+    }
+
+    /**
+     * Подсказка редактора не предлагает эффекта, которого нет в игре.
+     *
+     * `Condition.EFFECT_IDS` — это подсказка, а не белый список: мод добавит
+     * свой эффект, и он будет работать. Но перечисленные в подсказке обязаны
+     * существовать, иначе автодополнение предлагало бы `conduit_power` в
+     * версии, где его выкинули, и человек написал бы условие, которое не
+     * сработает никогда, — а это худший вид поломки, молчаливый.
+     *
+     * Имена классов различаются: до 1.21.5 — Yarn, дальше Mojang.
+     */
+    @Test
+    fun `эффекты в подсказке есть в реестре`() {
+        val holder = effectsHolder()
+        val known: Set<String> = holder.fields.map { it.name.uppercase() }.toSet()
+        assertTrue(known.isNotEmpty(), "в ${holder.name} нет полей — не тот класс")
+
+        for (id in Condition.EFFECT_IDS) {
+            assertTrue(
+                id.uppercase() in known,
+                "подсказка обещает эффект \"$id\", которого нет в ${holder.name}",
+            )
+        }
+    }
+
+    /**
+     * Класс с константами эффектов, **без запуска статического инициализатора**.
+     *
+     * `Class.forName(name)` инициализирует класс, а `MobEffects`/`StatusEffects`
+     * при инициализации лезут в реестры, которых в тестовом classpath нет, и
+     * бросают `ExceptionInInitializerError` — то есть «класс не нашёлся» в
+     * грязном смысле. `initialize = false` читает список полей, не трогая их
+     * значений: сверяются ИМЕНА, а не сами объекты эффектов.
+     *
+     * Имена полей совпадают с id реестра в верхнем регистре (`SPEED` → `speed`),
+     * и это расхождение тоже не осталось бы незамеченным: сверка идёт в обоих
+     * направлениях — лишний эффект в подсказке и переименование в игре.
+     */
+    private fun effectsHolder(): Class<*> {
+        val candidates = listOf(
+            // 26.2 — Mojang mappings.
+            "net.minecraft.world.effect.MobEffects",
+            // 1.21.x — Yarn: пакет entity.effect, а не world.effect и не potion.
+            "net.minecraft.entity.effect.StatusEffects",
+        )
+        val loader = javaClass.classLoader
+        for (name in candidates) {
+            val cls = runCatching { Class.forName(name, false, loader) }.getOrNull() ?: continue
+            if (cls.fields.isNotEmpty()) return cls
+        }
+        error("не нашёлся класс эффектов среди $candidates — проверь маппинги")
     }
 
     @Test

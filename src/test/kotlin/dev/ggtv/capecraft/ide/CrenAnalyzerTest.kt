@@ -391,6 +391,31 @@ class CrenAnalyzerTest {
     }
 
     @Test
+    fun `url у аддон-типа не считается мусором`() {
+        // Регрессия: `offeredFor` показывает все ключи для аддон-типа, а
+        // проверка appliesTo ругалась на каждый из них. Подсказка и
+        // подсветка говорили человеку противоположное.
+        val d = diags(
+            """capeCraft { providers [ { name = "a", type = "image", url = "http://x/y.png" } ] }""",
+        )
+        assertTrue(
+            d.none { it.code == CrenAnalyzer.CODE_APPLIES },
+            "url законен у аддон-типа: ${d.map { it.message }}",
+        )
+    }
+
+    @Test
+    fun `встроенный тип по-прежнему ловит чужой ключ`() {
+        // Отключение для аддон-типов не должно ослабить проверку url/file/json:
+        // иначе `path` у провайдера `url` стал бы незаметным.
+        val d = diags("""capeCraft { providers [ { name = "a", type = "url", path = "x.png" } ] }""")
+        assertTrue(
+            d.any { it.code == CrenAnalyzer.CODE_APPLIES && it.severity == CrenSeverity.WARNING },
+            "path у url должен ругаться: ${d.map { it.message }}",
+        )
+    }
+
+    @Test
     fun `явный тип не совпадает со значением`() {
         val text = """name str = 5"""
         val d = diags(text)

@@ -461,11 +461,17 @@ object CrenAnalyzer {
      *
      * Например `url` у провайдера типа `file`: мод такое поле просто не читает,
      * и человек неделю будет гадать, почему ссылка игнорируется.
+     *
+     * Про тип от аддона молчим. Набор его ключей схеме неизвестен, и аддон
+     * вправе назвать свой источник хоть `url`, хоть `path` — ругаться тут
+     * не на что. Тот же случай [Field.offeredFor] трактует как «показать всё»,
+     * иначе подсказка предлагала бы ключ, который через строку считает мусором.
      */
     private fun checkApplies(field: Field, e: CrenEntry, siblings: List<CrenEntry>): CrenDiagnostic? {
         if (field.appliesTo.isEmpty() || field.open) return null
         val type = siblings.firstOrNull { it.keyText == "type" }?.let { leafText(it) } ?: return null
         if (type in field.appliesTo) return null
+        if (!Field.isBuiltinProviderType(type)) return null
         return CrenDiagnostic(
             e.keyRange,
             "«${field.name}» не имеет смысла при типе «$type»",
