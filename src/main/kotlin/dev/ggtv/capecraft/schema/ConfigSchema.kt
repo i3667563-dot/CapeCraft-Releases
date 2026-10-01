@@ -90,6 +90,17 @@ data class Field(
     val allowed: List<String> = emptyList(),
     val children: List<Field> = emptyList(),
     val appliesTo: Set<String> = emptySet(),
+    /**
+     * Типы, для которых ключ обязателен, хотя [required] снят.
+     *
+     * Обязательность по существу привязана к типу, а не к имени: `path`
+     * обязателен у встроенного `file` и не обязателен у аддонного `image`,
+     * где достаточно `url`. Пока [appliesTo] был один, это разойтись не могло;
+     * с аддонами — может, и [required] + [appliesTo] перестали хватать.
+     *
+     * Пусто вместе с [required] = false — «никогда не обязателен».
+     */
+    val requiredFor: Set<String> = emptySet(),
     val open: Boolean = false,
     val deprecated: String? = null,
 ) {
@@ -108,6 +119,16 @@ data class Field(
         appliesTo.containsAll(BUILTIN_TYPES) -> true
         else -> false
     }
+
+    /**
+     * Ключ обязателен именно для провайдера типа [type].
+     *
+     * [required] без условия — обязан быть всегда. [requiredFor] — обязан для
+     * перечисленных типов и только для них: `path` у аддонного `image`
+     * обязателен не больше, чем `extract` у `url`.
+     */
+    fun requiredForType(type: String?): Boolean =
+        required || (type != null && type in requiredFor)
 
     companion object {
         private val BUILTIN_TYPES = setOf(
@@ -455,10 +476,56 @@ object ConfigSchema {
     const val PROVIDERS = "providers"
 
     /**
+     * Дескрипторы аддонов, о которых знает текущий процесс.
+     *
+     * В моде сюда попадает то, что зарегистрировали аддоны при загрузке, в
+     * редакторе — то, что прочитано из `mods` рядом с конфигом (см.
+     * [AddonSchemaFinder]). Один список на оба случая, чтобы подсказки в
+     * редакторе и подсказки в `/cp status` не могли разойтись по составу.
+     *
+     * `@Volatile`, потому что пишет LSP-поток, а читают все: без volatile
+     * анализатор мог бы увидеть наполовину обновлённый список ключей.
+     */
+    @Volatile
+    private var addonSchemas: List<AddonSchema> = emptyList()
+
+    /** Заменить список аддонов целиком. */
+    fun setAddonSchemas(schemas: List<AddonSchema>) {
+        addonSchemas = schemas.toList()
+    }
+
+    /** Что сейчас известно про аддонов. */
+    fun addons(): List<AddonSchema> = addonSchemas
+
+    /** Забыть всех аддонов — для тестов и для смены папки `mods`. */
+    fun clearAddonSchemas() {
+        addonSchemas = emptyList()
+    }
+
+    /** Аддон по `type` провайдера, или `null`, если тип не аддонный. */
+    fun addonForType(type: String?): AddonSchema? {
+        if (type == null || Field.isBuiltinProviderType(type)) return null
+        return addonSchemas.firstOrNull { it.type(type) != null }
+    }
+
+    /** Поле ключа аддон-типа: `gray` у `type = "seed"`, иначе `null`. */
+    fun addonField(type: String?, key: String): Field? =
+        addonForType(type)?.type(type!!)?.keys?.firstOrNull { it.name == key }
+
+    /** Имена аддонных плейсхолдеров — для подсказок в `{...}` и `if`. */
+    fun addonPlaceholders(): List<AddonPlaceholder> =
+        addonSchemas.flatMap { it.placeholders }
+
+    /**
      * Ключи провайдера, общие для всех типов, плюс специфичные для `type`.
      *
      * `url` нужен типам `url` и `json` (оба ходят по сети), `path` — только
      * `file`, `extract` — только `json`.
+     *
+     * Ключи аддона сюда **не** входят намеренно: их набор зависит от
+     * значения соседнего `type`, а статический список знает только про
+     * встроенные. Аддонные ключи добавляются в [providerItem] через
+     * [addonProviderFields], где тип уже известен.
      */
     fun providerFields(): List<Field> = listOf(
         Field(
@@ -708,11 +775,81 @@ object ConfigSchema {
      * внутри каждого его элемента. Без этого шага спуск по пути
      * `providers[0]` упирался бы в `providers` и не нашёл бы `url`.
      */
-    val providerItem: Field = Field(
+    /**
+     * Ключи аддон-типа [type], объявленные дескриптором.
+     *
+     * Ключ помечен [Field.appliesTo] ровно одним своим типом, поэтому
+     * [Field.offeredFor] отдаёт его только когда `type` совпал, и не выдаёт
+     * чужим типам. Дефолт [Field.appliesTo] — пустой, то есть «показывай
+     * всегда»: без него подсказка появлялась бы у всех провайдеров подряд.
+     */
+    fun addonProviderFields(type: String): List<Field> =
+        addonForType(type)?.type(type)?.keys.orEmpty()
+
+    /**
+     * Ключи провайдера: встроенные плюс аддонные для всех известных типов.
+     *
+     * Ключи с одинаковым именем **сливаются**, а не дописываются вторым
+     * элементом. `url` и `path` есть и во встроенных типах, и в аддонном
+     * `image`; если бы они остались двумя записями, [childrenOf] вернул бы
+     * первую, и проверка `appliesTo` ругалась бы на совершенно правильный
+     * `url` внутри `type = "image"`. Слиянием один `url` получает и
+     * `url`,`json`, и `image` в своём [Field.appliesTo] — то есть
+     * показывается у всех трёх и не показывается у остальных.
+     */
+    fun allProviderFields(): List<Field> {
+        val merged = LinkedHashMap<String, Field>()
+        for (f in providerFields()) merged[f.name] = f
+        for (schema in addons()) {
+            for (type in schema.types) {
+                for (key in type.keys) {
+                    val existing = merged[key.name]
+                    merged[key.name] = if (existing == null) {
+                        key.copy(appliesTo = setOf(type.id))
+                    } else if (existing.appliesTo.isEmpty()) {
+                        // Встроенный ключ без appliesTo общий для всех типов;
+                        // ограничивать его аддонным типом нельзя — у встроенного
+                        // типа он нужен в любом случае, а вот показать его
+                        // аддонному типу, который его не читает, нельзя.
+                        existing
+                    } else {
+                        // Обязательность при добавлении типа переносится в
+                        // requiredFor, иначе `path`, обязательный у `file`,
+                        // стал бы обязательным и у `image`, где хватает `url`.
+                        val moved = if (existing.required && type.id !in existing.appliesTo) {
+                            existing.requiredFor + existing.appliesTo
+                        } else {
+                            existing.requiredFor
+                        }
+                        existing.copy(
+                            appliesTo = existing.appliesTo + type.id,
+                            required = false,
+                            requiredFor = moved,
+                        )
+                    }
+                }
+            }
+        }
+        return merged.values.toList()
+    }
+
+    /**
+ * Поле одного элемента `providers` со всеми ключами, какие сейчас известны.
+ *
+ * Именно вычисляемое свойство, а не `val`: ключи аддонов приезжают позже, чем
+ * класс уже загрузился (дескрипторы читаются при открытии файла), и
+ * `val`-поле навсегда осталось бы со встроенными ключами. Тогда `gray` был бы
+ * «неизвестным ключом», а `url` внутри `type = "image"` — «лишним».
+ *
+ * Пересчёт на каждый вызов дешёвый: список из десятка полей, а [arrayItem]
+ * зовётся на каждый узел дерева при разборе файла.
+ */
+val providerItem: Field
+    get() = Field(
         name = "$PROVIDERS[]",
         type = SchemaType.DICT,
         doc = "Один провайдер из списка.",
-        children = providerFields(),
+        children = allProviderFields(),
     )
 
     /**

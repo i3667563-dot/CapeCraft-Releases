@@ -6,9 +6,14 @@ import dev.ggtv.capecraft.ide.CrenDocument
 import dev.ggtv.capecraft.ide.CrenParser
 import dev.ggtv.capecraft.ide.PositionEncoding
 import dev.ggtv.capecraft.ide.SchemaMode
+import dev.ggtv.capecraft.schema.AddonSchemaFinder
+import dev.ggtv.capecraft.schema.ConfigSchema
 import dev.ggtv.capecraft.schema.J
 import java.io.InputStream
 import java.io.OutputStream
+import java.net.URLDecoder
+import java.nio.charset.StandardCharsets
+import java.nio.file.Path
 
 /**
  * Сервер LSP для конфигов CapeCraft: диагностика, подсказки, наведение.
@@ -323,7 +328,50 @@ class LspServer(
         val item = td["textDocument"] as? J.JObj ?: return
         val uri = (item["uri"] as? J.JStr)?.s ?: return
         docs[uri] = (item["text"] as? J.JStr)?.s ?: ""
+        loadAddons(uri)
         publish(uri)
+    }
+
+    /**
+     * Подтянуть дескрипторы аддонов для [uri] и положить их в схему.
+     *
+     * Вызывается при открытии файла, а не один раз в `initialize`: путь к
+     * конфигу известен из uri, а в `initialize` документов ещё нет. После
+     * установки аддона достаточно переоткрыть файл — перезапуск редактора не
+     * нужен.
+     *
+     * Ошибка чтения не должна мешать анализу: аддон — необязательная часть
+     * конфига, и конфиг без аддонов совершенно обычен.
+     */
+    private fun loadAddons(uri: String) {
+        try {
+            val path = pathOf(uri) ?: return
+            val schemas = AddonSchemaFinder.forConfig(path)
+            if (schemas.isNotEmpty() || ConfigSchema.addons().isNotEmpty()) {
+                ConfigSchema.setAddonSchemas(schemas)
+                if (schemas.isNotEmpty()) {
+                    log("аддоны для ${uri.substringAfterLast('/')}: ${schemas.joinToString(", ") { it.id }}")
+                }
+            }
+        } catch (e: Exception) {
+            log("дескрипторы аддонов не прочитаны: $e")
+        }
+    }
+
+    /** Путь файла из uri вида `file:///...`, иначе `null`. */
+    private fun pathOf(uri: String): Path? {
+        if (!uri.startsWith("file://")) return null
+        val raw = uri.removePrefix("file://")
+        val decoded = try {
+            URLDecoder.decode(raw, StandardCharsets.UTF_8)
+        } catch (e: Exception) {
+            raw
+        }
+        return try {
+            Path.of(decoded)
+        } catch (e: Exception) {
+            null
+        }
     }
 
     private fun onDidChange(message: J.JObj) {

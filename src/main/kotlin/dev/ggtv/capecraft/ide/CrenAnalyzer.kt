@@ -3,6 +3,8 @@ package dev.ggtv.capecraft.ide
 import dev.ggtv.capecraft.condition.Condition
 import dev.ggtv.capecraft.condition.VarCondition
 import dev.ggtv.capecraft.condition.VarSource
+import dev.ggtv.capecraft.schema.AddonProviderType
+import dev.ggtv.capecraft.schema.AddonSchema
 import dev.ggtv.capecraft.schema.ConfigSchema
 import dev.ggtv.capecraft.schema.Field
 import dev.ggtv.capecraft.schema.SchemaType
@@ -471,7 +473,10 @@ object CrenAnalyzer {
         if (field.appliesTo.isEmpty() || field.open) return null
         val type = siblings.firstOrNull { it.keyText == "type" }?.let { leafText(it) } ?: return null
         if (type in field.appliesTo) return null
-        if (!Field.isBuiltinProviderType(type)) return null
+        // Тип от аддона, чей дескриптор прочитан: набор его ключей известен, и
+        // ограничение appliesTo у [Field] как раз и говорит «этот ключ не его».
+        // Молчать здесь можно только когда набора действительно нет.
+        if (!Field.isBuiltinProviderType(type) && ConfigSchema.addonForType(type) == null) return null
         return CrenDiagnostic(
             e.keyRange,
             "«${field.name}» не имеет смысла при типе «$type»",
@@ -492,6 +497,9 @@ object CrenAnalyzer {
         if (field.allowed.isEmpty()) return null
         val text = leaf.lexeme.value
         if (text in field.allowed) return null
+        // Тип от аддона, который мы прочитали, — законное значение открытого
+        // поля: показывать HINT на `type = "seed"` было бы враньём, ключ есть.
+        if (field.open && ConfigSchema.addonForType(text) != null) return null
         val tail = if (field.open) " — если это не тип от аддона" else ""
         return CrenDiagnostic(
             leaf.lexeme.range,
@@ -519,7 +527,7 @@ object CrenAnalyzer {
         val anchor = TextRange(c.range.start, c.range.start)
         val out = ArrayList<CrenDiagnostic>()
         for (f in children) {
-            if (!f.required || f.name in present) continue
+            if (!f.requiredForType(type) || f.name in present) continue
             if (!f.offeredFor(type)) continue
             // Условно обязательный ключ (`path` нужен только для `file`) при
             // неизвестном типе молчит: без `type` нельзя сказать, нужен он
@@ -1129,7 +1137,8 @@ object CrenAnalyzer {
         editing: String?,
     ): List<CrenCompletion> {
         val used = usedKeys(c, editing)
-        return VarCondition.COMPLETABLE
+        val builtinNames = VarCondition.COMPLETABLE.toSet()
+        val builtin = builtinNames
             .filter { it !in used }
             .filter { it.startsWith(prefix) }
             .map { name ->
@@ -1142,6 +1151,33 @@ object CrenAnalyzer {
                     replace = typed,
                 )
             }
+        // Аддонные плейсхолдеры приходят из дескрипторов: без них имена, которые аддон
+        // резолвит, пришлось бы угадывать. Неизвестное имя `if` по-прежнему не
+        // считается опечаткой — здесь перечисляем то, что гарантированно
+        // осмысленно, а не отсекаем чужое.
+        //
+        // Имя, которое уже есть во встроенных, повторно не предлагается: аддон
+        // вправе объявить такое же, но в подсказке два одинаковых пункта выглядят
+        // как ошибка, и человек перестаёт доверять списку целиком.
+        val fromAddons = ConfigSchema.addonPlaceholders()
+            .filter { it.name !in used }
+            .filter { it.name !in builtinNames }
+            .filter { it.name.startsWith(prefix) }
+            .map { ph ->
+                CrenCompletion(
+                    label = ph.name,
+                    detail = if (ph.doc.isEmpty()) {
+                        "Плейсхолдер от аддона"
+                    } else {
+                        ph.doc
+                    },
+                    insertText = ph.name,
+                    snippet = snippetForIfVar(),
+                    kind = CompletionKind.WHEN_FIELD,
+                    replace = typed,
+                )
+            }
+        return builtin + fromAddons
     }
 
     /** `|`: значение условия, оператор оставляем на выбор. */
@@ -1301,7 +1337,15 @@ object CrenAnalyzer {
             .firstOrNull { it.name == key }
             ?: return null
         if (field.allowed.isNotEmpty()) {
-            return field.allowed.map {
+            // У `type` закрытый список встроенных, но аддон вправе добавить своё:
+            // без добавления в подсказки попасть нельзя, иначе пользователь
+            // вписывает `seed` руками, не зная, что он вообще бывает.
+            val addonTypes = if (field.open) {
+                ConfigSchema.addons().flatMap { schema -> schema.types.map { schema to it } }
+            } else {
+                emptyList()
+            }
+            val builtin = field.allowed.map {
                 CrenCompletion(
                     label = it,
                     insertText = "\"$it\"",
@@ -1309,6 +1353,16 @@ object CrenAnalyzer {
                     replace = replace,
                 )
             }
+            val fromAddons = addonTypes.map { (schema, type) ->
+                CrenCompletion(
+                    label = type.id,
+                    detail = addonTypeDetail(schema, type),
+                    insertText = "\"${type.id}\"",
+                    kind = CompletionKind.VALUE,
+                    replace = replace,
+                )
+            }
+            return builtin + fromAddons
         }
         // Перечисление есть не у всех полей, но у булева — по сути всегда.
         // Без этого `enabled = |` предлагал соседние ключи блока: полезного
@@ -1328,6 +1382,22 @@ object CrenAnalyzer {
         // бесконечное множество. `null`, а не пустой список: список уводил бы
         // на ключи контейнера, но хотя бы не врал, что значений нет.
         return null
+    }
+
+    /**
+     * Подпись аддонного типа для всплывающей подсказки: что делает и какой
+     * аддон привёз.
+     *
+     * Имя аддона в подсказке обязательно: `type = "seed"` без него ни о чём не
+     * говорит, а с ним сразу видно, к какому jar'у относится тип.
+     */
+    private fun addonTypeDetail(
+        schema: AddonSchema,
+        type: AddonProviderType,
+    ): String {
+        val who = if (schema.version.isEmpty()) schema.id else "${schema.id} ${schema.version}"
+        val what = if (type.doc.isEmpty()) "тип от аддона" else type.doc
+        return "$what — $who"
     }
 
     private fun typeCompletions(): List<CrenCompletion> = KNOWN_TYPE_WORDS.map {
