@@ -288,4 +288,62 @@ class CrenAnalyzerAddonTest {
             "имя предложено дважды: $names",
         )
     }
+
+    /**
+     * Без папки `mods` сервер ничего не видел: `seed` может прийти из аддона,
+     * чей дескриптор не нашёлся, и ругать человека нечем — только подсказка.
+     */
+    @Test
+    fun `без папки mods неизвестный тип остаётся подсказкой`() {
+        // Папки `mods` не видно — сервер не знает ни одного аддона, и `seed`
+        // вполне может прийти из аддона без дескриптора.
+        ConfigSchema.setAddonSchemas(emptyList(), known = false)
+        val seedType = diags(CONFIG_WITH_SEED)
+            .single { it.message.contains("«seed» не подходит") }
+        assertEquals(CrenSeverity.HINT, seedType.severity)
+        assertTrue(seedType.message.contains("если это не тип от аддона"), seedType.message)
+    }
+
+    /**
+     * Папка `mods` найдена — перечень типов исчерпывающий.
+     *
+     * Найдено на живых прогонах: аддон вынесли из папки, сервер отдал новую
+     * диагностику мгновенно, значок в статусной строке показал «2 бага», а на
+     * файле не было ни одной подсветки. Причина — `HINT`: редактор рисует его
+     * бледно и не считает ошибкой. Здесь это обязано быть ошибкой, потому что
+     * мод не соберёт провайдера с таким типом.
+     */
+    @Test
+    fun `найденная папка mods превращает неизвестный тип в ошибку`() {
+        val withoutAddon = AddonSchemaParser.parse(descriptor, "t.jar")!!
+        ConfigSchema.setAddonSchemas(listOf(withoutAddon), known = true)
+        assertEquals(emptyList(), errors(CONFIG_WITH_SEED), "пока аддон на месте, тип законен")
+
+        ConfigSchema.setAddonSchemas(emptyList(), known = true)
+        val seedType = diags(CONFIG_WITH_SEED).single { it.message.contains("«seed» не подходит") }
+        assertEquals(
+            CrenSeverity.ERROR,
+            seedType.severity,
+            "папка mods найдена и пуста — «seed» не от кого взять, это ошибка",
+        )
+        // Две ошибки, и обе настоящие: тип никто не даёт и ключ `gray` не
+        // принадлежит ни одному известному типу. Обе были и до правки — плохо
+        // было то, что про сам тип сообщали подсказкой.
+        assertEquals(
+            setOf(CrenAnalyzer.CODE_VALUE, CrenAnalyzer.CODE_UNKNOWN_KEY),
+            errors(CONFIG_WITH_SEED).map { it.code }.toSet(),
+        )
+        assertTrue(!seedType.message.contains("если это не тип от аддона"), seedType.message)
+    }
+
+    private val CONFIG_WITH_SEED = """
+        capeCraft {
+            providers = [
+                { type = "seed"
+                  self = true
+                  gray = true }
+            ]
+        }
+    """.trimIndent()
+
 }

@@ -500,11 +500,16 @@ object CrenAnalyzer {
         // Тип от аддона, который мы прочитали, — законное значение открытого
         // поля: показывать HINT на `type = "seed"` было бы враньём, ключ есть.
         if (field.open && ConfigSchema.addonForType(text) != null) return null
-        val tail = if (field.open) " — если это не тип от аддона" else ""
+        // Словарь типов исчерпывающий — папка `mods` найдена, и значение не из
+        // неё. Это ошибка, а не подсказка: мод не сможет собрать такого
+        // провайдера, и конфиг не загрузится. Бледная подсказка тут обманывала:
+        // значок в статусной строке считал проблему, а на файле было чисто.
+        val exhaustive = field.open && ConfigSchema.addonVocabularyKnown()
+        val tail = if (field.open && !exhaustive) " — если это не тип от аддона" else ""
         return CrenDiagnostic(
             leaf.lexeme.range,
             "«$text» не подходит. Допустимо: ${field.allowed.joinToString(", ")}$tail",
-            if (field.open) CrenSeverity.HINT else CrenSeverity.WARNING,
+            if (exhaustive) CrenSeverity.ERROR else if (field.open) CrenSeverity.HINT else CrenSeverity.WARNING,
             CODE_VALUE,
             field.allowed.map { CrenFix("заменить на «$it»", it, leaf.lexeme.range) },
         )

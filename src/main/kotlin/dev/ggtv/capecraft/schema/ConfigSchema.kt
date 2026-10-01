@@ -489,17 +489,45 @@ object ConfigSchema {
     @Volatile
     private var addonSchemas: List<AddonSchema> = emptyList()
 
-    /** Заменить список аддонов целиком. */
-    fun setAddonSchemas(schemas: List<AddonSchema>) {
+    /**
+     * Словарь типов провайдеров известен полностью?
+     *
+     * Отличать «папка `mods` нашлась и в ней ни одного аддона» от «папки `mods`
+     * нет, сервер ничего не видел» приходится по-разному. В первом случае
+     * перечень типов исчерпывающий: `url`, `json`, `file` плюс всё, что
+     * принесли аддоны, — и значение не из этого списка конфиг сломает. Во
+     * втором случае тот же `seed` может прийти из аддона, чьего дескриптора
+     * сервер не видел, и ругать человека нечем.
+     *
+     * Без этой разницы аддон, который человек вынул из папки, давал одну
+     * бледную подсказку вместо ошибки: значок в статусной строке считал
+     * проблему, а на самом файле было видно ничего.
+     */
+    @Volatile
+    private var addonVocabularyKnown = false
+
+    /**
+     * Заменить список аддонов целиком.
+     *
+     * [known] — найдена ли папка `mods`. Список и флаг кладутся вместе: по
+     * одному флагу проверять нечего, а список без флага не отвечает на
+     * вопрос «мы всё видели?».
+     */
+    fun setAddonSchemas(schemas: List<AddonSchema>, known: Boolean = addonVocabularyKnown) {
         addonSchemas = schemas.toList()
+        addonVocabularyKnown = known
     }
 
     /** Что сейчас известно про аддонов. */
     fun addons(): List<AddonSchema> = addonSchemas
 
+    /** Исчерпывающий ли сейчас список типов провайдеров. */
+    fun addonVocabularyKnown(): Boolean = addonVocabularyKnown
+
     /** Забыть всех аддонов — для тестов и для смены папки `mods`. */
     fun clearAddonSchemas() {
         addonSchemas = emptyList()
+        addonVocabularyKnown = false
     }
 
     /** Аддон по `type` провайдера, или `null`, если тип не аддонный. */

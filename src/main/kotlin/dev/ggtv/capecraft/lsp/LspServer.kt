@@ -65,6 +65,10 @@ class LspServer(
     @Volatile
     private var appliedAddons: List<AddonSchema> = emptyList()
 
+    /** Найдена ли папка `mods` для последнего применённого списка. */
+    @Volatile
+    private var appliedVocabularyKnown = false
+
     /**
      * Блок `capeCraft` в начале строки — признак конфига CapeCraft.
      *
@@ -384,9 +388,10 @@ class LspServer(
             val schemas = AddonSchemaFinder.forConfig(path)
             // Список отдаётся тем же экземпляром, пока подпись не изменилась,
             // поэтому сравнение по ссылке — точная проверка «ничего не было».
-            if (schemas === appliedAddons) return false
+            if (schemas === appliedAddons && appliedVocabularyKnown == (mods != null)) return false
             appliedAddons = schemas
-            ConfigSchema.setAddonSchemas(schemas)
+            appliedVocabularyKnown = mods != null
+            ConfigSchema.setAddonSchemas(schemas, known = mods != null)
             if (schemas.isNotEmpty()) {
                 log("аддоны для ${uri.substringAfterLast('/')}: ${schemas.joinToString(", ") { it.id }}")
             }
@@ -785,7 +790,7 @@ class LspServer(
          * своя линия релизов (`lsp_version` в gradle.properties, теги `lsp-v*`),
          * и поднятие версии мода не должно выглядеть как обновление редактора.
          */
-        const val version = "1.1.1"
+        const val version = "1.1.2"
     }
 }
 

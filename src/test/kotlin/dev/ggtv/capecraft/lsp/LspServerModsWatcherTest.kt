@@ -144,6 +144,36 @@ class LspServerModsWatcherTest {
 
     private fun J.JObj.str(key: String): String? = (at(key) as? J.JStr)?.s
 
+    /** Диагностики по нашему uri, как их видит клиент: `severity` и текст. */
+    private fun rawDiagnostics(timeoutMs: Long = 10_000): List<Pair<Long, String>> {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
+        while (System.nanoTime() < deadline) {
+            val msg = inbox.poll(200, TimeUnit.MILLISECONDS) ?: continue
+            val params = msg.at("params") as? J.JObj ?: continue
+            if (msg.str("method") != "textDocument/publishDiagnostics" || params.str("uri") != uri) continue
+            val items = (params.at("diagnostics") as? J.JArr)?.items ?: return emptyList()
+            return items.mapNotNull { item ->
+                val d = item as? J.JObj ?: return@mapNotNull null
+                val severity = ((d.at("severity") as? J.JNum)?.i ?: -1).toLong()
+                severity to ((d.at("message") as? J.JStr)?.s ?: "")
+            }
+        }
+        error("диагностики не пришли за $timeoutMs мс; в логе сервера:\n$log")
+    }
+
+    /** Что сервер предложит подсказать в позиции курсора. */
+    private fun completionLabels(): List<String> {
+        send("""{"jsonrpc":"2.0","id":77,"method":"textDocument/completion","params":{"textDocument":{"uri":"$uri"},"position":{"line":2,"character":18}}}""")
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(10_000)
+        while (System.nanoTime() < deadline) {
+            val msg = inbox.poll(200, TimeUnit.MILLISECONDS) ?: continue
+            if ((msg.at("id") as? J.JNum)?.i?.toInt() != 77) continue
+            val items = (msg.at("result") as? J.JArr)?.items ?: return emptyList()
+            return items.mapNotNull { (it as? J.JObj)?.at("label") as? J.JStr }.map { it.s }
+        }
+        error("completion не пришёл; в логе сервера:\n$log")
+    }
+
     /** Диагностики по нашему uri, как их видит клиент. */
     private fun diagnostics(timeoutMs: Long = 10_000): List<String> {
         val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
@@ -158,6 +188,36 @@ class LspServerModsWatcherTest {
     }
 
     private fun publishedMethods(): List<String> = inbox.mapNotNull { it.str("method") }
+
+    @Test
+    fun `после удаления аддона это ошибка а не подсказка`() {
+        // Найдено на живом прогоре: сервер отдал диагностику мгновенно, значок
+        // в статусной строке показал два бага, а на файле не было ничего.
+        // Причина — severity 3 (HINT): редактор считает такую проблему, но
+        // рисует бледно, и выглядит это как «сервер не заметил».
+        addonJar("seed.jar", id = "seed", type = "seed")
+        startServer()
+        assertEquals(emptyList(), diagnostics())
+        assertTrue(
+            completionLabels().contains("seed"),
+            "пока аддон на месте, его тип обязан быть в подсказках",
+        )
+        inbox.clear()
+
+        Files.createDirectories(root.resolve("archive"))
+        Files.move(root.resolve("mods/seed.jar"), root.resolve("archive/seed.jar"))
+
+        val published = rawDiagnostics()
+        assertTrue(
+            published.any { it.first == 1L && it.second.contains("«seed»") },
+            "удалённый аддон — ошибка (severity 1), а не подсказка.\nПришло: $published\nВ логе:\n$log",
+        )
+        inbox.clear()
+        assertTrue(
+            !completionLabels().contains("seed"),
+            "тип удалённого аддона не должен больше предлагаться",
+        )
+    }
 
     @Test
     fun `убранный аддон исчезает из диагностик без переоткрытия файла`() {
