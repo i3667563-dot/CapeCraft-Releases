@@ -76,12 +76,45 @@ data class AddonSchema(
     val types: List<AddonProviderType>,
     /** Имена плейсхолдеров, которые аддон резолвит в `{...}` и `if`. */
     val placeholders: List<AddonPlaceholder>,
+    /** Корни `when`, которые аддон регистрирует в рантайме. */
+    val conditions: List<AddonWhenRoot> = emptyList(),
     /** Откуда прочитали: путь к jar'у — попадает в сообщение об ошибке. */
     val origin: String,
 ) {
     /** Тип провайдера по имени, или `null`, если аддон такого не объявил. */
     fun type(id: String): AddonProviderType? = types.firstOrNull { it.id == id }
+
+    /** Корень `when` по имени сегмента, или `null`. */
+    fun condition(id: String): AddonWhenRoot? = conditions.firstOrNull { it.id == id }
 }
+
+/**
+ * Корень `when`, объявленный аддоном: `fire.burning`.
+ *
+ * Описание, а не значение: в моде здесь [dev.ggtv.capecraft.api.condition.CapeWhenRoot]
+ * с живым читателем, а в редакторе — только эта карточка из дескриптора.
+ */
+data class AddonWhenRoot(
+    val id: String,
+    val doc: String,
+    /** Поле, которое подставляется, если в конфиге написали корень без точки. */
+    val defaultField: String?,
+    val fields: List<AddonWhenField>,
+)
+
+/**
+ * Поле аддонного корня `when`.
+ *
+ * [values] и [numeric] повторяют [dev.ggtv.capecraft.api.condition.CapeWhenField]
+ * один в один, а не «тип» вида `bool`: список значений пишет сам аддон, и
+ * придумывать его тут — значит выдумывать значения, которых рантайм не отдаст.
+ */
+data class AddonWhenField(
+    val name: String,
+    val doc: String,
+    val values: List<String>,
+    val numeric: Boolean,
+)
 
 /** Один тип провайдера от аддона: `type = "..."` в конфиге. */
 data class AddonProviderType(
@@ -195,10 +228,63 @@ object AddonSchemaParser {
             AddonPlaceholder(name, phType, pd.str("doc").orEmpty())
         }
 
+        val conditions = cfg.getArrayOrNull("$ROOT.conditions").orEmpty().mapNotNull { v ->
+            val dict = v as? Value.VDict
+            if (dict == null) {
+                warnings += "запись в `conditions` — не словарь `{}`"
+                return@mapNotNull null
+            }
+            val rootId = dict.str("id")
+            if (rootId.isNullOrBlank()) {
+                warnings += "корень `when` без `id`"
+                return@mapNotNull null
+            }
+            // Точка в имени означала бы второй сегмент, а разбор ключа делит
+            // строку по первой точке: корень `fire.temp` и поле `burning`
+            // разъехались бы на `fire.temp` + пустое поле, и условие не
+            // совпало бы никогда — молча и навсегда.
+            if (rootId.contains('.')) {
+                warnings += "корень `when` «$rootId»: в имени не может быть точки"
+                return@mapNotNull null
+            }
+            val fields = dict.array("fields").mapNotNull { fv ->
+                val fd = fv as? Value.VDict
+                if (fd == null) {
+                    warnings += "поле корня `when` «$rootId» — не словарь `{}`"
+                    return@mapNotNull null
+                }
+                val fname = fd.str("name")
+                if (fname.isNullOrBlank()) {
+                    warnings += "поле корня `when` «$rootId» без `name`"
+                    return@mapNotNull null
+                }
+                if (fname.contains('.')) {
+                    warnings += "поле «$fname» корня `when` «$rootId»: в имени не может быть точки"
+                    return@mapNotNull null
+                }
+                AddonWhenField(
+                    name = fname,
+                    doc = fd.str("doc").orEmpty(),
+                    values = fd.array("values").mapNotNull { (it as? Value.VStr)?.s },
+                    numeric = fd.bool("numeric"),
+                )
+            }
+            if (fields.isEmpty()) {
+                warnings += "у корня `when` «$rootId» нет ни одного поля"
+                return@mapNotNull null
+            }
+            val def = dict.str("defaultField")
+            if (def != null && fields.none { it.name == def }) {
+                warnings += "у корня `when` «$rootId» поле по умолчанию «$def» не объявлено"
+                return@mapNotNull null
+            }
+            AddonWhenRoot(rootId, dict.str("doc").orEmpty(), def, fields)
+        }
+
         if (warnings.isNotEmpty()) {
             warn(origin, warnings.take(MAX_WARNINGS))
         }
-        return AddonSchema(id, version, apiVersion, types, placeholders, origin)
+        return AddonSchema(id, version, apiVersion, types, placeholders, conditions, origin)
     }
 
     /**
@@ -247,4 +333,7 @@ private fun parseType(word: String): SchemaType? {
     private fun Value.VDict.array(key: String): List<Value> =
         pairs.firstOrNull { it.first == key }?.let { (it.second as? Value.VArray)?.items }
             .orEmpty()
+
+    private fun Value.VDict.bool(key: String): Boolean =
+        pairs.firstOrNull { it.first == key }?.let { (it.second as? Value.VBool)?.b } ?: false
 }

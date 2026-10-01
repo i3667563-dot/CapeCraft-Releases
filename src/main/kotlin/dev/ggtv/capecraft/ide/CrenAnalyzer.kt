@@ -8,6 +8,8 @@ import dev.ggtv.capecraft.schema.AddonSchema
 import dev.ggtv.capecraft.schema.ConfigSchema
 import dev.ggtv.capecraft.schema.Field
 import dev.ggtv.capecraft.schema.SchemaType
+import dev.ggtv.capecraft.schema.AddonWhenRootView
+import dev.ggtv.capecraft.schema.WhenRootView
 import dev.ggtv.capecraft.schema.WhenSchema
 import dev.ggtv.koren.WorldRoot
 import dev.ggtv.kjen.Span
@@ -595,9 +597,9 @@ object CrenAnalyzer {
             val rootName = if (dot < 0) key else key.substring(0, dot)
             val fieldName = if (dot < 0) null else key.substring(dot + 1)
 
-            val root = WorldRoot.bySegment(rootName)
+            val root = WhenSchema.rootView(rootName)
             if (root == null) {
-                val roots = WhenSchema.roots().map { it.segment }
+                val roots = WhenSchema.rootViews().map { it.segment }
                 out += CrenDiagnostic(
                     child.keyRange,
                     "неизвестный корень условия «$key». Доступны: ${roots.joinToString(", ")}",
@@ -613,7 +615,7 @@ object CrenAnalyzer {
                 continue
             }
 
-            val fields = WhenSchema.fieldsOf(root)
+            val fields = root.fields
             if (fieldName !in fields) {
                 out += CrenDiagnostic(
                     child.keyRange,
@@ -644,14 +646,14 @@ object CrenAnalyzer {
      * свёртки, а не написанное.
      */
     private fun checkWhenValue(
-        root: WorldRoot,
+        root: WhenRootView,
         fieldName: String,
         child: CrenEntry,
     ): CrenDiagnostic? {
         val leaf = child.value as? CrenLeaf ?: return null
         val raw = leaf.lexeme.value.trim()
 
-        if (WhenSchema.isNumeric(root, fieldName)) {
+        if (root.isNumeric(fieldName)) {
             // Число, записанное строкой, — норма (`">20"`), поэтому смотрим на
             // содержимое после оператора, а не на сам литерал.
             val operand = raw.removePrefix(">=").removePrefix("<=")
@@ -668,7 +670,7 @@ object CrenAnalyzer {
             return null
         }
 
-        val allowed = WhenSchema.valuesOf(root, fieldName)
+        val allowed = root.valuesOf(fieldName)
         if (allowed.isEmpty()) return null
 
         // Оператор сравнения на строковом поле не может сработать никогда.
@@ -708,7 +710,7 @@ object CrenAnalyzer {
         for (child in value.entries) {
             val key = child.keyText
             val segment = key.substringBefore('.')
-            if (WorldRoot.bySegment(segment) != null) {
+            if (WhenSchema.rootView(segment) != null) {
                 out += CrenDiagnostic(
                     child.keyRange,
                     "«$segment» — корень мира, а не переменная. Так проверяется " +
@@ -745,10 +747,10 @@ object CrenAnalyzer {
      * того, как посмотрит на синонимы), поэтому редактор и рантайм должны
      * отвергать одно и то же — иначе подсветка обещает то, чего не будет.
      */
-    private fun checkWhenShortForm(child: CrenEntry, root: WorldRoot): CrenDiagnostic? {
+    private fun checkWhenShortForm(child: CrenEntry, root: WhenRootView): CrenDiagnostic? {
         val leaf = child.value as? CrenLeaf ?: return null
-        if (WhenSchema.defaultFieldOf(root) == null) {
-            val fields = WhenSchema.fieldsOf(root)
+        if (root.defaultField == null) {
+            val fields = root.fields
             return CrenDiagnostic(
                 child.keyRange,
                 "у «${root.segment}» нет поля по умолчанию — нужно указать поле: " +
@@ -762,7 +764,7 @@ object CrenAnalyzer {
             )
         }
         val text = leaf.lexeme.value
-        val aliases = WhenSchema.aliasesOf(root)
+        val aliases = root.aliases
         if (aliases.isEmpty() || text in aliases) return null
         val range = leaf.range
         return CrenDiagnostic(
@@ -878,12 +880,12 @@ object CrenAnalyzer {
 
         val dot = key.indexOf('.')
         if (dot > 0) {
-            val root = WorldRoot.bySegment(key.substring(0, dot))
+            val root = WhenSchema.rootView(key.substring(0, dot))
             if (root != null) {
                 val fieldName = key.substring(dot + 1)
-                val text = WhenSchema.docFor(root, fieldName)
+                val text = root.docFor(fieldName)
                 if (text != null) return CrenHover(e.keyRange, "**${root.segment}.$fieldName**\n\n$text")
-                val fields = WhenSchema.fieldsOf(root)
+                val fields = root.fields
                 return CrenHover(
                     e.keyRange,
                     "**${root.segment}.$fieldName**\n\nТакого поля нет. Доступны: ${fields.joinToString(", ")}",
@@ -891,7 +893,7 @@ object CrenAnalyzer {
             }
         }
         if (dot < 0) {
-            val root = WorldRoot.bySegment(key)
+            val root = WhenSchema.rootView(key)
             if (root != null) {
                 return CrenHover(e.keyRange, rootDoc(root))
             }
@@ -912,13 +914,18 @@ object CrenAnalyzer {
     }
 
     /** Человеческое описание корня условия. */
-    fun rootDoc(root: WorldRoot): String {
-        val fields = WhenSchema.fieldsOf(root)
+    fun rootDoc(root: WhenRootView): String {
+        val fields = root.fields
         val sb = StringBuilder("Корень условия `${root.segment}`.")
+        if (root.doc.isNotEmpty()) sb.append(' ').append(root.doc)
         if (fields.isNotEmpty()) sb.append("\n\nПоля: ").append(fields.joinToString(", ") { "`$it`" })
-        WhenSchema.ALIASES[root]?.takeIf { it.isNotEmpty() }?.let { aliases ->
-            sb.append("\n\nКороткая запись: ")
-                .append(aliases.entries.joinToString(", ") { (k, v) -> "`$k` → `$v`" })
+        root.aliases.takeIf { it.isNotEmpty() }?.let { aliases ->
+            sb.append("\n\nКороткая запись: ").append(aliases.joinToString(", ") { "`$it`" })
+        }
+        if (root is AddonWhenRootView) {
+            sb.append("\n\nАддон ").append(root.addon).append(". Состояние сущности читает ")
+            sb.append("только её владелец, поэтому условие не уезжает по сети и не ")
+            sb.append("показывается другим игрокам.")
         }
         return sb.toString()
     }
@@ -1229,11 +1236,11 @@ object CrenAnalyzer {
     ): List<CrenCompletion> {
         val dot = prefix.indexOf('.')
         if (dot >= 0) {
-            val root = WorldRoot.bySegment(prefix.substring(0, dot))
+            val root = WhenSchema.rootView(prefix.substring(0, dot))
                 ?: return whenRootCompletions(c, prefix, typed, editing)
             val tail = prefix.substring(dot + 1)
             val used = usedKeys(c, editing)
-            return WhenSchema.fieldsOf(root)
+            return root.fields
                 .filter { it.startsWith(tail) }
                 .filter { "${root.segment}.$it" !in used }
                 .map { field ->
@@ -1245,7 +1252,7 @@ object CrenAnalyzer {
                     val key = "${root.segment}.$field"
                     CrenCompletion(
                         label = key,
-                        detail = WhenSchema.docFor(root, field),
+                        detail = root.docFor(field),
                         insertText = key,
                         snippet = conditionValueSnippet(root, field),
                         kind = CompletionKind.WHEN_FIELD,
@@ -1274,7 +1281,7 @@ object CrenAnalyzer {
     ): List<CrenCompletion> {
         val used = usedKeys(c, editing)
         val out = ArrayList<CrenCompletion>()
-        for (root in WhenSchema.roots()) {
+        for (root in WhenSchema.rootViews()) {
             if (root.segment in used || !root.segment.startsWith(prefix)) continue
             out += CrenCompletion(
                 label = root.segment,
@@ -1283,7 +1290,7 @@ object CrenAnalyzer {
                 snippet = when {
                     // У координат нет поля по умолчанию, писать после корня
                     // нечего — оставляем только ключ.
-                    WhenSchema.defaultFieldOf(root) != null -> " {\n\t$0\n}"
+                    root.defaultField != null -> " {\n\t$0\n}"
                     else -> null
                 },
                 kind = CompletionKind.WHEN_ROOT,
@@ -1293,13 +1300,13 @@ object CrenAnalyzer {
         }
         // Поля нужны и без точки: `time` — это `period`, а про `location.y`
         // из одного только `location` не догадаться.
-        for (root in WhenSchema.roots()) {
-            for (field in WhenSchema.fieldsOf(root)) {
+        for (root in WhenSchema.rootViews()) {
+            for (field in root.fields) {
                 val key = "${root.segment}.$field"
                 if (key in used || !key.startsWith(prefix)) continue
                 out += CrenCompletion(
                     label = key,
-                    detail = WhenSchema.docFor(root, field)?.substringBefore('.'),
+                    detail = root.docFor(field)?.substringBefore('.'),
                     insertText = key,
                     snippet = conditionValueSnippet(root, field),
                     kind = CompletionKind.WHEN_FIELD,
@@ -1312,18 +1319,18 @@ object CrenAnalyzer {
     }
 
     /** Чем закончить запись условия, чтобы она сразу была осмысленной. */
-    private fun conditionValueSnippet(root: WorldRoot, field: String): String {
-        val values = WhenSchema.valuesOf(root, field)
+    private fun conditionValueSnippet(root: WhenRootView, field: String): String {
+        val values = root.valuesOf(field)
         if (values.isNotEmpty()) return ": \"${values.first()}\""
-        return if (WhenSchema.isNumeric(root, field)) ": 0" else ": \"\""
+        return if (root.isNumeric(field)) ": 0" else ": \"\""
     }
 
-    private fun rootDetail(root: WorldRoot): String {
-        val fields = WhenSchema.fieldsOf(root)
+    private fun rootDetail(root: WhenRootView): String {
+        val fields = root.fields
         val sb = StringBuilder("условие ${root.segment}: ")
         sb.append(fields.joinToString(", "))
         // Поле по умолчанию — самая частая запись, её стоит назвать прямо.
-        WhenSchema.defaultFieldOf(root)?.let { sb.append("; без точки — это поле ").append(it) }
+        root.defaultField?.let { sb.append("; без точки — это поле ").append(it) }
         return sb.toString()
     }
 
@@ -1463,16 +1470,16 @@ object CrenAnalyzer {
     private fun whenValueCompletions(key: String, replace: TextRange? = null): List<CrenCompletion> {
         val dot = key.indexOf('.')
         val rootName = if (dot < 0) key else key.substring(0, dot)
-        val root = WorldRoot.bySegment(rootName) ?: return emptyList()
-        val field = if (dot < 0) WhenSchema.defaultFieldOf(root) else key.substring(dot + 1)
-        val numeric = field != null && WhenSchema.isNumeric(root, field)
+        val root = WhenSchema.rootView(rootName) ?: return emptyList()
+        val field = if (dot < 0) root.defaultField else key.substring(dot + 1)
+        val numeric = field != null && root.isNumeric(field)
         val out = ArrayList<CrenCompletion>()
 
         if (field != null) {
-            for (v in WhenSchema.valuesOf(root, field)) {
+            for (v in root.valuesOf(field)) {
                 out += CrenCompletion(
                     label = v,
-                    detail = WhenSchema.docFor(root, field)?.substringBefore('.'),
+                    detail = root.docFor(field)?.substringBefore('.'),
                     insertText = "\"$v\"",
                     kind = CompletionKind.VALUE,
                     sortText = "0$v",
@@ -1484,8 +1491,8 @@ object CrenAnalyzer {
         // разворачивается в `condition = clear`, а `weather.condition: "fair"`
         // не развернётся никогда.
         if (dot < 0) {
-            for (a in WhenSchema.aliasesOf(root)) {
-                if (a in WhenSchema.valuesOf(root, field ?: "")) continue
+            for (a in root.aliases) {
+                if (a in root.valuesOf(field ?: "")) continue
                 out += CrenCompletion(
                     label = a,
                     detail = "короткая запись",

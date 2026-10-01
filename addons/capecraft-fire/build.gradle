@@ -1,0 +1,129 @@
+buildscript {
+	repositories {
+		maven {
+			name = 'Fabric'
+			url = 'https://maven.fabricmc.net/'
+		}
+		mavenCentral()
+		gradlePluginPortal()
+	}
+	dependencies {
+		classpath "net.fabricmc:fabric-loom:1.17.20"
+	}
+}
+
+plugins {
+	id 'org.jetbrains.kotlin.jvm' version '2.4.20'
+}
+
+// Аддон собирается отдельным проектом, а не модулем основного, по двум
+// причинам.
+//
+// Первая — граница версий. Аддон читает состояние сущности своими,
+// версионными классами, и для 26.2 это `Entity.isOnFire`, а для yarn-версий
+// то же самое называется иначе. Основной проект держит все шесть версий в
+// одном исходнике и переключает их флагом `-Pmc`, и подключить аддон к нему
+// значило бы либо тащить в аддон все шесть копий читателя, либо протащить в
+// основной проект зависимость от аддона — то есть вернуть в мод то, что
+// вынесено наружу.
+//
+// Вторая — граница релиза. Мод версионируется как `capecraft 1.3.0`, аддон
+// отдельно: новое состояние сущности должно выходить аддоном, не заставляя
+// ждать следующего релиза мода.
+
+// Версия Minecraft жёстко зашита: аддон написан под один набор имён классов
+// и переиспользуется по мере появления версий мода. Ничего не проверяется на
+// этапе сборки — `fabric.mod.json` объявляет `>=1.3.0`, а несовместимость
+// покажет загрузчик.
+def minecraftVersion = '26.2'
+def loaderVersion = '0.19.5'
+def flkVersion = '1.14.1+kotlin.2.4.20'
+
+version = '1.0.0'
+group = 'dev.ggtv'
+base {
+	archivesName = 'capecraft-fire'
+}
+
+// 26.2 — необфусцированная, remap не нужен.
+apply plugin: 'net.fabricmc.fabric-loom'
+
+layout.buildDirectory = layout.projectDirectory.dir('build')
+
+repositories {
+	mavenCentral()
+}
+
+dependencies {
+	minecraft "com.mojang:minecraft:${minecraftVersion}"
+	implementation "net.fabricmc:fabric-loader:${loaderVersion}"
+	implementation "net.fabricmc:fabric-language-kotlin:${flkVersion}"
+	// Мод-компиляция: аддон собирается ровно против того jar'а, что и
+	// положит игрок, иначе одна и та же версия API компилировалась бы против
+	// одной строки, а работала бы против другой. Точный файл задаётся
+	// свойством `capecraft_jar`: версия мода меняется, а зашивать её сюда —
+	// значит забыть обновить при следующем релизе.
+	//
+	// Тип зависимости — `implementation`, а не `modImplementation`: remap
+	// нужен только yarn-версиям, а 26.2 необфусцирована (см. apply plugin выше).
+	implementation files(
+		providers.gradleProperty('capecraft_jar').getOrElse(
+			"../../build/26.2/libs/capecraft-1.3.0.jar",
+		),
+	)
+
+	// Тесты аддона сверяют jar мода и jar аддона между собой: разойтись могут
+	// молча (дескриптор описывает одно, рантайм регистрирует другое), и
+	// редактор будет показывать подсказку для поля, которого в игре нет.
+	testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+	testImplementation "org.jetbrains.kotlin:kotlin-test-junit5:2.4.20"
+	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+test {
+	useJUnitPlatform()
+	testLogging {
+		events "failed", "skipped"
+		exceptionFormat "full"
+	}
+}
+
+// Дескриптор лежит в ресурсах и правками не попадает в classpath теста на
+// глаз Gradle: без явного входа задача считается up-to-date после пересборки
+// ресурсов и сверяет устаревший снимок.
+tasks.named('test') {
+	// Jar проверяет сам себя (`PackagedJarTest`), поэтому тест обязан видеть
+	// свежую сборку: без dependsOn он молча смотрел бы на прошлую.
+	dependsOn tasks.named('jar')
+	inputs.files(fileTree('src/main/resources')).withPropertyName('descriptorUnderTest')
+	inputs.dir(layout.buildDirectory.dir('libs')).withPropertyName('packagedUnderTest')
+}
+
+// Байт-код — 21, как у мода. Без этого аддон собирается тем JDK, под которым
+// запущен Gradle: на JDK 26 получается class file 70, и игра на Java 25 падает
+// на загрузке точки входа с `UnsupportedClassVersionError`. Мод здесь ничего не
+// делает — просто JVM отказывается читать класс. Проверяется тестом
+// `PackagedJarTest`, который смотрит версию класса в готовом jar'е.
+tasks.withType(JavaCompile).configureEach {
+	it.options.encoding = 'UTF-8'
+	it.options.release = 21
+}
+
+tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+	kotlinOptions {
+		jvmTarget = '21'
+	}
+}
+
+processResources {
+	inputs.property 'version', project.version
+	filesMatching('fabric.mod.json') {
+		expand 'version': project.version
+	}
+}
+
+jar {
+	from('LICENSE') {
+		rename { "${it}_${project.archivesBaseName}" }
+	}
+}

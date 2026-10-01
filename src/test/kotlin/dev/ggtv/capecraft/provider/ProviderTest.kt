@@ -2,6 +2,7 @@ package dev.ggtv.capecraft.provider
 
 import dev.ggtv.capecraft.condition.Expected
 import dev.ggtv.capecraft.condition.Op
+import dev.ggtv.capecraft.condition.Predicate
 import dev.ggtv.capecraft.schema.Placeholders
 import dev.ggtv.koren.KorenConfig
 import dev.ggtv.koren.WorldRoot
@@ -262,13 +263,13 @@ class ProviderLoaderTest {
 
         val hero = providers.first { it.name == "hero" }
         val heroCond = hero.condition!!.predicates.single()
-        assertEquals(WorldRoot.DIMENSION, heroCond.root)
+        assertEquals(WorldRoot.DIMENSION, (heroCond as Predicate).root)
         assertEquals("type", heroCond.field)
         assertEquals(Expected.Str("nether"), heroCond.expected)
 
         val warden = providers.first { it.name == "warden" }
         val wardenCond = warden.condition!!.predicates.single()
-        assertEquals(WorldRoot.LOCATION, wardenCond.root)
+        assertEquals(WorldRoot.LOCATION, (wardenCond as Predicate).root)
         assertEquals("y", wardenCond.field)
         // Отрицательный порог в глубине: «<= -20» — это Le(-20.0), а не строка.
         assertEquals(Op.Le, wardenCond.op)

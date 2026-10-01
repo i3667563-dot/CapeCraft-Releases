@@ -75,7 +75,12 @@ versions/<mc>/gradle.properties           # minecraft_version, loader/fabric/yar
   использовать legacy `fabric-loom`, иначе "Configuration with name 'mappings' not found".
 - Общая конфигурация loom в build.gradle, версии вытягиваются из `versions/<mc>/gradle.properties`
   через `verProps`, toolchain и `options.release` тоже из версии (21 / 26).
-- Kotlin jvmTarget = 21 всегда.
+- Kotlin jvmTarget = 21 всегда. **Отдельный проект аддона обязан повторять это
+  явно:** без `jvmTarget`/`options.release` Kotlin берёт версию от JDK, под которым
+  запущен Gradle, и на JDK 26 аддон собирается под class file 70. Игра на Java 25
+  падает тогда `UnsupportedClassVersionError`, когда загрузчик читает класс
+  точки входа, — то есть мод даже не успел зарегистрировать аддон. Проверяется
+  `PackagedJarTest` в `addons/capecraft-fire` (читает major из class file в jar'е).
 
 ## Версии компонентов
 
@@ -801,6 +806,36 @@ version-free, и это ломало попытку собрать LSP отде�
   блока, то есть предлагал вставить ключ туда, где человек пишет значение.
   Проверено `CrenAnalyzerTest`: `enabled = |` → `true`/`false`, `type = |` →
   `url`/`json`/`file`, а на пустой строке после запятой — снова ключи.
+
+## Аддонские корни `when` (`api.whenConditions`, `schema.conditions`)
+
+Корень `when` у аддона — общий интерес, а не фича мода: состояний сущности
+столько же, сколько у Minecraft, и перечисление в моде успевало устареть.
+
+- **Формы две и они независимы.** В рантайме аддон регистрирует значение
+  (`CapeWhenRoot` + reader), редактор читает описание из секции `conditions`
+  дескриптора. Ни одна не проверяет другую, поэтому в аддоне обязан быть тест
+  сверки обеих форм (`addons/capecraft-fire/src/test/.../FireCapeAddonTest`).
+  Расхождение выглядит исправно с обеих сторон: в редакторе поле есть, в игре
+  конфиг падает.
+- **`CapeWhenRoots` в core, но без MC API.** Класс лежит в общем source set и
+  держит реестр; `EntityWorldContext`/`MinecraftWorldContext` во всех шести
+  версиях отдают `subjectEntity()` и `addonField()`. Core и LSP не тянут
+  `CapeApiHolder` — это MC-объект, в редакторе его нет.
+- **Локальность решает контекст, не читатель.** `EntityWorldContext.addonField`
+  отвечает только для `entity === player`; у чужого игрока и на сервере —
+  `CrenError.NotFound`, условие просто не совпадает. Поэтому в `WireCondition`
+  аддонный предикат режет `return null`, а провайдер помечается self-only.
+- **Точка в имени корня или поля — ошибка регистрации.** Разбор ключа делит
+  строку по первой точке: `fire.temp` разъехался бы на корень `fire.temp` и
+  пустое поле, и условие не совпало бы никогда, молча.
+- **Дескриптор аддона пишется по правилам Koren:** записи блока `addon { }` —
+  переводом строки, пары внутри `{ }` — запятой (см. выше, раздел про
+  запятые). Ошибка в этом месте выглядит как «дескриптор не разобран» целиком.
+- **Ядро не содержит специальных корней.** `fire`, `hand`, `food`, `xp`,
+  `effect*` живут либо в `WorldRoot` как встроенные (инвентарь/эффекты), либо в
+  аддоне. Возврат `fire` в `WorldRoot` означает, что список снова придётся
+  обновлять в моде.
 
 ## LSP для редактора (`capecraft/lsp`)
 

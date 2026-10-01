@@ -6,6 +6,8 @@ import dev.ggtv.capecraft.api.CapeDecoderSpec
 import dev.ggtv.capecraft.api.CapePlaceholderSpec
 import dev.ggtv.capecraft.api.CapeSourceType
 import dev.ggtv.capecraft.api.config.CapeAddonConfig
+import dev.ggtv.capecraft.api.condition.CapeWhenField
+import dev.ggtv.capecraft.api.condition.CapeWhenRoot
 import dev.ggtv.capecraft.api.event.CapeEvent
 import dev.ggtv.capecraft.api.image.CapeDecoder
 import dev.ggtv.capecraft.api.placeholder.CapePlaceholder
@@ -16,6 +18,7 @@ import dev.ggtv.capecraft.api.render.CapeRenderModifier
 import dev.ggtv.capecraft.image.AnimatedImage
 import dev.ggtv.capecraft.image.Frame
 import dev.ggtv.capecraft.image.ImageDecodeException
+import dev.ggtv.kjen.CrenError
 import dev.ggtv.kjen.Value
 import dev.ggtv.koren.WorldRoot
 import net.minecraft.resources.Identifier
@@ -38,6 +41,7 @@ import net.minecraft.resources.Identifier
  *  - плейсхолдер `{player-color}`;
  *  - схему конфига `capeCraft.addons.example-addon { ... }`;
  *  - модификатор рендера (подмена текстуры в дождь, условие KoreN);
+ *  - корень `when` от аддона (свой, не встроенный koren'овский);
  *  - слушатель события загрузки плаща.
  */
 class ExampleCapeAddon : CapeAddon {
@@ -47,6 +51,7 @@ class ExampleCapeAddon : CapeAddon {
         registerDecoder(api)
         registerPlaceholder(api)
         registerConfig(api)
+        registerWhenCondition(api)
         registerRenderModifier(api)
         subscribeToEvents(api)
     }
@@ -104,6 +109,39 @@ class ExampleCapeAddon : CapeAddon {
             ),
         ))
     }
+
+    /**
+     * Корень `when`, объявленный аддоном: `example.counter > 3`.
+     *
+     * Настоящий аддон так же читает состояние сущности: [subject] — тот самый
+     * `Entity`/`PlayerEntity`, которого отдаёт контекст, а тип здесь не
+     * Minecraft-овский, потому что общий код и LSP о Minecraft не знают.
+     */
+    private fun registerWhenCondition(api: CapeApi) {
+        api.whenConditions.register(
+            CapeWhenRoot(
+                root = "example",
+                doc = "Демонстрационный корень when.",
+                defaultField = "counter",
+                fields = listOf(
+                    CapeWhenField("counter", "Счётчик из состояния.", numeric = true),
+                    CapeWhenField("tag", "Метка из состояния."),
+                ),
+                reader = { subject, field ->
+                    val state = subject as? ExampleState
+                        ?: throw CrenError.NotFound("when")
+                    when (field) {
+                        "counter" -> Value.VInt(state.counter)
+                        "tag" -> Value.VStr(state.tag)
+                        else -> throw CrenError.NotFound("when")
+                    }
+                },
+            ),
+        )
+    }
+
+    /** Состояние сущности, из которого читает [registerWhenCondition]. */
+    data class ExampleState(val counter: Long, val tag: String)
 
     /** Модификатор рендера: в дождь подменяет текстуру на «мокрую». */
     private fun registerRenderModifier(api: CapeApi) {

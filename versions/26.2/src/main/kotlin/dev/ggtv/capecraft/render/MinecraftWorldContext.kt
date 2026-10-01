@@ -1,5 +1,7 @@
 package dev.ggtv.capecraft.render
 
+import dev.ggtv.capecraft.api.condition.CapeWhenRoots
+import dev.ggtv.kjen.CrenError
 import dev.ggtv.kjen.Value
 import dev.ggtv.koren.WorldContext
 import dev.ggtv.koren.WorldRoot
@@ -45,6 +47,22 @@ import net.minecraft.world.level.Level
  */
 class EntityWorldContext(private val entity: Entity?) : WorldContext {
 
+    override fun subjectEntity(): Any? = entity
+
+    /**
+     * Аддонные корни self-only, и [entity] здесь — в том числе мой собственный
+     * игрок: рендер-миксин отдаёт [EntityWorldContext] каждому игроку в кадре,
+     * включая меня. Поэтому «свой» определяется тождеством с локальным игроком,
+     * а не тем, каким контекстом пришли.
+     *
+     * Чужому игроку — [CrenError.NotFound]: наблюдатель не знает, горит ли
+     * сосед, и условие обязано молча не совпасть, а не показать ему мой плащ.
+     */
+    override fun addonField(root: String, field: String, path: String): Value {
+        if (entity === Minecraft.getInstance().player) return CapeWhenRoots.read(this, root, field, path)
+        throw CrenError.NotFound(path)
+    }
+
     override fun field(root: WorldRoot, field: String, path: String): Value {
         val world = Minecraft.getInstance().level ?: return Value.VStr("unknown")
         return try {
@@ -76,6 +94,12 @@ class EntityWorldContext(private val entity: Entity?) : WorldContext {
  * здесь и чинится, и делать их одним объектом значит сделать баг снова.
  */
 object MinecraftWorldContext : WorldContext {
+
+    /** Аддонные корни self-only: их читает только владелец, и никто другой. */
+    override fun subjectEntity(): Any? = Minecraft.getInstance().player
+
+    override fun addonField(root: String, field: String, path: String): Value =
+        CapeWhenRoots.read(this, root, field, path)
     override fun field(root: WorldRoot, field: String, path: String): Value {
         val world = Minecraft.getInstance().level ?: return Value.VStr("unknown")
         val player = Minecraft.getInstance().player

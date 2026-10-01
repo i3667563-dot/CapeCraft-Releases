@@ -168,8 +168,8 @@ class ConfigSchemaTest {
                 val dict = Value.VDict(listOf(root.segment to Value.VStr(alias)))
                 val predicate = Condition.parse(dict).predicates.single()
 
-                assertEquals(root, predicate.root, "алиас $alias потерял корень")
-                val rendered = render(predicate)
+                assertEquals(root, (predicate as Predicate).root, "алиас $alias потерял корень")
+                val rendered = render(predicate as Predicate)
                 assertEquals(
                     described,
                     rendered,

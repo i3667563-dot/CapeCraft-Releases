@@ -1,12 +1,19 @@
 package dev.ggtv.capecraft.examples
 
 import dev.ggtv.capecraft.api.CapeApi
+import dev.ggtv.capecraft.api.condition.CapeWhenRoots
+import dev.ggtv.capecraft.condition.Condition
+import dev.ggtv.kjen.CrenError
+import dev.ggtv.kjen.Value
+import dev.ggtv.koren.WorldContext
+import dev.ggtv.koren.WorldRoot
 import dev.ggtv.capecraft.api.placeholder.PlaceholderContext
 import dev.ggtv.capecraft.image.Frame
 import dev.ggtv.capecraft.image.ImageDecodeException
 import dev.ggtv.koren.EmptyWorldContext
 import dev.ggtv.koren.KorenConfig
 import net.minecraft.resources.Identifier
+import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 
@@ -126,5 +133,55 @@ class ExampleCapeAddonTest {
 
         val inClear = api.renderModifiers.applyBefore(ctx, ctx.textureId, clearWorld)
         assertEquals(ctx.textureId, inClear)
+    }
+
+    @Test
+    fun `корень when аддона объявлен и читается`() {
+        val api = CapeApi()
+        ExampleCapeAddon().register(api)
+
+        val root = api.whenConditions["example"]!!
+        assertEquals("counter", root.defaultField)
+        assertEquals(listOf("counter", "tag"), root.fields.map { it.name })
+        assertTrue(root.fields.first { it.name == "counter" }.numeric)
+
+        val world = object : WorldContext {
+            override fun field(root: WorldRoot, field: String, path: String): Value =
+                throw CrenError.NotFound(path)
+
+            override fun subjectEntity(): Any? = ExampleCapeAddon.ExampleState(42L, "живой")
+
+            override fun addonField(root: String, field: String, path: String): Value =
+                CapeWhenRoots.read(this, root, field, path)
+        }
+        val condition = Condition.parse(
+            Value.VDict(
+                listOf(
+                    "example.counter" to Value.VStr(">40"),
+                    "example.tag" to Value.VStr("живой"),
+                ),
+            ),
+        )
+        assertTrue(condition.matches(world))
+        assertTrue(condition.hasSelfOnly, "корень аддона self-only по определению")
+    }
+
+    @AfterEach
+    fun forgetWhenRoots() = CapeWhenRoots.clear()
+
+    @Test
+    fun `корень when аддона не читается у чужого контекста`() {
+        val api = CapeApi()
+        ExampleCapeAddon().register(api)
+        val world = object : WorldContext {
+            override fun field(root: WorldRoot, field: String, path: String): Value =
+                throw CrenError.NotFound(path)
+
+            override fun subjectEntity(): Any? = ExampleCapeAddon.ExampleState(42L, "чужой")
+        }
+        val condition = Condition.parse(
+            Value.VDict(listOf("example.counter" to Value.VStr(">40"))),
+        )
+        assertFalse(condition.matches(world))
     }
 }

@@ -57,7 +57,13 @@ data class WireCondition(val predicates: List<WirePredicate>) {
             if (condition == null) return null
             val out = ArrayList<WirePredicate>(condition.predicates.size)
             for (p in condition.predicates) {
-                val root = WireRoot.of(p.root) ?: return null
+                // Аддонный корень на проводе не переводится: [WireRoot]
+                // перечисляет только встроенные корни, а состояние, которое
+                // читает аддон, наблюдатель всё равно не знает. `null` здесь
+                // означает «провайдер целиком локальный» — ровно как с
+                // self-only корнем [dev.ggtv.koren.WorldRoot.STATE].
+                val local = p as? Predicate ?: return null
+                val root = WireRoot.of(local.root) ?: return null
                 val op = WireOp.of(p.op) ?: return null
                 val expected = when (val e = p.expected) {
                     is Expected.Str -> WireExpected.Str(e.s)

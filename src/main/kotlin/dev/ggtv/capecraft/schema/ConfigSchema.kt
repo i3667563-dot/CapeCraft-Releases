@@ -287,6 +287,23 @@ object WhenSchema {
     /** Корни, у которых вообще есть поля. */
     fun roots(): List<WorldRoot> = WorldRoot.entries.filter { fieldsOf(it).isNotEmpty() }
 
+    /**
+     * Все корни `when`, какие сейчас известны: сначала встроенные, потом
+     * аддонные.
+     *
+     * Встроенные впереди не для красоты. Их имена и есть словарь, к которому
+     * приводится любой ключ условия, и порядок решает, чьё описание увидит
+     * человек в подсказке при совпадении. Совпадение и так запрещено
+     * ([ConfigSchema.mergeWhenRoots]), но подсказка не должна зависеть от того,
+     * успел ли [ConfigSchema.setAddonSchemas] отбросить конфликт.
+     */
+    fun rootViews(): List<WhenRootView> =
+        roots().map { BuiltinWhenRoot(it) } + ConfigSchema.addonWhenRoots()
+
+    /** Корень по сегменту из конфига, встроенный или аддонный. */
+    fun rootView(segment: String): WhenRootView? =
+        rootViews().firstOrNull { it.segment == segment }
+
     /** Короткие записи корня; у [WorldRoot.LOCATION] их нет. */
     fun aliasesOf(root: WorldRoot): List<String> = ALIASES[root]?.keys?.toList().orEmpty()
 
@@ -412,6 +429,17 @@ object ConfigSchema {
     private var addonSchemas: List<AddonSchema> = emptyList()
 
     /**
+     * Аддонные корни `when`, уже слитые со встроенными.
+     *
+     * Считается один раз на смену списка аддонов, а не на каждый вопрос
+     * подсказки: сличение обязано ругаться на конфликт (см.
+     * [setAddonSchemas]), а вопросы из [dev.ggtv.capecraft.ide.CrenAnalyzer]
+     * идут на каждый символ и лог не должны сыпать по разу на символ.
+     */
+    @Volatile
+    private var addonWhenRootViews: List<AddonWhenRootView> = emptyList()
+
+    /**
      * Словарь типов провайдеров известен полностью?
      *
      * Отличать «папка `mods` нашлась и в ней ни одного аддона» от «папки `mods`
@@ -438,6 +466,7 @@ object ConfigSchema {
     fun setAddonSchemas(schemas: List<AddonSchema>, known: Boolean = addonVocabularyKnown) {
         addonSchemas = schemas.toList()
         addonVocabularyKnown = known
+        addonWhenRootViews = mergeWhenRoots(addonSchemas)
     }
 
     /** Что сейчас известно про аддонов. */
@@ -449,7 +478,56 @@ object ConfigSchema {
     /** Забыть всех аддонов — для тестов и для смены папки `mods`. */
     fun clearAddonSchemas() {
         addonSchemas = emptyList()
+        addonWhenRootViews = emptyList()
         addonVocabularyKnown = false
+    }
+
+    /**
+     * Аддонные корни `when`, какие сейчас известны редактору.
+     *
+     * Пусто, если папка `mods` не найдена: тогда корня может объявить аддон,
+     * чьего дескриптора мы не видели, и называть `fire` опечаткой нечем.
+     */
+    fun addonWhenRoots(): List<AddonWhenRootView> = addonWhenRootViews
+
+    /**
+     * Слить аддонные корни `when` в список для показа, разрулив конфликты.
+     *
+     * Встроенный корень всегда побеждает: разбор условия сперва смотрит в
+     * [dev.ggtv.koren.WorldRoot], и аддон с именем `biome` не смог бы
+     * зарегистрировать свой корень в рантайме вовсе — мод упал бы на
+     * `register`. Дескриптор же об этом не знает, поэтому конфликт
+     * отбрасывается молча, но с записью в лог: иначе аддон, выбравший занятое
+     * имя, выглядел бы как аддон, который просто ничего не объявил.
+     *
+     * Второй аддон с тем же именем отбрасывается по той же причине и тоже
+     * попадает в лог: порядок папки `mods` не должен решать, чей корень
+     * работает.
+     */
+    private fun mergeWhenRoots(schemas: List<AddonSchema>): List<AddonWhenRootView> {
+        if (schemas.isEmpty()) return emptyList()
+        val out = LinkedHashMap<String, AddonWhenRootView>()
+        for (schema in schemas) {
+            for (root in schema.conditions) {
+                if (WorldRoot.bySegment(root.id) != null) {
+                    LspLog.warn(
+                        "${schema.origin}: корень when «${root.id}» совпадает со встроенным " +
+                            "и не показан; свой корень не переопределяет встроенный",
+                    )
+                    continue
+                }
+                val existing = out[root.id]
+                if (existing != null) {
+                    LspLog.warn(
+                        "${schema.origin}: корень when «${root.id}» уже объявлен аддоном " +
+                            "${existing.origin} и не показан",
+                    )
+                    continue
+                }
+                out[root.id] = AddonWhenRootView(root, schema.id, schema.origin)
+            }
+        }
+        return out.values.toList()
     }
 
     /** Аддон по `type` провайдера, или `null`, если тип не аддонный. */

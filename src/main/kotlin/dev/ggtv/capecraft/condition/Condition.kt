@@ -1,19 +1,23 @@
 package dev.ggtv.capecraft.condition
 
+import dev.ggtv.capecraft.api.condition.CapeWhenRoots
+import dev.ggtv.capecraft.api.condition.UNKNOWN as CAPE_WHEN_UNKNOWN
 import dev.ggtv.kjen.CrenError
 import dev.ggtv.kjen.Value
 import dev.ggtv.koren.WorldContext
 import dev.ggtv.koren.WorldRoot
 
 /**
- * Условие выбора провайдера: все [Predicate] должны выполниться (AND).
+ * Условие выбора провайдера: все [WhenCheck] должны выполниться (AND).
  * Разбирается из блока `when { ... }` в `.kn`.
  *
  * Предикат = «поле мира <оператор> значение». Поле — живой корень мира
  * ([WorldRoot]) с полем через точку (`biome.temperature`, `weather.condition`,
  * `time.period`, `dimension.type`, `location.y`) или без точки — тогда
  * берётся дефолтное поле корня (biome→id, weather→condition, time→period,
- * dimension→type).
+ * dimension→type). Корни, объявленные аддоном (`fire.burning`), разбираются
+ * так же, но приходят из [CapeWhenRoots], а не из koren: свой корень в
+ * [WorldRoot] добавить нельзя, это закрытый перечень вендоренной библиотеки.
  *
  * Значение — строка или число. Операторы в строке:
  * - `">63"`, `">=63"`, `"<100"`, `"<=100"` — числовое сравнение;
@@ -22,10 +26,17 @@ import dev.ggtv.koren.WorldRoot
  * - без оператора — равенство (строка = строка, число = число),
  *   числовая строка и число одинаковы.
  */
-data class Condition(val predicates: List<Predicate>) {
+data class Condition(val predicates: List<WhenCheck>) {
 
     /** Выполняется ли условие на живом мире (AND по всем предикатам). */
-    fun matches(world: WorldContext): Boolean = predicates.all { it.matches(world) }
+    fun matches(world: WorldContext): Boolean = predicates.all { p ->
+        val actual = try {
+            p.read(world)
+        } catch (e: CrenError.NotFound) {
+            return@all false // поле мира недоступно — условие не выполнилось
+        }
+        p.op.apply(actual, p.expected)
+    }
 
     /**
      * Есть ли в условии хотя бы один self-only предикат.
@@ -35,8 +46,11 @@ data class Condition(val predicates: List<Predicate>) {
      * сработало. Смешивать в одном провайдере публичные и self-only условия
      * бессмысленно — половина всё равно не уедет, поэтому такое срабатывает
      * как пометка «локальный».
+     *
+     * Аддонные корни self-only по определению: их читает только владелец
+     * (см. [AddonPredicate.isSelfOnly]).
      */
-    val hasSelfOnly: Boolean get() = predicates.any { it.root in SELF_ONLY_ROOTS }
+    val hasSelfOnly: Boolean get() = predicates.any { it.isSelfOnly }
 
     companion object {
         /** Поле по умолчанию для корня без точки (`when { weather: "rain" }`). */
@@ -169,8 +183,12 @@ data class Condition(val predicates: List<Predicate>) {
          * Принимается в любом поле со строковыми значениями: для брони это
          * способ поймать нестандартный слот, для остальных полей — просто
          * «мир не отвечает», и условие честно не срабатывает, а не падает.
+         *
+         * Объявлено в API-пакете ([CAPE_WHEN_UNKNOWN]): читатель аддонного
+         * корня обязан отвечать тем же словом, и тянуть сюда `Condition`
+         * нельзя — публичный API от него не зависит.
          */
-        const val UNKNOWN = "unknown"
+        const val UNKNOWN = CAPE_WHEN_UNKNOWN
 
         /** Значения поля; пустой список — поле не ограничено. */
         fun valuesOf(root: WorldRoot, field: String): List<String> =
@@ -181,12 +199,16 @@ data class Condition(val predicates: List<Predicate>) {
             valuesOf(root, field).isNotEmpty()
 
         /**
-         * Корни, которые не уезжают по сети.
+         * Встроенные корни, которые не уезжают по сети.
          *
          * `state` описывает то, чего про другого игрока не узнать: в воде ли
          * он, крадётся ли, на земле ли. Владелец считает это про себя, а
          * чужой клиент про такого игрока не знает ничего — поэтому условие с
          * таким корнем делает провайдера локальным целиком.
+         *
+         * Аддонных корней здесь нет и быть не может: они приходят из
+         * [CapeWhenRoots] и self-only по определению (см.
+         * [dev.ggtv.capecraft.api.condition.CapeWhenRoot.selfOnly]).
          *
          * Само свойство живёт здесь, а не в koren: [WorldRoot] — вендоренный
          * формат, и продуктовое решение о синхронизации в него тащить нельзя.
@@ -196,19 +218,29 @@ data class Condition(val predicates: List<Predicate>) {
         /** Что отдаёт только владелец, а что видят все. */
         fun isSelfOnlyRoot(root: WorldRoot): Boolean = root in SELF_ONLY_ROOTS
 
+        /** Сегменты всех корней, известных разбору: встроенные и аддонные. */
+        fun knownSegments(): List<String> =
+            WorldRoot.entries.map { it.segment } + CapeWhenRoots.registry.names()
+
         /** Разобрать блок `when { ... }` из словаря. Пустой словарь — пустое условие. */
         fun parse(dict: Value.VDict): Condition {
             val predicates = dict.pairs.map { (key, value) -> parsePredicate(key, value) }
             return Condition(predicates)
         }
 
-        private fun parsePredicate(key: String, value: Value): Predicate {
+        /**
+         * Разобрать один предикат.
+         *
+         * Сначала ищется корень среди встроенных и только потом — среди
+         * аддонных: имя `biome` не должно перестать работать оттого, что
+         * какой-то аддон захотел назваться так же (такая регистрация
+         * отвергается, но полагаться на это в разборе не надо).
+         */
+        private fun parsePredicate(key: String, value: Value): WhenCheck {
             val parts = key.split('.').filter { it.isNotBlank() }
-            val root = WorldRoot.bySegment(parts.firstOrNull().orEmpty())
-                ?: throw IllegalArgumentException(
-                    "условие when: неизвестный корень мира «${parts.firstOrNull()}» " +
-                        "(доступны: ${WorldRoot.entries.joinToString { it.segment }})",
-                )
+            val segment = parts.firstOrNull().orEmpty()
+            val root = WorldRoot.bySegment(segment)
+                ?: return parseAddonPredicate(key, parts, segment, value)
             val field = parts.getOrNull(1) ?: DEFAULT_FIELDS[root]
                 ?: throw IllegalArgumentException(
                     "условие when: для «${root.segment}» нужно указать поле — " +
@@ -228,8 +260,52 @@ data class Condition(val predicates: List<Predicate>) {
                 }
             }
             val (op, expected) = parseValueFor("when", value)
-            checkValue(root, field, op, expected)
+            checkValue(root.segment, field, isNumeric(root, field), valuesOf(root, field), op, expected)
             return Predicate(root, field, op, expected)
+        }
+
+        /**
+         * Разобрать предикат аддонного корня: `fire.burning: "true"`.
+         *
+         * Проверки те же, что у встроенного корня, но по данным аддона
+         * ([dev.ggtv.capecraft.api.condition.CapeWhenRoot]): поле должно быть
+         * объявлено, а значение — из его списка. Иначе `fire.burnning: "true"`
+         * разобрался бы и никогда не совпал бы — то самое молчание, из-за
+         * которого [checkValue] и существует.
+         *
+         * Синонимов у аддонного корня нет: короткая запись без поля читается
+         * через `defaultField`, а придумывать за корнем словарь алиасов ради
+         * одного значения незачем — аддон объявит это полем.
+         */
+        private fun parseAddonPredicate(
+            key: String,
+            parts: List<String>,
+            segment: String,
+            value: Value,
+        ): AddonPredicate {
+            val spec = CapeWhenRoots.registry[segment]
+                ?: throw IllegalArgumentException(
+                    "условие when: неизвестный корень мира «$segment» " +
+                        "(доступны: ${knownSegments().joinToString()})",
+                )
+            if (parts.size > 2) {
+                throw IllegalArgumentException(
+                    "условие when: слишком глубокий путь «$key» (максимум «$segment.поле»)",
+                )
+            }
+            val field = parts.getOrNull(1) ?: spec.defaultField
+                ?: throw IllegalArgumentException(
+                    "условие when: для «$segment» нужно указать поле — " +
+                        "доступны: ${spec.fields.joinToString { it.name }}",
+                )
+            val specField = spec.fields.firstOrNull { it.name == field }
+                ?: throw IllegalArgumentException(
+                    "условие when: у корня «$segment» нет поля «$field». " +
+                        "Доступны: ${spec.fields.joinToString { it.name }}",
+                )
+            val (op, expected) = parseValueFor("when", value)
+            checkValue(segment, field, specField.numeric, specField.values, op, expected)
+            return AddonPredicate(segment, field, op, expected)
         }
 
         /**
@@ -244,22 +320,32 @@ data class Condition(val predicates: List<Predicate>) {
          * `dimension.id` открыты (реестр модов), числа открыты по построению, а
          * [UNKNOWN] принимается везде: это ответ мира «не прочитано», и
          * `armor.chest: "unknown"` — законный способ поймать нестандартный слот.
+         *
+         * Параметры строкой, а не [WorldRoot]: правила должны быть одни и те же
+         * для встроенного и аддонного корня, а не «как для корня, так и
+         * отдельно почти то же» для аддонного.
          */
-        private fun checkValue(root: WorldRoot, field: String, op: Op, expected: Expected) {
+        private fun checkValue(
+            segment: String,
+            field: String,
+            numeric: Boolean,
+            allowed: List<String>,
+            op: Op,
+            expected: Expected,
+        ) {
             // Числовое поле со строкой: `health.current: "низко"`. Строка не
             // число, и `parseValueFor` оставил её строкой — сравнивать её
             // тут не с чем, условие не сработает никогда.
-            if (isNumeric(root, field) && expected is Expected.Str) {
+            if (numeric && expected is Expected.Str) {
                 throw IllegalArgumentException(
-                    "условие when: «${root.segment}.$field» — числовое поле, " +
+                    "условие when: «$segment.$field» — числовое поле, " +
                         "а значение «${expected.s}» не число. Пишите " +
                         "\">20\", \"<=20\" или \"10..20\"",
                 )
             }
-            val allowed = valuesOf(root, field)
             if (allowed.isEmpty()) return
             val text = (expected as? Expected.Str)?.s ?: throw IllegalArgumentException(
-                "условие when: «${root.segment}.$field» — поле со списком значений, " +
+                "условие when: «$segment.$field» — поле со списком значений, " +
                     "а здесь число или диапазон. Допустимо: ${allowed.joinToString(", ")}",
             )
             // `!` сравнивает строки, а `>`/`<`/`..` — числа. Оператор над
@@ -267,14 +353,14 @@ data class Condition(val predicates: List<Predicate>) {
             // формата, а не значения.
             if (op != Op.Eq && op != Op.NotEq) {
                 throw IllegalArgumentException(
-                    "условие when: «${root.segment}.$field» — поле со списком значений, " +
+                    "условие when: «$segment.$field» — поле со списком значений, " +
                         "оператор «${op.symbol()}» к нему неприменим. " +
                         "Допустимо: ${allowed.joinToString(", ")}",
                 )
             }
             if (text != UNKNOWN && text !in allowed) {
                 throw IllegalArgumentException(
-                    "условие when: «${text}» не подходит для «${root.segment}.$field». " +
+                    "условие when: «$text» не подходит для «$segment.$field». " +
                         "Допустимо: ${allowed.joinToString(", ")}" +
                         " (или $UNKNOWN, если поле не удалось прочитать)",
                 )
@@ -371,16 +457,6 @@ data class Condition(val predicates: List<Predicate>) {
     }
 }
 
-/** Проверка выполнения одного предиката. */
-private fun Predicate.matches(world: WorldContext): Boolean {
-    val actual = try {
-        world.field(root, field, "$root.$field")
-    } catch (e: CrenError.NotFound) {
-        return false // поле мира недоступно — условие не выполнилось
-    }
-    return op.apply(actual, expected)
-}
-
 /**
  * Разбор одного предиката: что в мире на самом деле против чего ждали.
  *
@@ -402,20 +478,21 @@ data class PredicateReport(
  * Разбор [Condition] по предикатам — для диагностики выбора провайдера.
  *
  * Значения берутся тем же [WorldContext] и тем же правилом «поле недоступно —
- * не подошло», что и в [matches]. Отдельный обход нужен именно ради
+ * не подошло», что и в `matches`. Отдельный обход нужен именно ради
  * отчёта: сам `matches` отдаёт один `Boolean` на всё условие, а разбирать
  * надо, **какая** из четырёх проверок не сошлась.
  */
 fun Condition.explain(world: WorldContext): List<PredicateReport> = predicates.map { p ->
+    val path = "${p.segment}.${p.field}"
     val actual = try {
-        world.field(p.root, p.field, "${p.root.segment}.${p.field}")
+        p.read(world)
     } catch (_: CrenError.NotFound) {
-        // Ровно как в `Predicate.matches`: неизвестное поле = «не подошло».
+        // Ровно как в `matches`: неизвестное поле = «не подошло».
         // Только здесь это ещё и видно в отчёте, а не теряется внутри AND.
-        Value.VStr("unknown")
+        Value.VStr(Condition.UNKNOWN)
     }
     PredicateReport(
-        path = "${p.root.segment}.${p.field}",
+        path = path,
         actual = renderValue(actual),
         expected = "${p.op.symbol()} ${renderExpected(p.expected)}",
         ok = p.op.apply(actual, p.expected),
@@ -496,10 +573,91 @@ sealed interface Op {
 /** Предикат: поле мира + операция + ожидаемое значение. */
 data class Predicate(
     val root: WorldRoot,
-    val field: String,
-    val op: Op,
-    val expected: Expected,
-)
+    override val field: String,
+    override val op: Op,
+    override val expected: Expected,
+) : WhenCheck {
+
+    override val segment: String get() = root.segment
+
+    override val isSelfOnly: Boolean get() = Condition.isSelfOnlyRoot(root)
+
+    override fun read(world: WorldContext): Value = world.field(root, field, "$segment.$field")
+}
+
+/**
+ * Предикат аддонного корня: `fire.burning`, `myaddon.level`.
+ *
+ * Отдельный тип, а не [Predicate] с корнем-строкой: [Predicate.root] — это
+ * [WorldRoot], закрытый перечень koren, и подставить туда «fire» нельзя. Всё
+ * остальное — оператор, ожидаемое значение, чтение из мира — у них общее,
+ * поэтому оно вынесено в [WhenCheck].
+ *
+ * ## Почему self-only всегда
+ *
+ * Наблюдатель не знает состояния чужого игрока: он видит плащ и клетки
+ * инвентаря, а не «горит ли он». Если такое условие поехало бы по сети,
+ * наблюдатель посчитал бы его против СВОЕГО игрока и показал плащ не тому:
+ * я горю, а он увидит мой «горящий» плащ, стоя в пустыне. Наблюдателю это
+ * ничего не говорит, а игроку — врёт.
+ *
+ * Отсюда и второе следствие: [dev.ggtv.capecraft.sync.WireCondition.from]
+ * возвращает на таком условии `null`, поэтому провайдер целиком выпадает из
+ * объявления и остаётся локальным — так же, как с [WorldRoot.STATE].
+ */
+data class AddonPredicate(
+    val root: String,
+    override val field: String,
+    override val op: Op,
+    override val expected: Expected,
+) : WhenCheck {
+
+    override val segment: String get() = root
+
+    override val isSelfOnly: Boolean get() = true
+
+    /**
+     * Значение поля — через сам контекст, а не напрямую в реестр.
+     *
+     * Именно контекст решает, наблюдаем ли корень: мой мир читает, чужой
+     * игрок и сервер отдают `NotFound`, и условие молча не совпадает. Спросить
+     * реестр напрямую — значит убрать этот запрет и начать показывать мой
+     * «горящий» плащ каждому, кто стоит рядом со мной.
+     */
+    override fun read(world: WorldContext): Value =
+        world.addonField(root, field, "$segment.$field")
+}
+
+/**
+ * Проверка одного предиката.
+ *
+ * Общая часть [Predicate] и [AddonPredicate]: отличаются они только тем, откуда
+ * берётся значение поля, а не тем, как оно сравнивается с ожиданием.
+ */
+sealed interface WhenCheck {
+    /** Поле корня: `temperature`, `burning`. */
+    val field: String
+
+    /** Операция сравнения, разобранная из строки значения. */
+    val op: Op
+
+    /** Ожидаемое значение. */
+    val expected: Expected
+
+    /** Корневой сегмент, как его пишут в конфиге: `biome`, `fire`. */
+    val segment: String
+
+    /** Читает ли условие только владелец плаща. */
+    val isSelfOnly: Boolean
+
+    /**
+     * Значение поля на живом мире.
+     *
+     * @throws dev.ggtv.kjen.CrenError.NotFound прочитать нечем: корня нет,
+     * поле не поддерживается или контекст не тот (чужой игрок, сервер).
+     */
+    fun read(world: WorldContext): Value
+}
 
 /** Ожидаемое значение предиката после разбора строки. */
 sealed interface Expected {

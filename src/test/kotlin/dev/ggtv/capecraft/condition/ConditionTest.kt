@@ -16,7 +16,7 @@ class ConditionParseTest {
     fun `short field uses default field per root`() {
         val c = Condition.parse(dictOf("biome" to str("minecraft:snowy_plains")))
         assertEquals(1, c.predicates.size)
-        assertEquals(WorldRoot.BIOME, c.predicates[0].root)
+        assertEquals(WorldRoot.BIOME, (c.predicates[0] as Predicate).root)
         assertEquals("id", c.predicates[0].field)
     }
 
@@ -24,7 +24,7 @@ class ConditionParseTest {
     fun `full path picks root and field`() {
         val c = Condition.parse(dictOf("weather.condition" to str("rain")))
         val p = c.predicates.single()
-        assertEquals(WorldRoot.WEATHER, p.root)
+        assertEquals(WorldRoot.WEATHER, (p as Predicate).root)
         assertEquals("condition", p.field)
     }
 
@@ -95,7 +95,7 @@ class ConditionParseTest {
     @Test
     fun `biome alias snowy maps to snow precipitation`() {
         val p = Condition.parse(dictOf("biome" to str("snowy"))).predicates.single()
-        assertEquals(WorldRoot.BIOME, p.root)
+        assertEquals(WorldRoot.BIOME, (p as Predicate).root)
         assertEquals("precipitation", p.field)
         assertEquals(Expected.Str("snow"), p.expected)
     }
@@ -110,7 +110,7 @@ class ConditionParseTest {
     @Test
     fun `dimension alias nether maps to type`() {
         val p = Condition.parse(dictOf("dimension" to str("nether"))).predicates.single()
-        assertEquals(WorldRoot.DIMENSION, p.root)
+        assertEquals(WorldRoot.DIMENSION, (p as Predicate).root)
         assertEquals("type", p.field)
         assertEquals(Expected.Str("nether"), p.expected)
     }
@@ -118,7 +118,7 @@ class ConditionParseTest {
     @Test
     fun `time alias night maps to period`() {
         val p = Condition.parse(dictOf("time" to str("night"))).predicates.single()
-        assertEquals(WorldRoot.TIME, p.root)
+        assertEquals(WorldRoot.TIME, (p as Predicate).root)
         assertEquals("period", p.field)
         assertEquals(Expected.Str("night"), p.expected)
     }

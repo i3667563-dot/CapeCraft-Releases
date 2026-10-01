@@ -1,0 +1,17 @@
+addon {
+    id = "capecraft-fire"
+    version = "1.0.0"
+    apiVersion = 2
+
+    conditions = [
+        {
+            id = "fire",
+            doc = "Горение игрока. Читает только владелец плаща.",
+            defaultField = "burning",
+            fields = [
+                { name = "burning", doc = "Горит ли игрок.", values = ["true", "false"] },
+                { name = "ticks", doc = "Сколько тиков осталось гореть, число. 0 — не горит.", numeric = true }
+            ]
+        }
+    ]
+}
