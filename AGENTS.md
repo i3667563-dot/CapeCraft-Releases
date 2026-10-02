@@ -581,12 +581,13 @@ Workflow (`.github/workflows/ci.yml`) на каждый `mc` делает
 
 `HttpFetcher` читает тело через `ofInputStream()` + `readNBytes(limit + 1)`, а не
 `ofByteArray()`. Причина та же, что и в `SyncProtocol`: URL приходит из конфига,
-`ofByteArray()` на сервере, отдавшем 4 ГиБ, сводит мод к OOM, а `readNBytes`
-аллоцирует не больше `limit + 1` байт даже для бесконечного потока (chunked без
-`Content-Length`). Потолки — `HttpFetcher.MAX_CAPE_BYTES` (8 МиБ, равен
-`SyncProtocol.MAX_IMAGE_BYTES`; равенство проверяется тестом, а не импортом,
-потому что `sync` уже зависит от `provider` и обратный импорт закрыл бы цикл
-пакетов) и `MAX_JSON_BYTES` (1 МиБ).
+  `ofByteArray()` на сервере, отдавшем 4 ГиБ, сводит мод к OOM, а `readNBytes`
+  аллоцирует не больше `limit + 1` байт даже для бесконечного потока (chunked без
+  `Content-Length`). Потолки — `HttpFetcher.MAX_CAPE_BYTES` (20 МиБ, вровень с
+  `MAX_PNG_BYTES` сайта SkinBase; от протокола Sync сознательно отвязан с 1.3.1 —
+  сайт выкладывает 512p-стеки больше 8 МиБ, а sync — отдельный транспорт между
+  игроками) и `MAX_JSON_BYTES` (1 МиБ). Память после фетча сторожат декодеры
+  (`MAX_PIXELS` в PNG/GIF/WebP) и `MemoryManager`.
 
 `Content-Length` сознательно **не** используется как решение: заголовок может
 соврать, а `java.net.http` и так обрезает тело по объявленной длине. Защита

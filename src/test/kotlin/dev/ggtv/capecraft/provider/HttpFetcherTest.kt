@@ -78,10 +78,11 @@ class HttpFetcherTest {
     }
 
     @Test
-    fun `потолок капки совпадает с протокольным`() {
-        // Число нельзя расходиться с Sync: капка, не влезшая в Sync, не должна
-        // занимать память и при загрузке.
-        assertEquals(SyncProtocol.MAX_IMAGE_BYTES, HttpFetcher.MAX_CAPE_BYTES)
+    fun `потолок капки шире протокольного, но не меньше его`() {
+        // HTTP-потолок (20 МБ) отвязан от протокола Sync (8 МБ): сайт выкладывает
+        // плащи до 20 МБ, а Sync — отдельный транспорт между игроками. HTTP обязан
+        // принимать всё, что способен отдать сайт, поэтому он >= протокольного.
+        assertTrue(SyncProtocol.MAX_IMAGE_BYTES <= HttpFetcher.MAX_CAPE_BYTES)
         assertTrue(HttpFetcher.MAX_JSON_BYTES < HttpFetcher.MAX_CAPE_BYTES)
     }
 
